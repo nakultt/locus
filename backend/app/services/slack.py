@@ -12,8 +12,9 @@ _slack_config: dict = {}
 
 class SendMessageInput(BaseModel):
     """Input schema for sending a Slack message."""
-    channel: str = Field(description="Channel name (with or without #) or channel ID")
-    message: str = Field(description="Message content to send")
+    channel: str = Field(default="general", description="Channel name (with or without #) or channel ID")
+    message: str = Field(default="Hello from Locus!", description="Message content to send")
+    text: str = Field(default="", description="Alternative message field (alias for message)")
 
 
 class PostUpdateInput(BaseModel):
@@ -24,12 +25,16 @@ class PostUpdateInput(BaseModel):
 
 
 @tool("slack_send_message", args_schema=SendMessageInput)
-def slack_send_message(channel: str, message: str) -> str:
+def slack_send_message(channel: str = "general", message: str = "Hello from Locus!", text: str = "") -> str:
     """
     Send a message to a Slack channel.
     
     Use this when the user wants to post a message, send an update, or communicate on Slack.
     """
+    # Use text if message is default/empty
+    if text and message == "Hello from Locus!":
+        message = text
+    
     try:
         if not _slack_config.get("bot_token"):
             return "Error: Slack is not configured. Please connect your Slack workspace first."
