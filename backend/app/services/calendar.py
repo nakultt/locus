@@ -6,7 +6,7 @@ LangChain tools for calendar management
 from typing import Any
 from datetime import datetime, timedelta
 from langchain_core.tools import BaseTool, tool
-from pydantic import BaseModel, Field
+from langchain_core.pydantic_v1 import BaseModel, Field
 
 # Store credentials at module level for tool access
 _calendar_config: dict = {}
