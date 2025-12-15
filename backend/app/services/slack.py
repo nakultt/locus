@@ -4,7 +4,7 @@ LangChain tools for Slack messaging
 """
 
 from langchain_core.tools import BaseTool, tool
-from pydantic import BaseModel, Field
+from langchain_core.pydantic_v1 import BaseModel, Field
 
 # Store credentials at module level for tool access
 _slack_config: dict = {}
