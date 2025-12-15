@@ -1,0 +1,36 @@
+# Conflux Backend Dependencies
+
+# Web Framework
+fastapi[all]==0.104.1
+uvicorn[standard]==0.24.0
+
+# Database
+sqlalchemy==2.0.23
+psycopg2-binary==2.9.9
+alembic==1.13.0
+
+# Security
+passlib[bcrypt]==1.7.4
+cryptography==41.0.7
+python-jose[cryptography]==3.3.0
+
+# Environment
+python-dotenv==1.0.0
+
+# LangChain Core
+langchain==0.1.0
+langchain-google-genai==0.0.6
+langchain-community==0.0.10
+langgraph==0.0.20
+
+# Integration SDKs
+atlassian-python-api==3.41.4
+google-api-python-client==2.111.0
+google-auth-httplib2==0.2.0
+google-auth-oauthlib==1.2.0
+slack-sdk==3.26.1
+notion-client==2.2.1
+
+# HTTP Client
+requests==2.31.0
+httpx==0.25.2
