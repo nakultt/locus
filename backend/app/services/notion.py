@@ -36,11 +36,17 @@ def notion_search(query: str) -> str:
             
             notion = Client(auth=_notion_config["integration_token"])
             
-            results = notion.search(
+            response = notion.search(
                 query=query,
                 filter={"property": "object", "value": "page"},
                 page_size=10
-            ).get("results", [])
+            )
+            
+            # Handle response which may be dict or have results attribute
+            if isinstance(response, dict):
+                results = response.get("results", [])
+            else:
+                results = getattr(response, "results", [])
             
             if not results:
                 return f"No Notion pages found matching: {query}"

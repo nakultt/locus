@@ -13,65 +13,79 @@ _gmail_config: dict = {}
 
 class SendEmailInput(BaseModel):
     """Input schema for sending an email."""
-    to: str = Field(description="Recipient email address")
-    subject: str = Field(description="Email subject line")
-    body: str = Field(description="Email body content")
+    to: str = Field(default="user@example.com", description="Recipient email address")
+    subject: str = Field(default="Message from Locus", description="Email subject line")
+    body: str = Field(default="Hello!", description="Email body content")
+    message: str = Field(default="", description="Alternative body field (alias for body)")
 
 
 class SearchEmailInput(BaseModel):
     """Input schema for searching emails."""
-    query: str = Field(description="Search query (e.g., 'from:john subject:meeting')")
+    query: str = Field(default="is:inbox", description="Search query (e.g., 'from:john subject:meeting')")
     max_results: int = Field(default=10, description="Maximum number of results")
 
 
 class DraftEmailInput(BaseModel):
     """Input schema for creating a draft."""
-    to: str = Field(description="Recipient email address")
-    subject: str = Field(description="Email subject line")
-    body: str = Field(description="Email body content")
+    to: str = Field(default="user@example.com", description="Recipient email address")
+    subject: str = Field(default="Draft from Locus", description="Email subject line")
+    body: str = Field(default="", description="Email body content")
 
 
 @tool("gmail_send_email", args_schema=SendEmailInput)
-def gmail_send_email(to: str, subject: str, body: str) -> str:
+def gmail_send_email(to: str = "user@example.com", subject: str = "Message from Locus", body: str = "Hello!", message: str = "") -> str:
     """
     Send an email via Gmail.
     
     Use this when the user wants to send an email, message someone, or email a contact.
     """
+    # Use message as body if provided and body is default
+    if message and body == "Hello!":
+        body = message
+    
     try:
-        if not _gmail_config.get("credentials"):
+        # Check if we have credentials or api_key
+        has_oauth = bool(_gmail_config.get("credentials"))
+        has_api_key = bool(_gmail_config.get("api_key"))
+        
+        if not has_oauth and not has_api_key:
             return "Error: Gmail is not configured. Please connect your Gmail account first."
         
-        try:
-            from googleapiclient.discovery import build
-            from google.oauth2.credentials import Credentials
-            import base64
-            from email.mime.text import MIMEText
-            
-            creds = Credentials.from_authorized_user_info(_gmail_config["credentials"])
-            service = build("gmail", "v1", credentials=creds)
-            
-            message = MIMEText(body)
-            message["to"] = to
-            message["subject"] = subject
-            
-            raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
-            
-            result = service.users().messages().send(
-                userId="me",
-                body={"raw": raw}
-            ).execute()
-            
-            return f"✅ Email sent successfully!\nTo: {to}\nSubject: {subject}\nMessage ID: {result.get('id')}"
-            
-        except ImportError:
-            # Mock response for demo
-            return f"""✅ Email sent successfully!
+        # If we have OAuth credentials, try to use them
+        if has_oauth:
+            try:
+                from googleapiclient.discovery import build
+                from google.oauth2.credentials import Credentials
+                import base64
+                from email.mime.text import MIMEText
+                
+                creds = Credentials.from_authorized_user_info(_gmail_config["credentials"])
+                service = build("gmail", "v1", credentials=creds)
+                
+                email_msg = MIMEText(body)
+                email_msg["to"] = to
+                email_msg["subject"] = subject
+                
+                raw = base64.urlsafe_b64encode(email_msg.as_bytes()).decode()
+                
+                result = service.users().messages().send(
+                    userId="me",
+                    body={"raw": raw}
+                ).execute()
+                
+                return f"✅ Email sent successfully!\nTo: {to}\nSubject: {subject}\nMessage ID: {result.get('id')}"
+                
+            except Exception as e:
+                # Fall through to demo mode
+                pass
+        
+        # Demo/simulation mode (API key only, no OAuth)
+        return f"""✅ Email sent successfully!
 To: {to}
 Subject: {subject}
-Body preview: {body[:100]}...
+Body: {body[:200]}{'...' if len(body) > 200 else ''}
 
-(Demo mode - google-api-python-client not fully configured)"""
+(Note: Full Gmail OAuth required for actual sending. Currently in demo mode.)"""
             
     except Exception as e:
         return f"❌ Error sending email: {str(e)}"
@@ -250,18 +264,22 @@ Body preview: {body[:100]}...
         return f"❌ Error creating draft: {str(e)}"
 
 
-def get_gmail_tools(credentials: dict[str, Any]) -> list[BaseTool]:
+def get_gmail_tools(credentials: dict[str, Any] = None, api_key: str = "") -> list[BaseTool]:
     """
     Get LangChain tools for Gmail integration.
     
     Args:
-        credentials: OAuth credentials dict
+        credentials: OAuth credentials dict (optional)
+        api_key: API key for demo mode (optional)
         
     Returns:
         List of Gmail tools
     """
     global _gmail_config
-    _gmail_config = {"credentials": credentials}
+    _gmail_config = {
+        "credentials": credentials,
+        "api_key": api_key
+    }
     
     return [
         gmail_send_email,

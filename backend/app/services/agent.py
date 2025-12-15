@@ -30,7 +30,7 @@ if not GOOGLE_API_KEY:
 llm = None
 if GOOGLE_API_KEY:
     llm = ChatGoogleGenerativeAI(
-        model="gemini-1.5-flash",
+        model="gemini-2.5-flash",
         google_api_key=GOOGLE_API_KEY,
         temperature=0.1,
         convert_system_message_to_human=True
@@ -81,7 +81,8 @@ def build_tools(integration_configs: dict[str, dict]) -> list[BaseTool]:
     if "gmail" in integration_configs:
         config = integration_configs["gmail"]
         gmail_tools = get_gmail_tools(
-            credentials=config.get("credentials", {})
+            credentials=config.get("credentials", {}),
+            api_key=config.get("api_key", "")
         )
         tools.extend(gmail_tools)
     
@@ -147,14 +148,18 @@ async def process_chat_message(
         )
     
     if not llm:
-        # Fallback: simple keyword matching without LLM
-        return await process_without_llm(message, tools, integration_configs)
+        return ChatResponse(
+            message="LLM not configured. Please set GOOGLE_API_KEY.",
+            actions_taken=[],
+            raw_response=None
+        )
     
-    # Create and run agent
+    # Create and run agent SYNCHRONOUSLY to avoid coroutine issues
     agent = create_agent_executor(tools)
     
     try:
-        result = await agent.ainvoke({"input": message})
+        # Use sync invoke instead of ainvoke to avoid StopIteration errors
+        result = agent.invoke({"input": message})
         
         output = result.get("output", "")
         intermediate_steps = result.get("intermediate_steps", [])
