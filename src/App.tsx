@@ -4,6 +4,8 @@ import Chatbot from "@/pages/chatbot";
 import Settings from "@/pages/settings";
 import IntegrationsSection from "@/ui/integrations/integration-components";
 import { AppLayout } from "@/ui/app-layout";
+import { Component as LoginPage } from "@/ui/auth/login";
+import SignupPage from "@/pages/signup";
 
 // Wrapper component for pages that need the app layout
 const WithLayout = ({ children }: { children: React.ReactNode }) => (
@@ -15,6 +17,10 @@ export default function App() {
     <Routes>
       {/* Landing page - no sidebar */}
       <Route path="/" element={<Component />} />
+
+      {/* Auth pages - no sidebar */}
+      <Route path="/login" element={<LoginPage />} />
+      <Route path="/signup" element={<SignupPage />} />
 
       {/* Pages with sidebar layout */}
       <Route

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { Lightbulb, Mic, Paperclip, Send } from "lucide-react";
+import { Lightbulb, Paperclip, Send } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 
 interface Message {
@@ -309,14 +309,6 @@ const ChatInterface = () => {
                   </div>
                 </div>
 
-                <button
-                  className="p-2 rounded-full hover:bg-accent transition"
-                  title="Voice input"
-                  type="button"
-                  tabIndex={-1}
-                >
-                  <Mic size={20} className="text-muted-foreground" />
-                </button>
                 <button
                   onClick={sendMessage}
                   disabled={!inputValue.trim() || isLoading}

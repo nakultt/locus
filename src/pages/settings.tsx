@@ -7,11 +7,14 @@ import {
   Palette,
   Shield,
   HelpCircle,
+  Grid,
 } from "lucide-react";
 import { motion } from "framer-motion";
+import { useNavigate } from "react-router-dom";
 
 const Settings = () => {
   const [isDark, setIsDark] = useState(false);
+  const navigate = useNavigate();
 
   // Check initial theme
   useEffect(() => {
@@ -116,6 +119,24 @@ const Settings = () => {
           action: (
             <button className="px-4 py-2 text-sm bg-secondary hover:bg-secondary/80 rounded-lg transition">
               Open
+            </button>
+          ),
+        },
+      ],
+    },
+    {
+      title: "Integrations",
+      icon: Grid,
+      items: [
+        {
+          label: "Connected Apps",
+          description: "Manage Slack, Notion, Jira and other integrations",
+          action: (
+            <button
+              onClick={() => navigate("/integrations/integrations-page")}
+              className="px-4 py-2 text-sm bg-secondary hover:bg-secondary/80 rounded-lg transition"
+            >
+              Manage
             </button>
           ),
         },
