@@ -8,6 +8,7 @@ import {
   ChevronDown,
   Menu,
   X,
+  Grid,
 } from "lucide-react";
 import { useNavigate, useLocation } from "react-router-dom";
 
@@ -45,6 +46,11 @@ const AppLayout = ({ children }: AppLayoutProps) => {
   const navItems = [
     { icon: Home, label: "Home", path: "/" },
     { icon: MessageSquare, label: "Chat", path: "/chatbot" },
+    {
+      icon: Grid,
+      label: "Integrations",
+      path: "/integrations/integrations-page",
+    },
     { icon: Settings, label: "Settings", path: "/settings" },
   ];
 
@@ -63,7 +69,7 @@ const AppLayout = ({ children }: AppLayoutProps) => {
         <div className="p-3">
           <button
             onClick={() => navigate("/chatbot")}
-            className="w-full flex items-center gap-2 px-4 py-2.5 bg-sidebar-primary text-sidebar-primary-foreground rounded-lg hover:bg-sidebar-primary/90 transition font-medium"
+            className="w-full flex items-center gap-2 px-4 py-2.5 bg-gray-200 dark:bg-gray-900 text-gray-800 dark:text-gray-100 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-600 transition font-medium"
           >
             <Plus size={18} />
             New Chat
