@@ -1,4 +1,4 @@
 import {
   require_react
-} from "./chunk-36UA4UVD.js";
+} from "./chunk-AYPAJTUR.js";
 export default require_react();
