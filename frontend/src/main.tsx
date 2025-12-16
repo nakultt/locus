@@ -1,29 +1,25 @@
 import React, { useState } from "react";
 import ReactDOM from "react-dom/client";
 import "./index.css";
+import { CommandCenter } from "./components/CommandCenter";
 import { LoginPage } from "./components/LoginPage";
-import ChatPage from "./components/ChatPage";
-
-type Role = "admin" | "manager" | "user";
 
 const RootApp: React.FC = () => {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [userRole, setUserRole] = useState<Role>("user");
 
   if (!isAuthenticated) {
     return (
       <LoginPage
-        onSubmit={(payload) => {
+        onSubmit={() => {
           // Here you could call a real auth API.
-          // On success, we switch to the ChatPage UI.
-          setUserRole(payload.role);
+          // On success, we switch to the Command Center UI.
           setIsAuthenticated(true);
         }}
       />
     );
   }
 
-  return <ChatPage />;
+  return <CommandCenter />;
 };
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
