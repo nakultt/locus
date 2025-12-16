@@ -254,7 +254,7 @@ const Sidebar = () => {
             <li className="mb-2">
               <button
                 className="flex gap-2 font-medium text-sm items-center w-full py-2 px-4 rounded-xl hover:bg-gray-100"
-                onClick={() => navigate("integrations/integrations-page")}
+                onClick={() => navigate("/integrations/integrations-page")}
               >
                 <Grid className="h-5 w-5" />
                 Integrations
