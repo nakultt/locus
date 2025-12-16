@@ -43,6 +43,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const [selectedSuggestion, setSelectedSuggestion] = useState<number | null>(
     null
   );
+  const [micActive, setMicActive] = useState(false);
 
   const trimmed = value.trim();
 
@@ -110,12 +111,8 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             {INTENT_HINTS[intent]}
           </p>
           <p className="hidden sm:inline-flex items-center gap-1 text-[10px] text-slate-600">
-            <span className="rounded-full bg-slate-900 px-2 py-0.5">
-              ⏎ send
-            </span>
-            <span className="rounded-full bg-slate-900 px-2 py-0.5">
-              ⇧⏎ new line
-            </span>
+            <span className="rounded-full bg-slate-900 px-2 py-0.5">⏎ send</span>
+            <span className="rounded-full bg-slate-900 px-2 py-0.5">⇧⏎ new line</span>
           </p>
         </div>
 
@@ -126,7 +123,24 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               : "border-slate-700/80"
           }`}
         >
-          <textarea
+          <div className="relative flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setMicActive((s) => !s)}
+              className={`flex h-9 w-9 items-center justify-center rounded-full transition-colors ${
+                micActive ? "bg-rose-500/20 text-rose-300 animate-pulse" : "bg-transparent text-slate-300 hover:bg-slate-800/60"
+              }`}
+              aria-pressed={micActive}
+              title="Voice Assistant"
+            >
+              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M12 1.5a2.5 2.5 0 00-2.5 2.5v4a2.5 2.5 0 005 0v-4A2.5 2.5 0 0012 1.5z" />
+                <path d="M19 11v1a7 7 0 01-14 0v-1" />
+                <path d="M12 19v3" />
+              </svg>
+            </button>
+
+            <textarea
             rows={2}
             value={value}
             onChange={(e) => setValue(e.target.value)}
@@ -136,31 +150,59 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             placeholder="Ask Integration Store to orchestrate Jira, Slack, ServiceNow and more…"
             className="w-full resize-none rounded-2xl bg-transparent px-3.5 py-2.5 pr-24 text-sm text-slate-50 placeholder:text-slate-500 focus:outline-none"
           />
+            <button
+              type="button"
+              disabled={!trimmed || isProcessing}
+              onClick={() => {
+                if (!trimmed || isProcessing) return;
+                onSubmit(trimmed);
+                setValue("");
+              }}
+              className="absolute bottom-2.5 right-2.5 inline-flex items-center gap-1 rounded-xl bg-cyan-500 px-3 py-1.5 text-xs font-medium text-slate-950 shadow-md hover:bg-cyan-400 disabled:opacity-60 disabled:cursor-not-allowed transition"
+            >
+              {isProcessing ? (
+                <>
+                  <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+                  <span>Processing</span>
+                </>
+              ) : (
+                <>
+                  <span>Send</span>
+                  <span className="text-[10px]">⏎</span>
+                </>
+              )}
+            </button>
+          </div>
 
-          <button
-            type="button"
-            disabled={!trimmed || isProcessing}
-            onClick={() => {
-              if (!trimmed || isProcessing) return;
-              onSubmit(trimmed);
-              setValue("");
-            }}
-            className="absolute bottom-2.5 right-2.5 inline-flex items-center gap-1 rounded-xl bg-cyan-500 px-3 py-1.5 text-xs font-medium text-slate-950 shadow-md hover:bg-cyan-400 disabled:opacity-60 disabled:cursor-not-allowed transition"
-          >
-            {isProcessing ? (
-              <>
-                <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
-                <span>Processing</span>
-              </>
-            ) : (
-              <>
-                <span>Send</span>
-                <span className="text-[10px]">⏎</span>
-              </>
-            )}
-          </button>
+          {/* Mic status / waveform */}
+          <div className="mt-2 flex items-center justify-between">
+            <div className="flex items-center gap-3 text-[12px] text-slate-400">
+              {micActive ? (
+                <div className="flex items-center gap-2">
+                  <div className="h-3 w-16 overflow-hidden rounded-full bg-gradient-to-r from-rose-500 to-cyan-400">
+                    <div className="animate-[wave_1.6s_linear_infinite] h-3 w-16 bg-white/10" />
+                  </div>
+                  <span className="text-rose-300">Listening…</span>
+                </div>
+              ) : isProcessing ? (
+                <div className="flex items-center gap-2">
+                  <span className="h-2 w-2 animate-pulse rounded-full bg-cyan-400" />
+                  <span>Processing…</span>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <span className="text-slate-400">Voice</span>
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2 text-[11px] text-slate-500">
+              {filteredSuggestions.length > 0 && (
+                <span className="hidden sm:inline-flex rounded-full bg-slate-900 px-2 py-0.5">Suggestions</span>
+              )}
+            </div>
+          </div>
         </div>
-
         {/* Suggestions */}
         {filteredSuggestions.length > 0 && (
           <div className="flex flex-wrap gap-2 text-[11px] text-slate-400">

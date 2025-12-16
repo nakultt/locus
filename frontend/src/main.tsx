@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import ReactDOM from "react-dom/client";
 import "./index.css";
 import { LoginPage } from "./components/LoginPage";
-import { ChatPage } from "./components/ChatPage";
+import ChatPage from "./components/ChatPage";
 
 type Role = "admin" | "manager" | "user";
 
