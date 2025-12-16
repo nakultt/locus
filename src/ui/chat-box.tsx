@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { Lightbulb, Mic, Globe, Paperclip, Send } from "lucide-react";
+import { Lightbulb, Mic, Paperclip, Send } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 
 interface Message {
@@ -55,7 +55,6 @@ const ChatInterface = () => {
   const [showPlaceholder, setShowPlaceholder] = useState(true);
   const [isActive, setIsActive] = useState(false);
   const [thinkActive, setThinkActive] = useState(false);
-  const [deepSearchActive, setDeepSearchActive] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
 
@@ -238,7 +237,7 @@ const ChatInterface = () => {
       </div>
 
       {/* Input Area - Fixed at bottom */}
-      <div className="border-t border-border bg-background p-4">
+      <div className="bg-background p-4">
         <div className="max-w-3xl mx-auto">
           <motion.div
             ref={wrapperRef}
@@ -371,39 +370,6 @@ const ChatInterface = () => {
                     />
                     Think
                   </button>
-
-                  {/* Deep Search Toggle */}
-                  <motion.button
-                    className={`flex items-center px-4 gap-1 py-2 rounded-full transition font-medium whitespace-nowrap overflow-hidden justify-start ${
-                      deepSearchActive
-                        ? "bg-blue-600/10 outline outline-blue-600/60 text-blue-950 dark:text-blue-200"
-                        : "bg-accent text-accent-foreground hover:bg-accent/80"
-                    }`}
-                    title="Deep Search"
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setDeepSearchActive((a) => !a);
-                    }}
-                    initial={false}
-                    animate={{
-                      width: deepSearchActive ? 125 : 36,
-                      paddingLeft: deepSearchActive ? 8 : 9,
-                    }}
-                  >
-                    <div className="flex-1">
-                      <Globe size={18} />
-                    </div>
-                    <motion.span
-                      className="pb-[2px]"
-                      initial={false}
-                      animate={{
-                        opacity: deepSearchActive ? 1 : 0,
-                      }}
-                    >
-                      Deep Search
-                    </motion.span>
-                  </motion.button>
                 </div>
               </motion.div>
             </div>
