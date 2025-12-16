@@ -1,7 +1,5 @@
 import React, { useState, FormEvent } from "react";
 
-type Role = "admin" | "manager" | "user";
-
 interface LoginPageProps {
   /**
    * Optional callback fired on successful submit.
@@ -11,7 +9,6 @@ interface LoginPageProps {
     email: string;
     password: string;
     rememberMe: boolean;
-    role: Role;
   }) => void;
 }
 
@@ -28,7 +25,6 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onSubmit }) => {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [rememberMe, setRememberMe] = useState(false);
-  const [role, setRole] = useState<Role>("user");
   const [error, setError] = useState<string | null>(null);
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
@@ -40,19 +36,19 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onSubmit }) => {
       return;
     }
 
-    onSubmit?.({ email, password, rememberMe, role });
+    onSubmit?.({ email, password, rememberMe });
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-100 px-4">
+    <div className="min-h-screen flex items-center justify-center bg-slate-950 px-4">
       <div className="w-full max-w-md">
-        <div className="bg-white border border-gray-200 shadow-xl rounded-2xl px-6 py-8 sm:px-8 sm:py-10">
+        <div className="bg-slate-900/90 border border-slate-800 shadow-2xl rounded-2xl px-6 py-8 sm:px-8 sm:py-10">
           {/* Heading */}
           <div className="mb-6 text-center">
-            <h1 className="text-2xl sm:text-3xl font-semibold text-gray-900 tracking-tight">
+            <h1 className="text-2xl sm:text-3xl font-semibold text-slate-50 tracking-tight">
               Integration Store
             </h1>
-            <p className="mt-1 text-sm text-gray-600">
+            <p className="mt-1 text-sm text-slate-400">
               Secure Enterprise Sign-In
             </p>
           </div>
@@ -63,7 +59,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onSubmit }) => {
             <div className="space-y-1.5">
               <label
                 htmlFor="email"
-                className="block text-xs font-medium text-gray-700"
+                className="block text-xs font-medium text-slate-300"
               >
                 Email
               </label>
@@ -74,7 +70,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onSubmit }) => {
                 placeholder="you@enterprise.com"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className="block w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition"
+                className="block w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 shadow-sm outline-none focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400 transition"
               />
             </div>
 
@@ -82,7 +78,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onSubmit }) => {
             <div className="space-y-1.5">
               <label
                 htmlFor="password"
-                className="block text-xs font-medium text-gray-700"
+                className="block text-xs font-medium text-slate-300"
               >
                 Password
               </label>
@@ -93,26 +89,26 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onSubmit }) => {
                 placeholder="Enter your password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="block w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition"
+                className="block w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 shadow-sm outline-none focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400 transition"
               />
             </div>
 
             {/* Remember + Forgot */}
-            <div className="flex items-center justify-between text-xs text-gray-600">
+            <div className="flex items-center justify-between text-xs text-slate-400">
               <label className="inline-flex items-center gap-2">
                 <input
                   id="rememberMe"
                   type="checkbox"
                   checked={rememberMe}
                   onChange={(e) => setRememberMe(e.target.checked)}
-                  className="h-3.5 w-3.5 rounded border-gray-300 bg-white text-cyan-500 focus:ring-cyan-500 focus:ring-offset-0"
+                  className="h-3.5 w-3.5 rounded border-slate-600 bg-slate-900 text-cyan-400 focus:ring-cyan-400 focus:ring-offset-0"
                 />
                 <span>Remember me</span>
               </label>
 
               <button
                 type="button"
-                className="text-xs font-medium text-cyan-600 hover:text-cyan-700 hover:underline"
+                className="text-xs font-medium text-cyan-300 hover:text-cyan-200 hover:underline"
               >
                 Forgot password?
               </button>
@@ -120,7 +116,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onSubmit }) => {
 
             {/* Error message */}
             {error && (
-              <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-md px-3 py-2">
+              <p className="text-xs text-red-300 bg-red-950/40 border border-red-500/40 rounded-md px-3 py-2">
                 {error}
               </p>
             )}
@@ -128,7 +124,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onSubmit }) => {
             {/* Submit button */}
             <button
               type="submit"
-              className="mt-1 inline-flex w-full items-center justify-center rounded-lg bg-cyan-500 px-4 py-2.5 text-sm font-medium text-white shadow-md hover:bg-cyan-600 hover:shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white transition"
+              className="mt-1 inline-flex w-full items-center justify-center rounded-lg bg-cyan-500 px-4 py-2.5 text-sm font-medium text-slate-950 shadow-md hover:bg-cyan-400 hover:shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950 transition"
             >
               Login
             </button>
