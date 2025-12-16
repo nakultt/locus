@@ -1,5 +1,11 @@
 import { AIChatInput } from "@/ui/chat-box";  
+import {Sidebar} from "@/ui/sidebar";
 
 export default function Chatbot() {
-    return <AIChatInput />;
+    return (
+        <>
+            <Sidebar />
+            <AIChatInput />
+        </>
+    );
 }   
