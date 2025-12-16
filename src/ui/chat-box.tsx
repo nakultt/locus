@@ -132,16 +132,17 @@ const ChatInterface = () => {
     }
   };
 
-  const containerVariants = {
+  const containerVariants: {
+    collapsed: { height: number; boxShadow: string };
+    expanded: { height: number; boxShadow: string };
+  } = {
     collapsed: {
       height: 68,
       boxShadow: "0 2px 8px 0 rgba(0,0,0,0.08)",
-      transition: { type: "spring", stiffness: 120, damping: 18 },
     },
     expanded: {
       height: 128,
       boxShadow: "0 8px 32px 0 rgba(0,0,0,0.16)",
-      transition: { type: "spring", stiffness: 120, damping: 18 },
     },
   };
 
@@ -157,21 +158,11 @@ const ChatInterface = () => {
       opacity: 1,
       filter: "blur(0px)",
       y: 0,
-      transition: {
-        opacity: { duration: 0.25 },
-        filter: { duration: 0.4 },
-        y: { type: "spring", stiffness: 80, damping: 20 },
-      },
     },
     exit: {
       opacity: 0,
       filter: "blur(12px)",
       y: -10,
-      transition: {
-        opacity: { duration: 0.2 },
-        filter: { duration: 0.3 },
-        y: { type: "spring", stiffness: 80, damping: 20 },
-      },
     },
   };
 
