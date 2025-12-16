@@ -17,8 +17,8 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
     "inline-flex max-w-xl flex-col gap-2 rounded-2xl px-3.5 py-2.5 text-sm shadow-sm";
 
   const bubbleClass = isUser
-    ? `${baseBubble} bg-cyan-500 text-slate-950 rounded-br-sm`
-    : `${baseBubble} bg-slate-800/90 text-slate-50 border border-slate-700/80 rounded-bl-sm`;
+    ? `${baseBubble} bg-gradient-to-br from-cyan-500 to-cyan-400 text-slate-950 rounded-br-sm shadow-lg`
+    : `${baseBubble} bg-gradient-to-br from-slate-800/90 to-slate-700/80 text-slate-50 border border-slate-700/80 rounded-bl-sm backdrop-blur-sm`;
 
   const containerClass = isUser
     ? "flex justify-end"
@@ -35,21 +35,33 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
 
         <div className="space-y-1">
           <div className={bubbleClass}>
-            {isSystem && message.intent && (
-              <p className="text-[10px] uppercase tracking-[0.16em] text-cyan-200/80">
-                {message.intent.toUpperCase()} • System
-              </p>
-            )}
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex-1">
+                {isSystem && message.intent && (
+                  <p className="text-[10px] uppercase tracking-[0.16em] text-cyan-200/80">
+                    {message.intent.toUpperCase()} • System
+                  </p>
+                )}
 
-            <p className="whitespace-pre-wrap break-words">
-              {message.content}
-            </p>
+                <p className="whitespace-pre-wrap break-words">{message.content}</p>
+              </div>
+
+              {/* Status indicator */}
+              <div className="flex flex-col items-end">
+                {message.meta?.status === "processing" ? (
+                  <div className="flex items-center gap-2">
+                    <span className="h-2 w-2 animate-pulse rounded-full bg-amber-400" />
+                    <span className="text-[10px] text-amber-300">Processing</span>
+                  </div>
+                ) : (
+                  <span className="text-[10px] text-slate-400">{message.timestamp}</span>
+                )}
+              </div>
+            </div>
 
             {message.meta?.summary && (
               <div className="mt-1 rounded-xl bg-slate-900/70 px-3 py-2 text-xs text-slate-300 border border-slate-700/70">
-                <p className="font-medium text-slate-100 mb-1">
-                  Summary
-                </p>
+                <p className="font-medium text-slate-100 mb-1">Summary</p>
                 <p>{message.meta.summary}</p>
               </div>
             )}
@@ -60,9 +72,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
                   <button
                     key={action.id}
                     type="button"
-                    onClick={() =>
-                      onActionClick?.(message.id, action.id)
-                    }
+                    onClick={() => onActionClick?.(message.id, action.id)}
                     className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium transition ${
                       action.type === "primary"
                         ? "border-cyan-400 bg-cyan-500 text-slate-950 hover:bg-cyan-400"
@@ -77,7 +87,6 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
           </div>
 
           <div className="flex items-center gap-2 text-[10px] text-slate-500">
-            <span>{message.timestamp}</span>
             {message.meta?.urgency && (
               <span
                 className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 ${
@@ -89,9 +98,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
                 }`}
               >
                 <span className="h-1.5 w-1.5 rounded-full bg-current" />
-                <span className="capitalize">
-                  {message.meta.urgency} priority
-                </span>
+                <span className="capitalize">{message.meta.urgency} priority</span>
               </span>
             )}
           </div>
