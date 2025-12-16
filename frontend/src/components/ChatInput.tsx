@@ -1,161 +1,189 @@
-import React, { useState, useRef } from "react";
+import React, { useEffect, useMemo, useState } from "react";
+import type { MessageIntent } from "./types";
 
 interface ChatInputProps {
-  onSend: (text: string, image?: string) => void;
-  disabled?: boolean;
+  isProcessing: boolean;
+  onSubmit: (text: string) => void;
 }
 
-export const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled }) => {
-  const [inputText, setInputText] = useState("");
-  const [imagePreview, setImagePreview] = useState<string | null>(null);
-  const [isVoiceActive, setIsVoiceActive] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+const SUGGESTED_COMMANDS: Array<{ label: string; value: string }> = [
+  {
+    label: "Create Jira ticket and notify Slack",
+    value: "Create a Jira ticket and notify Slack when it's created",
+  },
+  {
+    label: "Schedule Google Meet",
+    value: "Schedule a Google Meet with the architecture team tomorrow at 3pm",
+  },
+  {
+    label: "Update ServiceNow incident",
+    value: "Update ServiceNow incident INC-1045 to In Progress",
+  },
+  {
+    label: "Review GitHub PR",
+    value: "Summarize open GitHub pull requests and flag urgent ones",
+  },
+];
 
-  const handleSend = () => {
-    if (!inputText.trim() && !imagePreview) return;
-    onSend(inputText, imagePreview || undefined);
-    setInputText("");
-    setImagePreview(null);
-  };
+const INTENT_HINTS: Record<MessageIntent, string> = {
+  jira: "Jira: create/update issues, set priorities, assign owners…",
+  slack: "Slack: send updates, notify channels, DM stakeholders…",
+  calendar: "Calendar: schedule/modify meetings and reminders…",
+  servicenow: "ServiceNow: create/update incidents and requests…",
+  github: "GitHub: review PRs, create issues, manage branches…",
+  generic: "General automation: combine tools and orchestrate workflows…",
+};
 
-  const handleVoiceToggle = () => {
-    setIsVoiceActive(!isVoiceActive);
-    // In a real app, this would start/stop voice recording
-  };
+export const ChatInput: React.FC<ChatInputProps> = ({
+  isProcessing,
+  onSubmit,
+}) => {
+  const [value, setValue] = useState("");
+  const [isFocused, setIsFocused] = useState(false);
+  const [selectedSuggestion, setSelectedSuggestion] = useState<number | null>(
+    null
+  );
 
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setImagePreview(reader.result as string);
-      };
-      reader.readAsDataURL(file);
-    }
-  };
+  const trimmed = value.trim();
 
-  const handleKeyPress = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey) {
+  const intent: MessageIntent = useMemo(() => {
+    const lower = trimmed.toLowerCase();
+    if (lower.includes("jira")) return "jira";
+    if (lower.includes("slack")) return "slack";
+    if (
+      lower.includes("meet") ||
+      lower.includes("calendar") ||
+      lower.includes("invite")
+    )
+      return "calendar";
+    if (lower.includes("servicenow") || lower.includes("incident"))
+      return "servicenow";
+    if (lower.includes("github") || lower.includes("pull request"))
+      return "github";
+    if (!trimmed) return "generic";
+    return "generic";
+  }, [trimmed]);
+
+  const filteredSuggestions = useMemo(() => {
+    if (!trimmed) return SUGGESTED_COMMANDS;
+    return SUGGESTED_COMMANDS.filter((s) =>
+      s.label.toLowerCase().includes(trimmed.toLowerCase())
+    );
+  }, [trimmed]);
+
+  useEffect(() => {
+    setSelectedSuggestion(
+      filteredSuggestions.length > 0 ? 0 : null
+    );
+  }, [filteredSuggestions.length]);
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "ArrowDown" && filteredSuggestions.length > 0) {
       e.preventDefault();
-      handleSend();
+      setSelectedSuggestion((prev) => {
+        if (prev === null) return 0;
+        return (prev + 1) % filteredSuggestions.length;
+      });
+    } else if (e.key === "ArrowUp" && filteredSuggestions.length > 0) {
+      e.preventDefault();
+      setSelectedSuggestion((prev) => {
+        if (prev === null) return filteredSuggestions.length - 1;
+        return (prev - 1 + filteredSuggestions.length) % filteredSuggestions.length;
+      });
+    } else if (e.key === "Tab" && selectedSuggestion !== null) {
+      e.preventDefault();
+      setValue(filteredSuggestions[selectedSuggestion].value);
+    } else if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      if (!trimmed || isProcessing) return;
+      onSubmit(trimmed);
+      setValue("");
     }
   };
 
   return (
-    <div className="fixed bottom-6 left-1/2 transform -translate-x-1/2 w-full max-w-2xl px-6">
-      {/* Image Preview */}
-      {imagePreview && (
-        <div className="mb-4 relative inline-block">
-          <img
-            src={imagePreview}
-            alt="Preview"
-            className="h-20 w-20 object-cover rounded-lg border border-gray-300 shadow-md"
-          />
-          <button
-            type="button"
-            onClick={() => setImagePreview(null)}
-            className="absolute -top-2 -right-2 h-6 w-6 bg-red-500 text-white rounded-full flex items-center justify-center text-xs hover:bg-red-600 transition-colors shadow-md"
-          >
-            ×
-          </button>
+    <div className="border-t border-slate-800/80 bg-slate-950/90 backdrop-blur-sm px-3 pt-3 pb-3 sm:px-4 sm:pb-4">
+      <div className="mx-auto max-w-3xl space-y-2">
+        {/* Intent hint */}
+        <div className="flex items-center justify-between text-[11px] text-slate-500">
+          <p className="truncate pr-4">
+            {INTENT_HINTS[intent]}
+          </p>
+          <p className="hidden sm:inline-flex items-center gap-1 text-[10px] text-slate-600">
+            <span className="rounded-full bg-slate-900 px-2 py-0.5">
+              ⏎ send
+            </span>
+            <span className="rounded-full bg-slate-900 px-2 py-0.5">
+              ⇧⏎ new line
+            </span>
+          </p>
         </div>
-      )}
 
-      {/* Input Container */}
-      <div className="relative">
-        <div className="bg-white/80 backdrop-blur-md border border-gray-200/50 rounded-full shadow-lg px-4 py-3 flex items-center gap-3">
-          {/* Voice Assistant Icon */}
-          <button
-            type="button"
-            onClick={handleVoiceToggle}
-            className={`p-2 rounded-full transition-all ${
-              isVoiceActive
-                ? "bg-red-100 text-red-600 animate-pulse shadow-md"
-                : "text-gray-500 hover:text-gray-700 hover:bg-gray-100"
-            }`}
-            title="Voice Assistant"
-          >
-            <svg
-              className="w-5 h-5"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-              xmlns="http://www.w3.org/2000/svg"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"
-              />
-            </svg>
-          </button>
-
-          {/* Text Input */}
+        <div
+          className={`relative rounded-2xl border bg-slate-900/80 shadow-[0_0_0_1px_rgba(15,23,42,0.9)] transition ${
+            isFocused
+              ? "border-cyan-400/80 shadow-[0_0_0_1px_rgba(34,211,238,0.6),0_18px_45px_rgba(15,23,42,0.9)]"
+              : "border-slate-700/80"
+          }`}
+        >
           <textarea
-            value={inputText}
-            onChange={(e) => setInputText(e.target.value)}
-            onKeyPress={handleKeyPress}
-            placeholder="Type your message..."
-            className="flex-1 resize-none bg-transparent text-gray-900 placeholder:text-gray-400 focus:outline-none text-sm max-h-20 overflow-y-auto"
-            rows={1}
-            disabled={disabled}
+            rows={2}
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={handleKeyDown}
+            onFocus={() => setIsFocused(true)}
+            onBlur={() => setIsFocused(false)}
+            placeholder="Ask Integration Store to orchestrate Jira, Slack, ServiceNow and more…"
+            className="w-full resize-none rounded-2xl bg-transparent px-3.5 py-2.5 pr-24 text-sm text-slate-50 placeholder:text-slate-500 focus:outline-none"
           />
 
-          {/* Image Upload Icon */}
           <button
             type="button"
-            onClick={() => fileInputRef.current?.click()}
-            className="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-full transition-colors"
-            title="Upload Image"
+            disabled={!trimmed || isProcessing}
+            onClick={() => {
+              if (!trimmed || isProcessing) return;
+              onSubmit(trimmed);
+              setValue("");
+            }}
+            className="absolute bottom-2.5 right-2.5 inline-flex items-center gap-1 rounded-xl bg-cyan-500 px-3 py-1.5 text-xs font-medium text-slate-950 shadow-md hover:bg-cyan-400 disabled:opacity-60 disabled:cursor-not-allowed transition"
           >
-            <svg
-              className="w-5 h-5"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-              xmlns="http://www.w3.org/2000/svg"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
-              />
-            </svg>
-          </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            onChange={handleImageUpload}
-            className="hidden"
-          />
-
-          {/* Send Button */}
-          <button
-            type="button"
-            onClick={handleSend}
-            disabled={disabled || (!inputText.trim() && !imagePreview)}
-            className="p-2 bg-cyan-500 text-white rounded-full hover:bg-cyan-600 disabled:bg-gray-300 disabled:cursor-not-allowed transition-all shadow-md hover:shadow-lg"
-            title="Send Message"
-          >
-            <svg
-              className="w-5 h-5"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-              xmlns="http://www.w3.org/2000/svg"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"
-              />
-            </svg>
+            {isProcessing ? (
+              <>
+                <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+                <span>Processing</span>
+              </>
+            ) : (
+              <>
+                <span>Send</span>
+                <span className="text-[10px]">⏎</span>
+              </>
+            )}
           </button>
         </div>
+
+        {/* Suggestions */}
+        {filteredSuggestions.length > 0 && (
+          <div className="flex flex-wrap gap-2 text-[11px] text-slate-400">
+            {filteredSuggestions.slice(0, 3).map((s, index) => (
+              <button
+                key={s.label}
+                type="button"
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  setValue(s.value);
+                }}
+                className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 transition ${
+                  selectedSuggestion === index
+                    ? "border-cyan-400 bg-cyan-500/10 text-cyan-200"
+                    : "border-slate-700 bg-slate-900/70 hover:border-slate-500"
+                }`}
+              >
+                <span className="h-1.5 w-1.5 rounded-full bg-cyan-400" />
+                <span>{s.label}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
