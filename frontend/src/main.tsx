@@ -1,8 +1,10 @@
 import React, { useState } from "react";
 import ReactDOM from "react-dom/client";
+import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
 import "./index.css";
 import { LoginPage } from "./components/LoginPage";
 import { ChatPage } from "./components/ChatPage";
+import { IntegrationHub } from "./components/IntegrationHub";
 
 type Role = "admin" | "manager" | "user";
 
@@ -23,7 +25,15 @@ const RootApp: React.FC = () => {
     );
   }
 
-  return <ChatPage />;
+  return (
+    <Router>
+      <Routes>
+        <Route path="/" element={<ChatPage />} />
+        <Route path="/chat" element={<ChatPage />} />
+        <Route path="/integrations" element={<IntegrationHub />} />
+      </Routes>
+    </Router>
+  );
 };
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
