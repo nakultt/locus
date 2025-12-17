@@ -1,4 +1,4 @@
-import { Routes, Route } from "react-router-dom";
+import { Routes, Route, Navigate } from "react-router-dom";
 import { Component } from "@/ui/the-infinite-grid";
 import Chatbot from "@/pages/chatbot";
 import Settings from "@/pages/settings";
@@ -6,47 +6,73 @@ import IntegrationsSection from "@/ui/integrations/integration-components";
 import { AppLayout } from "@/ui/app-layout";
 import { Component as LoginPage } from "@/ui/auth/login";
 import SignupPage from "@/pages/signup";
+import { AuthProvider, useAuth } from "@/context/AuthContext";
 
-// Wrapper component for pages that need the app layout
+// Protected route wrapper
+const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
+  const { isAuthenticated, isLoading } = useAuth();
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="animate-pulse text-muted-foreground">Loading...</div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return <Navigate to="/login" replace />;
+  }
+
+  return <>{children}</>;
+};
 const WithLayout = ({ children }: { children: React.ReactNode }) => (
   <AppLayout>{children}</AppLayout>
 );
 
 export default function App() {
   return (
-    <Routes>
-      {/* Landing page - no sidebar */}
-      <Route path="/" element={<Component />} />
+    <AuthProvider>
+      <Routes>
+        {/* Landing page - no sidebar */}
+        <Route path="/" element={<Component />} />
 
-      {/* Auth pages - no sidebar */}
-      <Route path="/login" element={<LoginPage />} />
-      <Route path="/signup" element={<SignupPage />} />
+        {/* Auth pages - no sidebar */}
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/signup" element={<SignupPage />} />
 
-      {/* Pages with sidebar layout */}
-      <Route
-        path="/chatbot"
-        element={
-          <WithLayout>
-            <Chatbot />
-          </WithLayout>
-        }
-      />
-      <Route
-        path="/settings"
-        element={
-          <WithLayout>
-            <Settings />
-          </WithLayout>
-        }
-      />
-      <Route
-        path="/integrations/integrations-page"
-        element={
-          <WithLayout>
-            <IntegrationsSection />
-          </WithLayout>
-        }
-      />
-    </Routes>
+        {/* Protected pages with sidebar layout */}
+        <Route
+          path="/chatbot"
+          element={
+            <ProtectedRoute>
+              <WithLayout>
+                <Chatbot />
+              </WithLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/settings"
+          element={
+            <ProtectedRoute>
+              <WithLayout>
+                <Settings />
+              </WithLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/integrations/integrations-page"
+          element={
+            <ProtectedRoute>
+              <WithLayout>
+                <IntegrationsSection />
+              </WithLayout>
+            </ProtectedRoute>
+          }
+        />
+      </Routes>
+    </AuthProvider>
   );
 }

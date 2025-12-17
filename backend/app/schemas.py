@@ -14,13 +14,16 @@ class UserCreate(BaseModel):
     """Schema for user registration."""
     email: EmailStr
     password: str = Field(..., min_length=6, description="Password must be at least 6 characters")
+    name: Optional[str] = Field(None, description="User's display name")
 
 
 class UserResponse(BaseModel):
     """Schema for user response (excludes password)."""
     id: int
     email: str
+    name: Optional[str] = None
     created_at: Optional[datetime] = None
+    token: Optional[str] = Field(None, description="JWT access token")
 
     class Config:
         from_attributes = True

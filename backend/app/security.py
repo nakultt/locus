@@ -5,9 +5,11 @@ Password hashing (bcrypt) and token encryption (Fernet)
 
 import os
 import json
-from typing import Any
+from datetime import datetime, timedelta, timezone
+from typing import Any, Optional
 from passlib.context import CryptContext
 from cryptography.fernet import Fernet
+from jose import jwt, JWTError
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -28,6 +30,35 @@ if isinstance(ENCRYPTION_KEY, str):
     ENCRYPTION_KEY = ENCRYPTION_KEY.encode()
 
 fernet = Fernet(ENCRYPTION_KEY)
+
+# JWT Configuration
+SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-for-jwt-here")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
+
+
+# ============== JWT Functions ==============
+
+def create_access_token(user_id: int, email: str, name: Optional[str] = None) -> str:
+    """Create a JWT access token for a user."""
+    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode = {
+        "sub": str(user_id),
+        "email": email,
+        "name": name,
+        "exp": expire
+    }
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+
+def verify_token(token: str) -> Optional[dict]:
+    """Verify and decode a JWT token. Returns payload or None if invalid."""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload
+    except JWTError:
+        return None
 
 
 # ============== Password Functions ==============

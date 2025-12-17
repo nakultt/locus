@@ -6,7 +6,7 @@ Endpoints for user signup, login, and integration connection
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app import schemas, crud
+from app import schemas, crud, security
 from app.database import get_db
 
 router = APIRouter()
@@ -38,7 +38,17 @@ async def signup(
     
     # Create user
     db_user = crud.create_user(db, user)
-    return schemas.UserResponse.model_validate(db_user)
+    
+    # Generate JWT token
+    token = security.create_access_token(
+        user_id=db_user.id,
+        email=db_user.email,
+        name=db_user.name
+    )
+    
+    response = schemas.UserResponse.model_validate(db_user)
+    response.token = token
+    return response
 
 
 @router.post(
@@ -61,7 +71,17 @@ async def login(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password"
         )
-    return schemas.UserResponse.model_validate(user)
+    
+    # Generate JWT token
+    token = security.create_access_token(
+        user_id=user.id,
+        email=user.email,
+        name=user.name
+    )
+    
+    response = schemas.UserResponse.model_validate(user)
+    response.token = token
+    return response
 
 
 @router.post(

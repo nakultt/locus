@@ -1,12 +1,26 @@
 import { useState, useEffect, useRef } from "react";
-import { Lightbulb, Paperclip, Send } from "lucide-react";
+import {
+  Lightbulb,
+  Paperclip,
+  Send,
+  Wrench,
+  CheckCircle,
+  XCircle,
+} from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
+import { useAuth } from "@/context/AuthContext";
+import {
+  sendChatMessage,
+  type ActionResult,
+  type ChatResponse,
+} from "@/lib/api";
 
 interface Message {
   id: string;
   role: "user" | "assistant";
   content: string;
   timestamp: Date;
+  actions?: ActionResult[];
 }
 
 const PLACEHOLDERS = [
@@ -15,6 +29,57 @@ const PLACEHOLDERS = [
   "Start a conversation...",
   "Type your message here...",
 ];
+
+// Service icon mapping
+const getServiceIcon = (service: string) => {
+  switch (service.toLowerCase()) {
+    case "slack":
+      return "💬";
+    case "jira":
+      return "🎫";
+    case "gmail":
+      return "📧";
+    case "calendar":
+      return "📅";
+    case "notion":
+      return "📝";
+    default:
+      return "🔧";
+  }
+};
+
+// Tool Action Card component
+const ToolActionCard = ({ action }: { action: ActionResult }) => (
+  <motion.div
+    initial={{ opacity: 0, scale: 0.95 }}
+    animate={{ opacity: 1, scale: 1 }}
+    className="flex items-start gap-3 p-3 bg-muted/50 rounded-lg border border-border mb-2"
+  >
+    <span className="text-lg">{getServiceIcon(action.service)}</span>
+    <div className="flex-1 min-w-0">
+      <div className="flex items-center gap-2">
+        <Wrench size={14} className="text-muted-foreground" />
+        <span className="text-sm font-medium text-foreground">
+          {action.action}
+        </span>
+        {action.success ? (
+          <CheckCircle size={14} className="text-green-500" />
+        ) : (
+          <XCircle size={14} className="text-red-500" />
+        )}
+      </div>
+      {action.result && (
+        <p className="text-xs text-muted-foreground mt-1 truncate">
+          {action.result.substring(0, 100)}
+          {action.result.length > 100 ? "..." : ""}
+        </p>
+      )}
+      {action.error && (
+        <p className="text-xs text-red-400 mt-1">{action.error}</p>
+      )}
+    </div>
+  </motion.div>
+);
 
 // Message component for individual messages
 const ChatMessage = ({ message }: { message: Message }) => {
@@ -35,8 +100,17 @@ const ChatMessage = ({ message }: { message: Message }) => {
           </p>
         </div>
       ) : (
-        // AI message - plain text, no bubble
+        // AI message with tool actions
         <div className="max-w-[85%] py-2">
+          {/* Show tool actions if present */}
+          {message.actions && message.actions.length > 0 && (
+            <div className="mb-3">
+              <p className="text-xs text-muted-foreground mb-2">Tools used:</p>
+              {message.actions.map((action, idx) => (
+                <ToolActionCard key={idx} action={action} />
+              ))}
+            </div>
+          )}
           <p className="text-sm leading-relaxed text-foreground whitespace-pre-wrap">
             {message.content}
           </p>
@@ -57,6 +131,7 @@ const ChatInterface = () => {
   const [thinkActive, setThinkActive] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
+  const { user } = useAuth();
 
   // Scroll to bottom when new messages arrive
   useEffect(() => {
@@ -109,20 +184,39 @@ const ChatInterface = () => {
     setInputValue("");
     setIsLoading(true);
 
-    // Simulate AI response (replace with actual API call)
-    setTimeout(() => {
+    try {
+      // Call real backend API
+      if (!user?.id) {
+        throw new Error("Please log in to use the chat");
+      }
+
+      const response: ChatResponse = await sendChatMessage(
+        user.id,
+        userMessage.content
+      );
+
       const aiMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: "assistant",
-        content:
-          "I'm Locus, your AI assistant. I received your message: \"" +
-          userMessage.content +
-          '"\n\nThis is a demo response. Connect me to your backend API for real responses!',
+        content: response.message,
         timestamp: new Date(),
+        actions: response.actions_taken,
       };
       setMessages((prev) => [...prev, aiMessage]);
+    } catch (err) {
+      const errorMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        role: "assistant",
+        content:
+          err instanceof Error
+            ? err.message
+            : "Sorry, I encountered an error. Please try again.",
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, errorMessage]);
+    } finally {
       setIsLoading(false);
-    }, 1500);
+    }
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
