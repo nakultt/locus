@@ -12,6 +12,26 @@ from app.database import get_db
 router = APIRouter()
 
 
+@router.get(
+    "/signup",
+    summary="Signup endpoint info",
+)
+async def signup_info() -> dict[str, str]:
+    """
+    Informational endpoint for browser visits.
+
+    Explains how to use the POST /auth/signup endpoint.
+    """
+    return {
+        "message": "Use POST /auth/signup with JSON body to create a user.",
+        "expected_body": {
+            "email": "user@example.com",
+            "password": "your-password",
+            "name": "Your Name",
+        },
+    }
+
+
 @router.post(
     "/signup",
     response_model=schemas.UserResponse,
