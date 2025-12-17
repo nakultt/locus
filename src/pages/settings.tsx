@@ -95,36 +95,6 @@ const Settings = () => {
       ],
     },
     {
-      title: "Privacy & Security",
-      icon: Shield,
-      items: [
-        {
-          label: "Data Collection",
-          description: "Manage how your data is collected",
-          action: (
-            <button className="px-4 py-2 text-sm bg-secondary hover:bg-secondary/80 rounded-lg transition">
-              Manage
-            </button>
-          ),
-        },
-      ],
-    },
-    {
-      title: "Help & Support",
-      icon: HelpCircle,
-      items: [
-        {
-          label: "Documentation",
-          description: "View documentation and guides",
-          action: (
-            <button className="px-4 py-2 text-sm bg-secondary hover:bg-secondary/80 rounded-lg transition">
-              Open
-            </button>
-          ),
-        },
-      ],
-    },
-    {
       title: "Integrations",
       icon: Grid,
       items: [
