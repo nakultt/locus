@@ -4,7 +4,7 @@ LangChain tools for Notion documentation
 """
 
 from langchain_core.tools import BaseTool, tool
-from langchain_core.pydantic_v1 import BaseModel, Field
+from pydantic import BaseModel, Field
 
 # Store credentials at module level for tool access
 _notion_config: dict = {}
