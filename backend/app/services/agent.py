@@ -8,8 +8,8 @@ from typing import Any
 from dotenv import load_dotenv
 
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.agents import AgentExecutor, create_react_agent
-from langchain_core.prompts import PromptTemplate
+from langchain.agents import AgentExecutor, create_tool_calling_agent
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import BaseTool
 
 from app.schemas import ChatResponse, ActionResult
@@ -36,29 +36,19 @@ if GOOGLE_API_KEY:
         convert_system_message_to_human=True
     )
 
-# ReAct prompt template
-REACT_PROMPT = """You are Conflux, an intelligent enterprise integration assistant.
+# System prompt for the agent
+SYSTEM_PROMPT = """You are Locus, an intelligent enterprise integration assistant.
 Your role is to help users interact with their connected workplace tools through natural language.
 
-You have access to the following tools:
+You can:
+- Send messages to Slack channels
+- Create and search Jira issues
+- Send emails via Gmail
+- Create calendar events
+- Search and create Notion pages
 
-{tools}
-
-Use the following format:
-
-Question: the input question you must answer
-Thought: you should always think about what to do
-Action: the action to take, should be one of [{tool_names}]
-Action Input: the input to the action
-Observation: the result of the action
-... (this Thought/Action/Action Input/Observation can repeat N times)
-Thought: I now know the final answer
-Final Answer: the final answer to the original input question
-
-Begin!
-
-Question: {input}
-Thought: {agent_scratchpad}"""
+When a user asks you to do something, use the appropriate tool with the correct parameters.
+Always be helpful and confirm what action you've taken."""
 
 
 def build_tools(integration_configs: dict[str, dict]) -> list[BaseTool]:
@@ -114,12 +104,19 @@ def build_tools(integration_configs: dict[str, dict]) -> list[BaseTool]:
 
 
 def create_agent_executor(tools: list[BaseTool]) -> AgentExecutor:
-    """Create a LangChain agent with the given tools."""
+    """Create a LangChain agent with the given tools using native tool calling."""
     if not llm:
         raise ValueError("LLM not configured. Please set GOOGLE_API_KEY.")
     
-    prompt = PromptTemplate.from_template(REACT_PROMPT)
-    agent = create_react_agent(llm, tools, prompt)
+    # Create a prompt that works with the tool calling agent
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", SYSTEM_PROMPT),
+        ("human", "{input}"),
+        MessagesPlaceholder(variable_name="agent_scratchpad"),
+    ])
+    
+    # Use tool calling agent instead of ReAct for better structured output
+    agent = create_tool_calling_agent(llm, tools, prompt)
     
     return AgentExecutor(
         agent=agent,

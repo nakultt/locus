@@ -6,7 +6,7 @@ LangChain tools for calendar management
 from typing import Any
 from datetime import datetime, timedelta
 from langchain_core.tools import BaseTool, tool
-from langchain_core.pydantic_v1 import BaseModel, Field
+from pydantic import BaseModel, Field
 
 # Store credentials at module level for tool access
 _calendar_config: dict = {}
@@ -16,7 +16,7 @@ class CreateEventInput(BaseModel):
     """Input schema for creating a calendar event."""
     summary: str = Field(description="Event title/name")
     description: str = Field(default="", description="Event description")
-    start_time: str = Field(description="Start time (e.g., '2025-12-16 14:00' or 'tomorrow at 2pm')")
+    start_time: str = Field(default="", description="Start time (e.g., '2025-12-16 14:00' or 'tomorrow at 2pm'). If not provided, defaults to 1 hour from now.")
     duration_minutes: int = Field(default=60, description="Duration in minutes")
     attendees: str = Field(default="", description="Comma-separated email addresses of attendees")
 
