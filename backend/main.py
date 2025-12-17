@@ -26,9 +26,18 @@ app = FastAPI(
 )
 
 # CORS Configuration
+# NOTE:
+# - When allow_credentials=True, we CANNOT use allow_origins=["*"].
+# - Browsers will reject such responses and FastAPI/Starlette will raise at startup.
+allowed_origins = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "https://locus-gamma.vercel.app",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
