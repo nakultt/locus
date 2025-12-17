@@ -676,26 +676,7 @@ function LoginPage() {
           </div>
         </div>
 
-        <div className="relative z-20 flex items-center gap-8 text-sm text-primary-foreground/60">
-          <a
-            href="#"
-            className="hover:text-primary-foreground transition-colors"
-          >
-            Privacy Policy
-          </a>
-          <a
-            href="#"
-            className="hover:text-primary-foreground transition-colors"
-          >
-            Terms of Service
-          </a>
-          <a
-            href="#"
-            className="hover:text-primary-foreground transition-colors"
-          >
-            Contact
-          </a>
-        </div>
+        
 
         {/* Decorative elements */}
         <div className="absolute inset-0 bg-grid-white/[0.05] bg-[size:20px_20px]" />
@@ -711,7 +692,7 @@ function LoginPage() {
             <div className="size-8 rounded-lg bg-primary/10 flex items-center justify-center">
               <Sparkles className="size-4 text-primary" />
             </div>
-            <span>YourBrand</span>
+            <span>Locus</span>
           </div>
 
           {/* Header */}
@@ -826,7 +807,7 @@ function LoginPage() {
                     htmlFor="remember"
                     className="text-sm font-normal cursor-pointer"
                   >
-                    Remember for 30 days
+                    Remember me
                   </Label>
                 </div>
                 <a
