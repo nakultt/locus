@@ -5,6 +5,7 @@ import { Label } from "@/ui/auth/label";
 import { Checkbox } from "@/ui/auth/checkbox";
 import { Eye, EyeOff, Mail, Sparkles } from "lucide-react";
 import { useNavigate } from "react-router-dom";
+import { useAuth } from "@/context/AuthContext";
 
 interface PupilProps {
   size?: number;
@@ -304,35 +305,42 @@ function LoginPage() {
   const yellowPos = calculatePosition(yellowRef);
   const orangePos = calculatePosition(orangeRef);
 
+  const { login: authLogin, signup: authSignup } = useAuth();
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
     setIsLoading(true);
 
-    // Simulate API delay (quick)
-    await new Promise((resolve) => setTimeout(resolve, 300));
-
-    if (isSignupMode) {
-      // Signup validation
-      if (password !== confirmPassword) {
-        setError("Passwords do not match");
-        setIsLoading(false);
-        return;
+    try {
+      if (isSignupMode) {
+        // Signup validation
+        if (password !== confirmPassword) {
+          setError("Passwords do not match");
+          setIsLoading(false);
+          return;
+        }
+        if (password.length < 6) {
+          setError("Password must be at least 6 characters");
+          setIsLoading(false);
+          return;
+        }
+        // Call real signup API
+        await authSignup(email, password, name || undefined);
+        console.log("✅ Signup successful!");
+        navigate("/chatbot");
+      } else {
+        // Call real login API
+        await authLogin(email, password);
+        console.log("✅ Login successful!");
+        navigate("/chatbot");
       }
-      if (password.length < 4) {
-        setError("Password must be at least 4 characters");
-        setIsLoading(false);
-        return;
-      }
-      console.log("✅ Signup successful!");
-      navigate("/chatbot");
-    } else {
-      // Login - accept any credentials for now
-      console.log("✅ Login successful!");
-      navigate("/chatbot");
+    } catch (err) {
+      // Display error from backend
+      setError(err instanceof Error ? err.message : "Authentication failed");
+    } finally {
+      setIsLoading(false);
     }
-
-    setIsLoading(false);
   };
 
   return (
