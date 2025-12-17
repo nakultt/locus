@@ -18,6 +18,7 @@ from app.services.gmail import get_gmail_tools
 from app.services.calendar import get_calendar_tools
 from app.services.slack import get_slack_tools
 from app.services.notion import get_notion_tools
+from app.services.bugasura import get_bugasura_tools
 
 load_dotenv()
 
@@ -67,6 +68,11 @@ Your role is to help users interact with their connected workplace tools through
 ### Google Calendar (Scheduling)
 - Create calendar events with attendees
 - View upcoming events
+
+### Bugasura (Bug Tracking)
+- Create and list bugs/issues
+- Add comments to issues
+- Get issue details
 
 ## Guidelines:
 - When the user asks you to do something, use the appropriate tool with correct parameters.
@@ -124,6 +130,16 @@ def build_tools(integration_configs: dict[str, dict]) -> list[BaseTool]:
             integration_token=config.get("api_key", "")
         )
         tools.extend(notion_tools)
+    
+    # Bugasura tools
+    if "bugasura" in integration_configs:
+        config = integration_configs["bugasura"]
+        bugasura_tools = get_bugasura_tools(
+            api_key=config.get("api_key", ""),
+            team_id=config.get("credentials", {}).get("team_id", ""),
+            project_key=config.get("credentials", {}).get("project_key", "")
+        )
+        tools.extend(bugasura_tools)
     
     return tools
 
@@ -236,6 +252,8 @@ def determine_service(tool_name: str) -> str:
         return "slack"
     elif "notion" in tool_lower:
         return "notion"
+    elif "bugasura" in tool_lower:
+        return "bugasura"
     return "unknown"
 
 

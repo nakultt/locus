@@ -113,7 +113,7 @@ async def connect_integration(
         )
     
     # Validate service name
-    valid_services = {"jira", "gmail", "calendar", "slack", "notion"}
+    valid_services = {"jira", "gmail", "calendar", "slack", "notion", "bugasura"}
     if integration.service_name.lower() not in valid_services:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
