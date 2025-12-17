@@ -1,267 +1,214 @@
 """
 Gmail Integration Service
-LangChain tools for email management
+LangChain tools for email management using direct HTTP API calls
 """
 
+import base64
+import httpx
+from email.mime.text import MIMEText
 from typing import Any
+from datetime import datetime, timedelta
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, Field
 
 # Store credentials at module level for tool access
 _gmail_config: dict = {}
 
+# Gmail API base URL
+GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
+
+# Google OAuth token refresh URL
+TOKEN_REFRESH_URL = "https://oauth2.googleapis.com/token"
+
 
 class SendEmailInput(BaseModel):
     """Input schema for sending an email."""
-    to: str = Field(default="user@example.com", description="Recipient email address")
-    subject: str = Field(default="Message from Locus", description="Email subject line")
-    body: str = Field(default="Hello!", description="Email body content")
-    message: str = Field(default="", description="Alternative body field (alias for body)")
+    to: str = Field(description="Recipient email address")
+    subject: str = Field(description="Email subject line")
+    body: str = Field(description="Email body content")
 
 
-class SearchEmailInput(BaseModel):
-    """Input schema for searching emails."""
-    query: str = Field(default="is:inbox", description="Search query (e.g., 'from:john subject:meeting')")
-    max_results: int = Field(default=10, description="Maximum number of results")
+class ReadEmailsInput(BaseModel):
+    """Input schema for reading latest emails."""
+    max_results: int = Field(default=5, description="Maximum number of emails to retrieve (default: 5)")
 
 
-class DraftEmailInput(BaseModel):
-    """Input schema for creating a draft."""
-    to: str = Field(default="user@example.com", description="Recipient email address")
-    subject: str = Field(default="Draft from Locus", description="Email subject line")
-    body: str = Field(default="", description="Email body content")
+def _is_token_expired() -> bool:
+    """Check if the current access token is expired."""
+    credentials = _gmail_config.get("credentials", {})
+    if not credentials:
+        return True
+    
+    obtained_at = credentials.get("obtained_at")
+    expires_in = credentials.get("expires_in", 3600)
+    
+    if not obtained_at:
+        return True
+    
+    try:
+        obtained_dt = datetime.fromisoformat(obtained_at)
+        expiry_dt = obtained_dt + timedelta(seconds=expires_in - 60)  # 60 second buffer
+        return datetime.utcnow() > expiry_dt
+    except:
+        return True
+
+
+def _refresh_token() -> bool:
+    """Refresh the access token using the refresh token."""
+    credentials = _gmail_config.get("credentials", {})
+    refresh_token = credentials.get("refresh_token")
+    client_id = _gmail_config.get("client_id")
+    client_secret = _gmail_config.get("client_secret")
+    
+    if not refresh_token or not client_id or not client_secret:
+        return False
+    
+    try:
+        with httpx.Client() as client:
+            response = client.post(
+                TOKEN_REFRESH_URL,
+                data={
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "refresh_token": refresh_token,
+                    "grant_type": "refresh_token",
+                }
+            )
+            
+            if response.status_code != 200:
+                return False
+            
+            tokens = response.json()
+            # Update credentials with new access token
+            _gmail_config["credentials"]["access_token"] = tokens.get("access_token")
+            _gmail_config["credentials"]["expires_in"] = tokens.get("expires_in", 3600)
+            _gmail_config["credentials"]["obtained_at"] = datetime.utcnow().isoformat()
+            return True
+    except Exception:
+        return False
+
+
+def _get_access_token() -> str | None:
+    """Get a valid access token, refreshing if necessary."""
+    if _is_token_expired():
+        if not _refresh_token():
+            return None
+    
+    return _gmail_config.get("credentials", {}).get("access_token")
+
+
+def _get_auth_headers() -> dict | None:
+    """Get authorization headers for API requests."""
+    access_token = _get_access_token()
+    if not access_token:
+        return None
+    
+    return {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
 
 
 @tool("gmail_send_email", args_schema=SendEmailInput)
-def gmail_send_email(to: str = "user@example.com", subject: str = "Message from Locus", body: str = "Hello!", message: str = "") -> str:
+def gmail_send_email(to: str, subject: str, body: str) -> str:
     """
     Send an email via Gmail.
     
     Use this when the user wants to send an email, message someone, or email a contact.
     """
-    # Use message as body if provided and body is default
-    if message and body == "Hello!":
-        body = message
-    
     try:
-        # Check if we have credentials or api_key
-        has_oauth = bool(_gmail_config.get("credentials"))
-        has_api_key = bool(_gmail_config.get("api_key"))
+        headers = _get_auth_headers()
+        if not headers:
+            return "Error: Gmail is not configured or token expired. Please reconnect your Gmail account."
         
-        if not has_oauth and not has_api_key:
-            return "Error: Gmail is not configured. Please connect your Gmail account first."
+        # Build RFC 2822 email message
+        message = MIMEText(body)
+        message["to"] = to
+        message["subject"] = subject
         
-        # If we have OAuth credentials, try to use them
-        if has_oauth:
-            try:
-                from googleapiclient.discovery import build
-                from google.oauth2.credentials import Credentials
-                import base64
-                from email.mime.text import MIMEText
-                
-                creds = Credentials.from_authorized_user_info(_gmail_config["credentials"])
-                service = build("gmail", "v1", credentials=creds)
-                
-                email_msg = MIMEText(body)
-                email_msg["to"] = to
-                email_msg["subject"] = subject
-                
-                raw = base64.urlsafe_b64encode(email_msg.as_bytes()).decode()
-                
-                result = service.users().messages().send(
-                    userId="me",
-                    body={"raw": raw}
-                ).execute()
-                
-                return f"✅ Email sent successfully!\nTo: {to}\nSubject: {subject}\nMessage ID: {result.get('id')}"
-                
-            except Exception as e:
-                # Fall through to demo mode
-                pass
+        # Base64url encode the message
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
         
-        # Demo/simulation mode (API key only, no OAuth)
-        return f"""✅ Email sent successfully!
+        # Send via Gmail API
+        with httpx.Client() as client:
+            response = client.post(
+                f"{GMAIL_API_BASE}/messages/send",
+                headers=headers,
+                json={"raw": raw}
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                return f"""✅ Email sent successfully!
 To: {to}
 Subject: {subject}
-Body: {body[:200]}{'...' if len(body) > 200 else ''}
-
-(Note: Full Gmail OAuth required for actual sending. Currently in demo mode.)"""
-            
+Message ID: {result.get('id', 'N/A')}"""
+            else:
+                error_detail = response.json().get("error", {}).get("message", "Unknown error")
+                return f"❌ Failed to send email: {error_detail}"
+                
     except Exception as e:
         return f"❌ Error sending email: {str(e)}"
 
 
-@tool("gmail_search_emails", args_schema=SearchEmailInput)
-def gmail_search_emails(query: str, max_results: int = 10) -> str:
+@tool("gmail_read_latest_emails", args_schema=ReadEmailsInput)
+def gmail_read_latest_emails(max_results: int = 5) -> str:
     """
-    Search emails in Gmail.
+    Read the latest emails from Gmail inbox.
     
-    Use this when the user wants to find emails, check messages, or search their inbox.
+    Use this when the user wants to check their emails, see recent messages, or read their inbox.
     """
     try:
-        if not _gmail_config.get("credentials"):
-            return "Error: Gmail is not configured. Please connect your Gmail account first."
+        headers = _get_auth_headers()
+        if not headers:
+            return "Error: Gmail is not configured or token expired. Please reconnect your Gmail account."
         
-        try:
-            from googleapiclient.discovery import build
-            from google.oauth2.credentials import Credentials
+        with httpx.Client() as client:
+            # Get list of messages
+            list_response = client.get(
+                f"{GMAIL_API_BASE}/messages",
+                headers=headers,
+                params={"maxResults": max_results}
+            )
             
-            creds = Credentials.from_authorized_user_info(_gmail_config["credentials"])
-            service = build("gmail", "v1", credentials=creds)
+            if list_response.status_code != 200:
+                error_detail = list_response.json().get("error", {}).get("message", "Unknown error")
+                return f"❌ Failed to fetch emails: {error_detail}"
             
-            results = service.users().messages().list(
-                userId="me",
-                q=query,
-                maxResults=max_results
-            ).execute()
-            
-            messages = results.get("messages", [])
+            messages = list_response.json().get("messages", [])
             
             if not messages:
-                return f"No emails found matching: {query}"
+                return "📭 No emails found in your inbox."
             
-            output = f"Found {len(messages)} email(s):\n\n"
+            output = f"📬 Latest {len(messages)} email(s):\n\n"
             
-            for msg in messages[:5]:  # Limit detail fetch
-                msg_data = service.users().messages().get(
-                    userId="me",
-                    id=msg["id"],
-                    format="metadata",
-                    metadataHeaders=["From", "Subject", "Date"]
-                ).execute()
+            # Fetch details for each message
+            for msg in messages:
+                msg_response = client.get(
+                    f"{GMAIL_API_BASE}/messages/{msg['id']}",
+                    headers=headers,
+                    params={"format": "metadata", "metadataHeaders": ["From", "Subject"]}
+                )
                 
-                headers = {h["name"]: h["value"] for h in msg_data.get("payload", {}).get("headers", [])}
-                output += f"• From: {headers.get('From', 'Unknown')}\n"
-                output += f"  Subject: {headers.get('Subject', 'No subject')}\n"
-                output += f"  Date: {headers.get('Date', 'Unknown')}\n\n"
+                if msg_response.status_code == 200:
+                    msg_data = msg_response.json()
+                    
+                    # Extract headers
+                    headers_list = msg_data.get("payload", {}).get("headers", [])
+                    headers_dict = {h["name"]: h["value"] for h in headers_list}
+                    
+                    sender = headers_dict.get("From", "Unknown sender")
+                    subject = headers_dict.get("Subject", "No subject")
+                    snippet = msg_data.get("snippet", "")[:100]
+                    
+                    output += f"• From: {sender}\n"
+                    output += f"  Subject: {subject}\n"
+                    output += f"  Preview: {snippet}...\n\n"
             
             return output
             
-        except ImportError:
-            # Mock response for demo
-            return f"""Found 3 emails matching "{query}":
-
-• From: john@example.com
-  Subject: Meeting tomorrow at 2pm
-  Date: Dec 15, 2025
-
-• From: team@company.com
-  Subject: Weekly standup notes
-  Date: Dec 14, 2025
-
-• From: notifications@jira.com
-  Subject: Issue CONFLUX-123 updated
-  Date: Dec 13, 2025
-
-(Demo mode - google-api-python-client not fully configured)"""
-            
     except Exception as e:
-        return f"❌ Error searching emails: {str(e)}"
-
-
-@tool("gmail_get_unread")
-def gmail_get_unread() -> str:
-    """
-    Get unread emails from inbox.
-    
-    Use this when the user asks about unread emails, new messages, or wants to check their inbox.
-    """
-    try:
-        if not _gmail_config.get("credentials"):
-            return "Error: Gmail is not configured. Please connect your Gmail account first."
-        
-        try:
-            from googleapiclient.discovery import build
-            from google.oauth2.credentials import Credentials
-            
-            creds = Credentials.from_authorized_user_info(_gmail_config["credentials"])
-            service = build("gmail", "v1", credentials=creds)
-            
-            results = service.users().messages().list(
-                userId="me",
-                q="is:unread",
-                maxResults=10
-            ).execute()
-            
-            messages = results.get("messages", [])
-            
-            if not messages:
-                return "📭 No unread emails!"
-            
-            output = f"📬 You have {len(messages)} unread email(s):\n\n"
-            
-            for msg in messages[:5]:
-                msg_data = service.users().messages().get(
-                    userId="me",
-                    id=msg["id"],
-                    format="metadata",
-                    metadataHeaders=["From", "Subject"]
-                ).execute()
-                
-                headers = {h["name"]: h["value"] for h in msg_data.get("payload", {}).get("headers", [])}
-                output += f"• {headers.get('Subject', 'No subject')}\n"
-                output += f"  From: {headers.get('From', 'Unknown')}\n\n"
-            
-            return output
-            
-        except ImportError:
-            return """📬 You have 2 unread emails:
-
-• Weekly team sync agenda
-  From: manager@company.com
-
-• Your order has shipped
-  From: orders@amazon.com
-
-(Demo mode - google-api-python-client not fully configured)"""
-            
-    except Exception as e:
-        return f"❌ Error fetching unread emails: {str(e)}"
-
-
-@tool("gmail_create_draft", args_schema=DraftEmailInput)
-def gmail_create_draft(to: str, subject: str, body: str) -> str:
-    """
-    Create an email draft in Gmail.
-    
-    Use this when the user wants to draft an email, prepare a message, or save an email for later.
-    """
-    try:
-        if not _gmail_config.get("credentials"):
-            return "Error: Gmail is not configured. Please connect your Gmail account first."
-        
-        try:
-            from googleapiclient.discovery import build
-            from google.oauth2.credentials import Credentials
-            import base64
-            from email.mime.text import MIMEText
-            
-            creds = Credentials.from_authorized_user_info(_gmail_config["credentials"])
-            service = build("gmail", "v1", credentials=creds)
-            
-            message = MIMEText(body)
-            message["to"] = to
-            message["subject"] = subject
-            
-            raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
-            
-            result = service.users().drafts().create(
-                userId="me",
-                body={"message": {"raw": raw}}
-            ).execute()
-            
-            return f"✅ Draft created!\nTo: {to}\nSubject: {subject}\nDraft ID: {result.get('id')}"
-            
-        except ImportError:
-            return f"""✅ Draft created!
-To: {to}
-Subject: {subject}
-Body preview: {body[:100]}...
-
-(Demo mode - google-api-python-client not fully configured)"""
-            
-    except Exception as e:
-        return f"❌ Error creating draft: {str(e)}"
+        return f"❌ Error reading emails: {str(e)}"
 
 
 def get_gmail_tools(credentials: dict[str, Any] = None, api_key: str = "") -> list[BaseTool]:
@@ -269,21 +216,22 @@ def get_gmail_tools(credentials: dict[str, Any] = None, api_key: str = "") -> li
     Get LangChain tools for Gmail integration.
     
     Args:
-        credentials: OAuth credentials dict (optional)
-        api_key: API key for demo mode (optional)
+        credentials: OAuth credentials dict containing access_token, refresh_token, etc.
+        api_key: Not used (kept for compatibility)
         
     Returns:
         List of Gmail tools
     """
     global _gmail_config
+    
+    import os
     _gmail_config = {
         "credentials": credentials,
-        "api_key": api_key
+        "client_id": os.getenv("GOOGLE_CLIENT_ID", ""),
+        "client_secret": os.getenv("GOOGLE_CLIENT_SECRET", ""),
     }
     
     return [
         gmail_send_email,
-        gmail_search_emails,
-        gmail_get_unread,
-        gmail_create_draft
+        gmail_read_latest_emails,
     ]
