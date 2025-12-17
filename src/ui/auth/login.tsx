@@ -352,7 +352,7 @@ function LoginPage() {
             <div className="size-8 rounded-lg bg-primary-foreground/10 backdrop-blur-sm flex items-center justify-center">
               <Sparkles className="size-4" />
             </div>
-            <span>YourBrand</span>
+            <span>Locus</span>
           </div>
         </div>
 
