@@ -175,3 +175,37 @@ def delete_integration(db: Session, user_id: int, service_name: str) -> bool:
     db.delete(integration)
     db.commit()
     return True
+
+
+# Alias for OAuth router compatibility
+get_user_integration = get_integration
+
+
+def update_integration_credentials(
+    db: Session,
+    integration_id: int,
+    credentials: dict[str, Any]
+) -> bool:
+    """
+    Update credentials for an existing integration.
+    
+    Args:
+        db: Database session
+        integration_id: ID of the integration to update
+        credentials: New credentials (will be encrypted)
+        
+    Returns:
+        True if updated, False if not found
+    """
+    integration = db.query(models.Integration).filter(
+        models.Integration.id == integration_id
+    ).first()
+    
+    if not integration:
+        return False
+    
+    encrypted_creds = security.encrypt_credentials(credentials) if credentials else None
+    integration.encrypted_credentials = encrypted_creds
+    db.commit()
+    return True
+
