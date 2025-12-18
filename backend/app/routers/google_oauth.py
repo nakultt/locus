@@ -39,7 +39,25 @@ SCOPES = {
     "calendar": [
         "https://www.googleapis.com/auth/calendar",
         "https://www.googleapis.com/auth/calendar.events",
-    ]
+    ],
+    "docs": [
+        "https://www.googleapis.com/auth/documents",
+    ],
+    "sheets": [
+        "https://www.googleapis.com/auth/spreadsheets",
+    ],
+    "slides": [
+        "https://www.googleapis.com/auth/presentations",
+    ],
+    "drive": [
+        "https://www.googleapis.com/auth/drive",
+    ],
+    "forms": [
+        "https://www.googleapis.com/auth/forms.body",
+    ],
+    "meet": [
+        "https://www.googleapis.com/auth/calendar.events",
+    ],
 }
 
 # In-memory state storage (in production, use Redis or database)
@@ -78,10 +96,11 @@ async def google_oauth_start(
         )
     
     # Validate service
-    if service not in ["gmail", "calendar", "google"]:
+    valid_services = ["gmail", "calendar", "docs", "sheets", "slides", "drive", "forms", "meet", "google"]
+    if service not in valid_services:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Service must be 'gmail', 'calendar', or 'google' (for both)"
+            detail=f"Service must be one of: {', '.join(valid_services)}"
         )
     
     # Generate state token for CSRF protection
@@ -201,8 +220,9 @@ async def google_oauth_callback(
             url=f"{FRONTEND_URL}/integrations?error=user_not_found"
         )
     
-    # Store credentials for both Gmail and Calendar if user requested "google"
-    services_to_connect = ["gmail", "calendar"] if service == "google" else [service]
+    # Store credentials for all Google services if user requested "google"
+    all_google_services = ["gmail", "calendar", "docs", "sheets", "slides", "drive", "forms", "meet"]
+    services_to_connect = all_google_services if service == "google" else [service]
     
     for svc in services_to_connect:
         try:
