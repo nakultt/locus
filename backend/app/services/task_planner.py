@@ -233,7 +233,7 @@ def parse_tasks_from_message(message: str, available_services: list[str]) -> Tas
     
     try:
         llm = ChatGoogleGenerativeAI(
-            model="gemini-2.0-flash",
+            model="gemini-2.5-flash",
             google_api_key=google_api_key,
             temperature=0,
         )
