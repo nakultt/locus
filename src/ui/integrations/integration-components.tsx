@@ -128,6 +128,20 @@ const INTEGRATIONS = [
     oauthProvider: "google",
     fields: [],
   },
+  {
+    id: "github",
+    title: "GitHub",
+    description: "Repository, issue, and PR management.",
+    color: "text-gray-800",
+    authType: "api_key" as const,
+    fields: [
+      {
+        name: "api_key",
+        label: "Personal Access Token",
+        placeholder: "ghp_...",
+      },
+    ],
+  },
 ];
 
 // Connect Modal Component
@@ -237,6 +251,7 @@ const IntegrationCard = ({
         {config.id === "drive" && "☁️"}
         {config.id === "forms" && "📋"}
         {config.id === "meet" && "🎥"}
+        {config.id === "github" && "🐙"}
       </div>
 
       <div className="space-y-2 pb-6">
