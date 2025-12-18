@@ -173,6 +173,15 @@ SERVICE_TOOL_MAP = {
         "create_pr": "github_create_pr",
         "merge_pr": "github_merge_pr",
     },
+    "linear": {
+        "list_teams": "linear_list_teams",
+        "list_issues": "linear_list_issues",
+        "get_issue": "linear_get_issue",
+        "create_issue": "linear_create_issue",
+        "update_issue": "linear_update_issue",
+        "add_comment": "linear_add_comment",
+        "list_states": "linear_list_states",
+    },
 }
 
 
@@ -190,6 +199,7 @@ Available services and their actions:
 - sheets: create_spreadsheet, add_rows
 - bugasura: create_issue, list_issues
 - github: list_repos, get_repo, create_repo, list_issues, create_issue, update_issue, add_comment, list_prs, create_pr, merge_pr
+- linear: list_teams, list_issues, get_issue, create_issue, update_issue, add_comment, list_states
 
 For EACH task in the message, extract:
 1. service: which service to use
