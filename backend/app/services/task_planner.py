@@ -161,6 +161,18 @@ SERVICE_TOOL_MAP = {
         "create_issue": "bugasura_create_issue",
         "list_issues": "bugasura_list_issues",
     },
+    "github": {
+        "list_repos": "github_list_repos",
+        "get_repo": "github_get_repo",
+        "create_repo": "github_create_repo",
+        "list_issues": "github_list_issues",
+        "create_issue": "github_create_issue",
+        "update_issue": "github_update_issue",
+        "add_comment": "github_add_issue_comment",
+        "list_prs": "github_list_prs",
+        "create_pr": "github_create_pr",
+        "merge_pr": "github_merge_pr",
+    },
 }
 
 
@@ -177,6 +189,7 @@ Available services and their actions:
 - docs: create_document, append_content
 - sheets: create_spreadsheet, add_rows
 - bugasura: create_issue, list_issues
+- github: list_repos, get_repo, create_repo, list_issues, create_issue, update_issue, add_comment, list_prs, create_pr, merge_pr
 
 For EACH task in the message, extract:
 1. service: which service to use
