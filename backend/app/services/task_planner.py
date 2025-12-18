@@ -10,7 +10,7 @@ from enum import Enum
 import json
 import os
 
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 
 
@@ -225,16 +225,14 @@ def parse_tasks_from_message(message: str, available_services: list[str]) -> Tas
     Returns:
         TaskPlan with extracted tasks
     """
-    google_api_key = os.getenv("GOOGLE_API_KEY")
-    
-    if not google_api_key:
-        # Fallback: simple keyword-based extraction
-        return _fallback_parse_tasks(message, available_services)
+    # Use Ollama with Qwen3 (local LLM - no API calls)
+    ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    ollama_model = os.getenv("OLLAMA_MODEL", "qwen3:8b")
     
     try:
-        llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
-            google_api_key=google_api_key,
+        llm = ChatOllama(
+            model=ollama_model,
+            base_url=ollama_base_url,
             temperature=0,
         )
         
@@ -252,6 +250,13 @@ def parse_tasks_from_message(message: str, available_services: list[str]) -> Tas
                 content = content.split("\n", 1)[1]  # Remove first line
                 if content.endswith("```"):
                     content = content[:-3]
+                content = content.strip()
+            
+            # Handle Qwen3's thinking tags if present
+            if "<think>" in content:
+                # Remove thinking section
+                import re
+                content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
                 content = content.strip()
             
             tasks_data = json.loads(content)

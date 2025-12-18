@@ -7,7 +7,7 @@ import os
 from typing import Any
 from dotenv import load_dotenv
 
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_ollama import ChatOllama
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import BaseTool
@@ -28,20 +28,17 @@ from app.services.google_meet import get_meet_tools
 
 load_dotenv()
 
-# Initialize Gemini LLM
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+# Initialize Ollama with Qwen3 model (local LLM - no API calls)
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b")
 
-if not GOOGLE_API_KEY:
-    print("WARNING: GOOGLE_API_KEY not set. Chat functionality will be limited.")
+print(f"Using Ollama with model: {OLLAMA_MODEL} at {OLLAMA_BASE_URL}")
 
-llm = None
-if GOOGLE_API_KEY:
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
-        google_api_key=GOOGLE_API_KEY,
-        temperature=0.1,
-        convert_system_message_to_human=True,  # Required for Gemini to handle system prompts
-    )
+llm = ChatOllama(
+    model=OLLAMA_MODEL,
+    base_url=OLLAMA_BASE_URL,
+    temperature=0.1,
+)
 
 # System prompt for the agent
 SYSTEM_PROMPT = """You are Locus, an intelligent enterprise integration assistant.
