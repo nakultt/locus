@@ -3,12 +3,14 @@ Chat Router
 Natural language command processing via LangChain agent
 """
 
+import json
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app import schemas, crud
 from app.database import get_db
-from app.services.agent import process_chat_message
+from app.services.agent import process_chat_message, process_chat_message_streaming
 
 router = APIRouter()
 
@@ -91,6 +93,86 @@ async def chat(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error processing request: {str(e)}"
         )
+
+
+@router.post(
+    "/chat/stream",
+    summary="Process commands with real-time task updates"
+)
+async def chat_stream(
+    request: schemas.ChatRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Process a natural language message with streaming task updates.
+    
+    Returns Server-Sent Events (SSE) for real-time progress:
+    - planning: Initial analysis status
+    - plan: Full task plan with all identified tasks
+    - task_started: When each task begins
+    - task_completed: When each task finishes successfully
+    - task_failed: When a task fails
+    - complete: Final response with all results
+    - error: If something goes wrong
+    """
+    # Validate user exists
+    user = crud.get_user_by_id(db, request.user_id)
+    if not user:
+        async def error_generator():
+            yield f"data: {json.dumps({'event_type': 'error', 'data': {'message': 'User not found'}})}\n\n"
+        return StreamingResponse(
+            error_generator(),
+            media_type="text/event-stream"
+        )
+    
+    # Get user's connected integrations
+    integrations = crud.get_user_integrations(db, request.user_id)
+    if not integrations:
+        async def error_generator():
+            yield f"data: {json.dumps({'event_type': 'error', 'data': {'message': 'No integrations connected. Please connect at least one service first.'}})}\n\n"
+        return StreamingResponse(
+            error_generator(),
+            media_type="text/event-stream"
+        )
+    
+    # Build integration credentials map
+    integration_configs: dict[str, dict] = {}
+    for integration in integrations:
+        config = {}
+        
+        # Get decrypted API key
+        api_key = crud.get_integration_key(db, request.user_id, integration.service_name)
+        if api_key:
+            config["api_key"] = api_key
+        
+        # Get decrypted credentials
+        credentials = crud.get_integration_credentials(db, request.user_id, integration.service_name)
+        if credentials:
+            config["credentials"] = credentials
+        
+        if config:
+            integration_configs[integration.service_name] = config
+    
+    async def event_generator():
+        """Generate SSE events from the streaming chat processor."""
+        try:
+            async for event in process_chat_message_streaming(
+                message=request.message,
+                integration_configs=integration_configs
+            ):
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'event_type': 'error', 'data': {'message': str(e)}})}\n\n"
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Disable nginx buffering
+        }
+    )
 
 
 @router.get(

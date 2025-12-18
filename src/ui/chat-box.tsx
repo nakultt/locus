@@ -6,13 +6,17 @@ import {
   Wrench,
   CheckCircle,
   XCircle,
+  Loader2,
+  Clock,
 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useAuth } from "@/context/AuthContext";
 import {
-  sendChatMessage,
+  streamChatMessage,
   type ActionResult,
-  type ChatResponse,
+  type TaskUpdate,
+  type StreamEvent,
+  type TaskStatusType,
 } from "@/lib/api";
 
 interface Message {
@@ -21,6 +25,13 @@ interface Message {
   content: string;
   timestamp: Date;
   actions?: ActionResult[];
+}
+
+interface TaskProgress {
+  tasks: TaskUpdate[];
+  currentTaskId: string | null;
+  status: string;
+  isActive: boolean;
 }
 
 const PLACEHOLDERS = [
@@ -81,6 +92,128 @@ const ToolActionCard = ({ action }: { action: ActionResult }) => (
   </motion.div>
 );
 
+// Task Progress Panel - Shows live task execution status
+const TaskProgressPanel = ({
+  tasks,
+  status,
+}: {
+  tasks: TaskUpdate[];
+  status: string;
+}) => {
+  const completedCount = tasks.filter((t) => t.status === "completed").length;
+  const failedCount = tasks.filter((t) => t.status === "failed").length;
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, height: 0 }}
+      animate={{ opacity: 1, height: "auto" }}
+      exit={{ opacity: 0, height: 0 }}
+      className="bg-card border border-border rounded-xl p-4 mb-4 shadow-sm"
+    >
+      {/* Header */}
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <Loader2 className="w-4 h-4 animate-spin text-primary" />
+          <span className="text-sm font-medium text-foreground">
+            {status || `Executing tasks...`}
+          </span>
+        </div>
+        <span className="text-xs text-muted-foreground">
+          {completedCount}/{tasks.length} completed
+          {failedCount > 0 && ` • ${failedCount} failed`}
+        </span>
+      </div>
+
+      {/* Progress bar */}
+      <div className="h-1.5 bg-muted rounded-full overflow-hidden mb-4">
+        <motion.div
+          className="h-full bg-gradient-to-r from-primary to-primary/70"
+          initial={{ width: 0 }}
+          animate={{ width: `${(completedCount / tasks.length) * 100}%` }}
+          transition={{ duration: 0.3 }}
+        />
+      </div>
+
+      {/* Task list */}
+      <div className="space-y-2">
+        {tasks.map((task) => (
+          <motion.div
+            key={task.task_id}
+            initial={{ opacity: 0, x: -10 }}
+            animate={{ opacity: 1, x: 0 }}
+            className={`flex items-center gap-3 p-2.5 rounded-lg transition-colors ${
+              task.status === "in_progress"
+                ? "bg-primary/10 border border-primary/30"
+                : task.status === "completed"
+                ? "bg-green-500/10"
+                : task.status === "failed"
+                ? "bg-red-500/10"
+                : "bg-muted/30"
+            }`}
+          >
+            {/* Status Icon */}
+            <div className="flex-shrink-0">
+              {task.status === "pending" && (
+                <Clock className="w-4 h-4 text-muted-foreground" />
+              )}
+              {task.status === "in_progress" && (
+                <Loader2 className="w-4 h-4 animate-spin text-primary" />
+              )}
+              {task.status === "completed" && (
+                <CheckCircle className="w-4 h-4 text-green-500" />
+              )}
+              {task.status === "failed" && (
+                <XCircle className="w-4 h-4 text-red-500" />
+              )}
+            </div>
+
+            {/* Service Icon */}
+            <span className="text-base flex-shrink-0">
+              {getServiceIcon(task.service)}
+            </span>
+
+            {/* Description */}
+            <div className="flex-1 min-w-0">
+              <p className="text-sm text-foreground truncate">
+                {task.description}
+              </p>
+              {task.result && task.status === "completed" && (
+                <p className="text-xs text-green-600 truncate mt-0.5">
+                  ✓ {task.result.substring(0, 60)}...
+                </p>
+              )}
+              {task.error && (
+                <p className="text-xs text-red-400 truncate mt-0.5">
+                  {task.error}
+                </p>
+              )}
+            </div>
+
+            {/* Status Badge */}
+            <span
+              className={`text-xs px-2 py-0.5 rounded-full flex-shrink-0 ${
+                task.status === "in_progress"
+                  ? "bg-primary text-primary-foreground"
+                  : task.status === "completed"
+                  ? "bg-green-500 text-white"
+                  : task.status === "failed"
+                  ? "bg-red-500 text-white"
+                  : "bg-muted text-muted-foreground"
+              }`}
+            >
+              {task.status === "in_progress"
+                ? "Running..."
+                : task.status === "pending"
+                ? "Waiting"
+                : task.status}
+            </span>
+          </motion.div>
+        ))}
+      </div>
+    </motion.div>
+  );
+};
+
 // Message component for individual messages
 const ChatMessage = ({ message }: { message: Message }) => {
   const isUser = message.role === "user";
@@ -129,14 +262,21 @@ const ChatInterface = () => {
   const [showPlaceholder, setShowPlaceholder] = useState(true);
   const [isActive, setIsActive] = useState(false);
   const [thinkActive, setThinkActive] = useState(false);
+  const [taskProgress, setTaskProgress] = useState<TaskProgress>({
+    tasks: [],
+    currentTaskId: null,
+    status: "",
+    isActive: false,
+  });
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<(() => void) | null>(null);
   const { user } = useAuth();
 
-  // Scroll to bottom when new messages arrive
+  // Scroll to bottom when new messages arrive or task progress updates
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, taskProgress]);
 
   // Cycle placeholder text when input is inactive
   useEffect(() => {
@@ -168,6 +308,15 @@ const ChatInterface = () => {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [inputValue]);
 
+  // Cleanup abort on unmount
+  useEffect(() => {
+    return () => {
+      if (abortRef.current) {
+        abortRef.current();
+      }
+    };
+  }, []);
+
   const handleActivate = () => setIsActive(true);
 
   const sendMessage = async () => {
@@ -181,42 +330,156 @@ const ChatInterface = () => {
     };
 
     setMessages((prev) => [...prev, userMessage]);
+    const messageContent = inputValue.trim();
     setInputValue("");
     setIsLoading(true);
+    setTaskProgress({
+      tasks: [],
+      currentTaskId: null,
+      status: "Analyzing your request...",
+      isActive: true,
+    });
 
-    try {
-      // Call real backend API
-      if (!user?.id) {
-        throw new Error("Please log in to use the chat");
-      }
-
-      const response: ChatResponse = await sendChatMessage(
-        user.id,
-        userMessage.content
-      );
-
-      const aiMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: "assistant",
-        content: response.message,
-        timestamp: new Date(),
-        actions: response.actions_taken,
-      };
-      setMessages((prev) => [...prev, aiMessage]);
-    } catch (err) {
+    if (!user?.id) {
       const errorMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: "assistant",
-        content:
-          err instanceof Error
-            ? err.message
-            : "Sorry, I encountered an error. Please try again.",
+        content: "Please log in to use the chat",
         timestamp: new Date(),
       };
       setMessages((prev) => [...prev, errorMessage]);
-    } finally {
       setIsLoading(false);
+      setTaskProgress((prev) => ({ ...prev, isActive: false }));
+      return;
     }
+
+    // Use streaming API for real-time updates
+    abortRef.current = streamChatMessage(
+      user.id,
+      messageContent,
+      // onEvent - handle each SSE event
+      (event: StreamEvent) => {
+        switch (event.event_type) {
+          case "planning":
+            setTaskProgress((prev) => ({
+              ...prev,
+              status: event.data.status || "Planning...",
+            }));
+            break;
+
+          case "plan":
+            // Received the task plan
+            if (event.data.tasks) {
+              const tasks: TaskUpdate[] = event.data.tasks.map((t) => ({
+                ...t,
+                status: "pending" as TaskStatusType,
+              }));
+              setTaskProgress({
+                tasks,
+                currentTaskId: null,
+                status: `Executing ${tasks.length} tasks...`,
+                isActive: true,
+              });
+            }
+            break;
+
+          case "task_started":
+            setTaskProgress((prev) => ({
+              ...prev,
+              currentTaskId: event.data.task_id || null,
+              status: `Running: ${event.data.description || event.data.action}`,
+              tasks: prev.tasks.map((t) =>
+                t.task_id === event.data.task_id
+                  ? { ...t, status: "in_progress" as TaskStatusType }
+                  : t
+              ),
+            }));
+            break;
+
+          case "task_completed":
+            setTaskProgress((prev) => ({
+              ...prev,
+              tasks: prev.tasks.map((t) =>
+                t.task_id === event.data.task_id
+                  ? {
+                      ...t,
+                      status: "completed" as TaskStatusType,
+                      result: event.data.result,
+                    }
+                  : t
+              ),
+            }));
+            break;
+
+          case "task_failed":
+            setTaskProgress((prev) => ({
+              ...prev,
+              tasks: prev.tasks.map((t) =>
+                t.task_id === event.data.task_id
+                  ? {
+                      ...t,
+                      status: "failed" as TaskStatusType,
+                      error: event.data.error,
+                    }
+                  : t
+              ),
+            }));
+            break;
+
+          case "complete": {
+            // Final response - add AI message
+            const aiMessage: Message = {
+              id: (Date.now() + 1).toString(),
+              role: "assistant",
+              content: event.data.message || "Tasks completed.",
+              timestamp: new Date(),
+              actions: event.data.actions_taken,
+            };
+            setMessages((prev) => [...prev, aiMessage]);
+            setTaskProgress((prev) => ({
+              ...prev,
+              status: "Complete!",
+              isActive: false,
+            }));
+            setIsLoading(false);
+            break;
+          }
+
+          case "error": {
+            const errorMsg: Message = {
+              id: (Date.now() + 1).toString(),
+              role: "assistant",
+              content: event.data.message || "An error occurred.",
+              timestamp: new Date(),
+            };
+            setMessages((prev) => [...prev, errorMsg]);
+            setTaskProgress((prev) => ({ ...prev, isActive: false }));
+            setIsLoading(false);
+            break;
+          }
+        }
+      },
+      // onError
+      (error: Error) => {
+        const errorMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: error.message || "Sorry, I encountered an error.",
+          timestamp: new Date(),
+        };
+        setMessages((prev) => [...prev, errorMessage]);
+        setTaskProgress((prev) => ({ ...prev, isActive: false }));
+        setIsLoading(false);
+      },
+      // onComplete
+      () => {
+        // Stream finished
+        if (isLoading) {
+          setIsLoading(false);
+          setTaskProgress((prev) => ({ ...prev, isActive: false }));
+        }
+      }
+    );
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
@@ -281,37 +544,26 @@ const ChatInterface = () => {
             {messages.map((message) => (
               <ChatMessage key={message.id} message={message} />
             ))}
-            {isLoading && (
+            {/* Show TaskProgressPanel when streaming with tasks */}
+            {taskProgress.isActive && taskProgress.tasks.length > 0 && (
+              <TaskProgressPanel
+                tasks={taskProgress.tasks}
+                status={taskProgress.status}
+              />
+            )}
+            {/* Show simple loading indicator when no task plan yet */}
+            {isLoading && taskProgress.tasks.length === 0 && (
               <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 className="flex justify-start mb-4"
               >
                 <div className="py-2">
-                  <div className="flex gap-1">
-                    <motion.span
-                      animate={{ opacity: [0.4, 1, 0.4] }}
-                      transition={{ duration: 1.5, repeat: Infinity }}
-                      className="w-2 h-2 bg-muted-foreground rounded-full"
-                    />
-                    <motion.span
-                      animate={{ opacity: [0.4, 1, 0.4] }}
-                      transition={{
-                        duration: 1.5,
-                        repeat: Infinity,
-                        delay: 0.2,
-                      }}
-                      className="w-2 h-2 bg-muted-foreground rounded-full"
-                    />
-                    <motion.span
-                      animate={{ opacity: [0.4, 1, 0.4] }}
-                      transition={{
-                        duration: 1.5,
-                        repeat: Infinity,
-                        delay: 0.4,
-                      }}
-                      className="w-2 h-2 bg-muted-foreground rounded-full"
-                    />
+                  <div className="flex items-center gap-2">
+                    <Loader2 className="w-4 h-4 animate-spin text-primary" />
+                    <span className="text-sm text-muted-foreground">
+                      {taskProgress.status || "Processing..."}
+                    </span>
                   </div>
                 </div>
               </motion.div>
