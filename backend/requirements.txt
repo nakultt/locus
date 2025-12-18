@@ -22,11 +22,11 @@ python-dotenv>=1.0.0
 email-validator>=2.0.0
 
 # LangChain - pinned versions for stability
-langchain==0.3.18
-langchain-core==0.3.49
-langchain-google-genai==2.1.2
-langchain-community==0.3.17
-langgraph==0.3.30
+langchain>=0.3.18
+langchain-core>=0.3.49
+langchain-ollama>=0.3.10
+langchain-community>=0.3.17
+langgraph>=0.3.30
 
 # Integration SDKs
 atlassian-python-api>=3.41.0
