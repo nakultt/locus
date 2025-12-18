@@ -8,8 +8,8 @@ from typing import Any
 from dotenv import load_dotenv
 
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.agents import AgentExecutor, create_react_agent
-from langchain_core.prompts import PromptTemplate
+from langchain.agents import AgentExecutor, create_tool_calling_agent
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import BaseTool
 
 from app.schemas import ChatResponse, ActionResult
@@ -18,6 +18,7 @@ from app.services.gmail import get_gmail_tools
 from app.services.calendar import get_calendar_tools
 from app.services.slack import get_slack_tools
 from app.services.notion import get_notion_tools
+from app.services.bugasura import get_bugasura_tools
 
 load_dotenv()
 
@@ -33,32 +34,52 @@ if GOOGLE_API_KEY:
         model="gemini-2.5-flash",
         google_api_key=GOOGLE_API_KEY,
         temperature=0.1,
-        convert_system_message_to_human=True
+        convert_system_message_to_human=True,  # Required for Gemini to handle system prompts
     )
 
-# ReAct prompt template
-REACT_PROMPT = """You are Conflux, an intelligent enterprise integration assistant.
+# System prompt for the agent
+SYSTEM_PROMPT = """You are Locus, an intelligent enterprise integration assistant.
 Your role is to help users interact with their connected workplace tools through natural language.
 
-You have access to the following tools:
+## Your Capabilities:
 
-{tools}
+### Jira (Issue & Project Management)
+- Create, update, and search issues using JQL
+- Add comments and transition issues between statuses
+- Create and delete projects (deletion requires confirmation)
+- List and assign workflow schemes to projects
+- List and assign permission schemes to projects
 
-Use the following format:
+### Slack (Team Communication)
+- Send messages to channels
+- Post formatted updates with titles
+- List available channels
 
-Question: the input question you must answer
-Thought: you should always think about what to do
-Action: the action to take, should be one of [{tool_names}]
-Action Input: the input to the action
-Observation: the result of the action
-... (this Thought/Action/Action Input/Observation can repeat N times)
-Thought: I now know the final answer
-Final Answer: the final answer to the original input question
+### Notion (Documentation)
+- Search pages and content
+- Get page content by title
+- List recent pages
+- Create new pages with content
+- Append content to existing pages
 
-Begin!
+### Gmail (Email)
+- Send emails with subject and body
 
-Question: {input}
-Thought: {agent_scratchpad}"""
+### Google Calendar (Scheduling)
+- Create calendar events with attendees
+- View upcoming events
+
+### Bugasura (Bug Tracking)
+- Create and list bugs/issues
+- Add comments to issues
+- Get issue details
+
+## Guidelines:
+- When the user asks you to do something, use the appropriate tool with correct parameters.
+- For destructive actions like deleting projects, always confirm with the user first.
+- If a tool returns an error, explain what went wrong and suggest alternatives.
+- Be concise but informative in your responses.
+- When searching Jira, help users construct JQL queries if needed."""
 
 
 def build_tools(integration_configs: dict[str, dict]) -> list[BaseTool]:
@@ -110,16 +131,33 @@ def build_tools(integration_configs: dict[str, dict]) -> list[BaseTool]:
         )
         tools.extend(notion_tools)
     
+    # Bugasura tools
+    if "bugasura" in integration_configs:
+        config = integration_configs["bugasura"]
+        bugasura_tools = get_bugasura_tools(
+            api_key=config.get("api_key", ""),
+            team_id=config.get("credentials", {}).get("team_id", ""),
+            project_key=config.get("credentials", {}).get("project_key", "")
+        )
+        tools.extend(bugasura_tools)
+    
     return tools
 
 
 def create_agent_executor(tools: list[BaseTool]) -> AgentExecutor:
-    """Create a LangChain agent with the given tools."""
+    """Create a LangChain agent with the given tools using native tool calling."""
     if not llm:
         raise ValueError("LLM not configured. Please set GOOGLE_API_KEY.")
     
-    prompt = PromptTemplate.from_template(REACT_PROMPT)
-    agent = create_react_agent(llm, tools, prompt)
+    # Create a prompt that works with the tool calling agent
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", SYSTEM_PROMPT),
+        ("human", "{input}"),
+        MessagesPlaceholder(variable_name="agent_scratchpad"),
+    ])
+    
+    # Use tool calling agent instead of ReAct for better structured output
+    agent = create_tool_calling_agent(llm, tools, prompt)
     
     return AgentExecutor(
         agent=agent,
@@ -214,6 +252,8 @@ def determine_service(tool_name: str) -> str:
         return "slack"
     elif "notion" in tool_lower:
         return "notion"
+    elif "bugasura" in tool_lower:
+        return "bugasura"
     return "unknown"
 
 

@@ -4,15 +4,14 @@
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 
-# Database (use psycopg2-binary for Python 3.12 or run: conda install psycopg2 for Python 3.13)
+# Database
 sqlalchemy>=2.0.36
-# psycopg2-binary  # Uncomment for Python 3.12 or install via conda for Python 3.13
+psycopg2-binary>=2.9.9
 
 # Migrations
 alembic>=1.13.0
 
 # Security
-bcrypt==4.0.1
 passlib[bcrypt]>=1.7.4
 cryptography>=41.0.0
 python-jose[cryptography]>=3.3.0

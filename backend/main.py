@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import engine, Base
-from app.routers import auth, chat
+from app.routers import auth, chat, google_oauth
 
 
 @asynccontextmanager
@@ -45,6 +45,7 @@ app.add_middleware(
 
 # Include Routers
 app.include_router(auth.router, prefix="/auth", tags=["Authentication"])
+app.include_router(google_oauth.router, prefix="/auth", tags=["Google OAuth"])
 app.include_router(chat.router, prefix="/api", tags=["Chat"])
 
 
