@@ -25,6 +25,8 @@ from app.services.google_slides import get_slides_tools
 from app.services.google_drive import get_drive_tools
 from app.services.google_forms import get_forms_tools
 from app.services.google_meet import get_meet_tools
+from app.services.github import get_github_tools
+from app.services.linear import get_linear_tools
 
 load_dotenv()
 
@@ -103,6 +105,18 @@ Your role is to help users interact with their connected workplace tools through
 - Create and list bugs/issues
 - Add comments to issues
 - Get issue details
+
+### GitHub (Source Control & Issues)
+- List, view and create repositories
+- Create, update, and comment on issues
+- List, create, and merge pull requests
+- Get authenticated user info
+
+### Linear (Issue Tracking)
+- List teams and workflow states
+- Create, update, and list issues
+- Add comments to issues
+- Update issue status and priority
 
 ## Guidelines:
 - When the user asks you to do something, use the appropriate tool with correct parameters.
@@ -244,6 +258,22 @@ def build_tools(integration_configs: dict[str, dict]) -> list[BaseTool]:
         )
         tools.extend(meet_tools)
     
+    # GitHub tools
+    if "github" in integration_configs:
+        config = integration_configs["github"]
+        github_tools = get_github_tools(
+            token=config.get("api_key", "")
+        )
+        tools.extend(github_tools)
+    
+    # Linear tools
+    if "linear" in integration_configs:
+        config = integration_configs["linear"]
+        linear_tools = get_linear_tools(
+            api_key=config.get("api_key", "")
+        )
+        tools.extend(linear_tools)
+    
     return tools
 
 
@@ -369,6 +399,10 @@ def determine_service(tool_name: str) -> str:
         return "forms"
     elif "meet" in tool_lower or "meeting" in tool_lower:
         return "meet"
+    elif "github" in tool_lower:
+        return "github"
+    elif "linear" in tool_lower:
+        return "linear"
     return "unknown"
 
 
