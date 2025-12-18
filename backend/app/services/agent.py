@@ -19,6 +19,12 @@ from app.services.calendar import get_calendar_tools
 from app.services.slack import get_slack_tools
 from app.services.notion import get_notion_tools
 from app.services.bugasura import get_bugasura_tools
+from app.services.google_docs import get_docs_tools
+from app.services.google_sheets import get_sheets_tools
+from app.services.google_slides import get_slides_tools
+from app.services.google_drive import get_drive_tools
+from app.services.google_forms import get_forms_tools
+from app.services.google_meet import get_meet_tools
 
 load_dotenv()
 
@@ -64,10 +70,34 @@ Your role is to help users interact with their connected workplace tools through
 
 ### Gmail (Email)
 - Send emails with subject and body
+- Read latest emails from inbox
 
 ### Google Calendar (Scheduling)
-- Create calendar events with attendees
-- View upcoming events
+- Create, update, and delete calendar events
+- Add attendees to events
+
+### Google Docs (Documents)
+- Create new documents with content
+- Append content to existing documents
+
+### Google Sheets (Spreadsheets)
+- Create new spreadsheets
+- Add rows to existing spreadsheets
+
+### Google Slides (Presentations)
+- Create presentations with slides and bullet points
+
+### Google Drive (File Storage)
+- Upload files to Drive
+- Share files with users
+- List and search files
+
+### Google Forms (Surveys)
+- Create forms with text and choice questions
+
+### Google Meet (Video Meetings)
+- Create video meetings with Meet links
+- Schedule meetings with attendees
 
 ### Bugasura (Bug Tracking)
 - Create and list bugs/issues
@@ -140,6 +170,54 @@ def build_tools(integration_configs: dict[str, dict]) -> list[BaseTool]:
             project_key=config.get("credentials", {}).get("project_key", "")
         )
         tools.extend(bugasura_tools)
+    
+    # Google Docs tools
+    if "docs" in integration_configs:
+        config = integration_configs["docs"]
+        docs_tools = get_docs_tools(
+            credentials=config.get("credentials", {})
+        )
+        tools.extend(docs_tools)
+    
+    # Google Sheets tools
+    if "sheets" in integration_configs:
+        config = integration_configs["sheets"]
+        sheets_tools = get_sheets_tools(
+            credentials=config.get("credentials", {})
+        )
+        tools.extend(sheets_tools)
+    
+    # Google Slides tools
+    if "slides" in integration_configs:
+        config = integration_configs["slides"]
+        slides_tools = get_slides_tools(
+            credentials=config.get("credentials", {})
+        )
+        tools.extend(slides_tools)
+    
+    # Google Drive tools
+    if "drive" in integration_configs:
+        config = integration_configs["drive"]
+        drive_tools = get_drive_tools(
+            credentials=config.get("credentials", {})
+        )
+        tools.extend(drive_tools)
+    
+    # Google Forms tools
+    if "forms" in integration_configs:
+        config = integration_configs["forms"]
+        forms_tools = get_forms_tools(
+            credentials=config.get("credentials", {})
+        )
+        tools.extend(forms_tools)
+    
+    # Google Meet tools
+    if "meet" in integration_configs:
+        config = integration_configs["meet"]
+        meet_tools = get_meet_tools(
+            credentials=config.get("credentials", {})
+        )
+        tools.extend(meet_tools)
     
     return tools
 
@@ -254,6 +332,18 @@ def determine_service(tool_name: str) -> str:
         return "notion"
     elif "bugasura" in tool_lower:
         return "bugasura"
+    elif "docs" in tool_lower or "document" in tool_lower:
+        return "docs"
+    elif "sheets" in tool_lower or "spreadsheet" in tool_lower:
+        return "sheets"
+    elif "slides" in tool_lower or "presentation" in tool_lower:
+        return "slides"
+    elif "drive" in tool_lower or "file" in tool_lower:
+        return "drive"
+    elif "forms" in tool_lower or "form" in tool_lower:
+        return "forms"
+    elif "meet" in tool_lower or "meeting" in tool_lower:
+        return "meet"
     return "unknown"
 
 
