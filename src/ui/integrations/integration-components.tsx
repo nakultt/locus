@@ -63,7 +63,7 @@ const INTEGRATIONS = [
     color: "text-red-500",
     authType: "oauth" as const,
     oauthProvider: "google",
-    fields: [], // No fields for OAuth
+    fields: [],
   },
   {
     id: "calendar",
@@ -72,7 +72,61 @@ const INTEGRATIONS = [
     color: "text-green-600",
     authType: "oauth" as const,
     oauthProvider: "google",
-    fields: [], // No fields for OAuth
+    fields: [],
+  },
+  {
+    id: "docs",
+    title: "Google Docs",
+    description: "Create and edit documents collaboratively.",
+    color: "text-blue-600",
+    authType: "oauth" as const,
+    oauthProvider: "google",
+    fields: [],
+  },
+  {
+    id: "sheets",
+    title: "Google Sheets",
+    description: "Spreadsheet creation and data management.",
+    color: "text-green-600",
+    authType: "oauth" as const,
+    oauthProvider: "google",
+    fields: [],
+  },
+  {
+    id: "slides",
+    title: "Google Slides",
+    description: "Create stunning presentations.",
+    color: "text-yellow-600",
+    authType: "oauth" as const,
+    oauthProvider: "google",
+    fields: [],
+  },
+  {
+    id: "drive",
+    title: "Google Drive",
+    description: "Cloud file storage and sharing.",
+    color: "text-blue-500",
+    authType: "oauth" as const,
+    oauthProvider: "google",
+    fields: [],
+  },
+  {
+    id: "forms",
+    title: "Google Forms",
+    description: "Create surveys and collect responses.",
+    color: "text-purple-600",
+    authType: "oauth" as const,
+    oauthProvider: "google",
+    fields: [],
+  },
+  {
+    id: "meet",
+    title: "Google Meet",
+    description: "Video meetings and conferencing.",
+    color: "text-green-500",
+    authType: "oauth" as const,
+    oauthProvider: "google",
+    fields: [],
   },
 ];
 
@@ -177,6 +231,12 @@ const IntegrationCard = ({
         {config.id === "notion" && "📝"}
         {config.id === "gmail" && "📧"}
         {config.id === "calendar" && "📅"}
+        {config.id === "docs" && "📄"}
+        {config.id === "sheets" && "📊"}
+        {config.id === "slides" && "🎨"}
+        {config.id === "drive" && "☁️"}
+        {config.id === "forms" && "📋"}
+        {config.id === "meet" && "🎥"}
       </div>
 
       <div className="space-y-2 pb-6">
