@@ -841,18 +841,6 @@ function LoginPage() {
             </Button>
           </form>
 
-          {/* Social Login */}
-          <div className="mt-6">
-            <Button
-              variant="outline"
-              className="w-full h-12 bg-background border-border/60 hover:bg-accent"
-              type="button"
-            >
-              <Mail className="mr-2 size-5" />
-              {isSignupMode ? "Sign up with Google" : "Log in with Google"}
-            </Button>
-          </div>
-
           {/* Toggle Login/Signup */}
           <div className="text-center text-sm text-muted-foreground mt-8">
             {isSignupMode ? (
