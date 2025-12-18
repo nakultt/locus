@@ -17,6 +17,7 @@ const INTEGRATIONS = [
     title: "Slack",
     description: "Team communication and collaboration hub.",
     color: "text-purple-600",
+    logo: "https://cdn.worldvectorlogo.com/logos/slack-new-logo.svg",
     authType: "api_key" as const,
     fields: [{ name: "api_key", label: "Bot Token", placeholder: "xoxb-..." }],
   },
@@ -25,6 +26,7 @@ const INTEGRATIONS = [
     title: "Jira",
     description: "Atlassian issue tracking and project management.",
     color: "text-blue-600",
+    logo: "https://cdn.worldvectorlogo.com/logos/jira-1.svg",
     authType: "api_key" as const,
     fields: [
       { name: "api_key", label: "API Token", placeholder: "Your API token" },
@@ -47,6 +49,7 @@ const INTEGRATIONS = [
     title: "Notion",
     description: "All-in-one workspace for notes and projects.",
     color: "text-gray-900",
+    logo: "https://cdn.worldvectorlogo.com/logos/notion-2.svg",
     authType: "api_key" as const,
     fields: [
       {
@@ -61,6 +64,7 @@ const INTEGRATIONS = [
     title: "Gmail",
     description: "Email management and automation.",
     color: "text-red-500",
+    logo: "https://cdn.worldvectorlogo.com/logos/google-gmail-2.svg",
     authType: "oauth" as const,
     oauthProvider: "google",
     fields: [],
@@ -70,6 +74,7 @@ const INTEGRATIONS = [
     title: "Google Calendar",
     description: "Scheduling and calendar management.",
     color: "text-green-600",
+    logo: "https://cdn.worldvectorlogo.com/logos/google-calendar-2.svg",
     authType: "oauth" as const,
     oauthProvider: "google",
     fields: [],
@@ -79,6 +84,7 @@ const INTEGRATIONS = [
     title: "Google Docs",
     description: "Create and edit documents collaboratively.",
     color: "text-blue-600",
+    logo: "https://cdn.worldvectorlogo.com/logos/google-docs-2.svg",
     authType: "oauth" as const,
     oauthProvider: "google",
     fields: [],
@@ -88,6 +94,7 @@ const INTEGRATIONS = [
     title: "Google Sheets",
     description: "Spreadsheet creation and data management.",
     color: "text-green-600",
+    logo: "https://cdn.worldvectorlogo.com/logos/google-sheets-2.svg",
     authType: "oauth" as const,
     oauthProvider: "google",
     fields: [],
@@ -97,6 +104,7 @@ const INTEGRATIONS = [
     title: "Google Slides",
     description: "Create stunning presentations.",
     color: "text-yellow-600",
+    logo: "https://cdn.worldvectorlogo.com/logos/google-slides-2.svg",
     authType: "oauth" as const,
     oauthProvider: "google",
     fields: [],
@@ -106,6 +114,7 @@ const INTEGRATIONS = [
     title: "Google Drive",
     description: "Cloud file storage and sharing.",
     color: "text-blue-500",
+    logo: "https://cdn.worldvectorlogo.com/logos/google-drive-2.svg",
     authType: "oauth" as const,
     oauthProvider: "google",
     fields: [],
@@ -115,6 +124,7 @@ const INTEGRATIONS = [
     title: "Google Forms",
     description: "Create surveys and collect responses.",
     color: "text-purple-600",
+    logo: "https://cdn.worldvectorlogo.com/logos/google-forms-2.svg",
     authType: "oauth" as const,
     oauthProvider: "google",
     fields: [],
@@ -124,6 +134,7 @@ const INTEGRATIONS = [
     title: "Google Meet",
     description: "Video meetings and conferencing.",
     color: "text-green-500",
+    logo: "https://cdn.worldvectorlogo.com/logos/google-meet-2.svg",
     authType: "oauth" as const,
     oauthProvider: "google",
     fields: [],
@@ -225,19 +236,14 @@ const IntegrationCard = ({
 }) => (
   <Card className="p-6">
     <div className="relative">
-      <div className={`text-3xl mb-4 ${config.color}`}>
-        {config.id === "slack" && "💬"}
-        {config.id === "jira" && "🎫"}
-        {config.id === "notion" && "📝"}
-        {config.id === "gmail" && "📧"}
-        {config.id === "calendar" && "📅"}
-        {config.id === "docs" && "📄"}
-        {config.id === "sheets" && "📊"}
-        {config.id === "slides" && "🎨"}
-        {config.id === "drive" && "☁️"}
-        {config.id === "forms" && "📋"}
-        {config.id === "meet" && "🎥"}
-      </div>
+    <div className="mb-4">
+  <img
+    src={config.logo}
+    alt={config.title}
+    className="h-10 w-10"
+  />
+     </div>
+
 
       <div className="space-y-2 pb-6">
         <div className="flex items-center gap-2">
