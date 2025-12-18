@@ -109,7 +109,32 @@ Your role is to help users interact with their connected workplace tools through
 - For destructive actions like deleting projects, always confirm with the user first.
 - If a tool returns an error, explain what went wrong and suggest alternatives.
 - Be concise but informative in your responses.
-- When searching Jira, help users construct JQL queries if needed."""
+- When searching Jira, help users construct JQL queries if needed.
+
+## CRITICAL: Multi-Task Execution
+
+When a user requests MULTIPLE actions in a single message, you MUST:
+
+1. **Identify ALL tasks**: Parse the entire message and list every action the user wants.
+2. **Execute ALL tasks**: Do NOT stop after completing just one task. Continue calling tools until EVERY requested action is complete.
+3. **Execute in logical order**: If tasks depend on each other, execute them in the right sequence:
+   - Calendar/Meeting creation FIRST (to get event links/IDs)
+   - Jira ticket creation (to get ticket keys)
+   - Slack messages (can reference tickets/meetings)
+   - Gmail emails (include meeting links, ticket references)
+   - Notion summaries LAST (can summarize all actions taken)
+4. **Chain results**: Use output from previous tasks as input for subsequent tasks:
+   - If user wants to "email about the meeting", include the actual meeting link from the calendar event
+   - If user wants to "summarize in Notion", include details from all completed actions
+5. **Report everything**: After completing all tasks, provide a comprehensive summary of ALL actions taken.
+
+EXAMPLE: If user says "send a Slack message to #general, create a Jira ticket, and send an email to bob@example.com":
+- Call slack_send_message
+- Call jira_create_issue
+- Call gmail_send_email (mention the Jira ticket key)
+- Then respond with summary of all three actions
+
+NEVER stop after just 1-2 actions if the user requested more. ALWAYS complete ALL requested tasks."""
 
 
 def build_tools(integration_configs: dict[str, dict]) -> list[BaseTool]:
@@ -242,7 +267,7 @@ def create_agent_executor(tools: list[BaseTool]) -> AgentExecutor:
         tools=tools,
         verbose=True,
         handle_parsing_errors=True,
-        max_iterations=5
+        max_iterations=15  # Increased for multi-tool requests
     )
 
 
@@ -456,3 +481,202 @@ async def process_without_llm(
         actions_taken=actions_taken,
         raw_response=None
     )
+
+
+# ============================================================================
+# STREAMING CHAT PROCESSING
+# ============================================================================
+
+from typing import AsyncGenerator
+from app.services.task_planner import parse_tasks_from_message, TaskPlan, TaskStatus
+
+
+async def process_chat_message_streaming(
+    message: str,
+    integration_configs: dict[str, dict]
+) -> AsyncGenerator[dict, None]:
+    """
+    Process a chat message with streaming task updates.
+    
+    Yields SSE events for real-time frontend updates:
+    - planning: Initial message that we're analyzing
+    - plan: Task plan with all identified tasks
+    - task_started: When a task begins execution
+    - task_completed: When a task finishes successfully
+    - task_failed: When a task fails
+    - complete: Final response with all results
+    - error: If something goes wrong
+    """
+    # Build tools based on available integrations
+    tools = build_tools(integration_configs)
+    available_services = list(integration_configs.keys())
+    
+    if not tools:
+        yield {
+            "event_type": "error",
+            "data": {"message": "No integration tools available. Please connect at least one service."}
+        }
+        return
+    
+    if not llm:
+        yield {
+            "event_type": "error",
+            "data": {"message": "LLM not configured. Please set GOOGLE_API_KEY."}
+        }
+        return
+    
+    # Step 1: Parse and plan tasks
+    yield {
+        "event_type": "planning",
+        "data": {"status": "Analyzing your request..."}
+    }
+    
+    task_plan = parse_tasks_from_message(message, available_services)
+    
+    if not task_plan.tasks:
+        # No specific tasks identified, fall back to regular processing
+        yield {
+            "event_type": "planning",
+            "data": {"status": "Processing with AI agent..."}
+        }
+        
+        # Use regular agent for single/unclear requests
+        try:
+            result = await process_chat_message(message, integration_configs)
+            yield {
+                "event_type": "complete",
+                "data": {
+                    "message": result.message,
+                    "actions_taken": [a.model_dump() for a in result.actions_taken],
+                }
+            }
+        except Exception as e:
+            yield {
+                "event_type": "error",
+                "data": {"message": str(e)}
+            }
+        return
+    
+    # Step 2: Emit the task plan
+    yield {
+        "event_type": "plan",
+        "data": task_plan.to_dict()
+    }
+    
+    # Step 3: Create agent for execution
+    agent = create_agent_executor(tools)
+    
+    # Step 4: Execute using the agent with enhanced prompt
+    # Build a prompt that explicitly lists all tasks
+    task_list = "\n".join([
+        f"- Task {i+1}: {t.description} (use {t.tool_name})"
+        for i, t in enumerate(task_plan.tasks)
+    ])
+    
+    enhanced_message = f"""{message}
+
+IMPORTANT: You must complete ALL of the following tasks:
+{task_list}
+
+Execute each task in order and use the results from earlier tasks when needed (e.g., include meeting links in emails).
+Do NOT stop until all tasks are complete."""
+    
+    actions_taken: list[ActionResult] = []
+    completed_tasks: dict[str, str] = {}  # task_id -> result
+    
+    try:
+        # Execute with the agent
+        result = agent.invoke({"input": enhanced_message})
+        
+        output = result.get("output", "")
+        intermediate_steps = result.get("intermediate_steps", [])
+        
+        # Process each step and emit updates
+        for i, step in enumerate(intermediate_steps):
+            if len(step) >= 2:
+                action, observation = step[0], step[1]
+                tool_name = getattr(action, "tool", "unknown")
+                
+                service = determine_service(tool_name)
+                
+                # Find matching task in plan
+                matching_task = None
+                for task in task_plan.tasks:
+                    if task.tool_name == tool_name and task.status == TaskStatus.PENDING:
+                        matching_task = task
+                        break
+                
+                task_id = matching_task.id if matching_task else f"task_{i+1}"
+                
+                # Emit task started
+                yield {
+                    "event_type": "task_started",
+                    "data": {
+                        "task_id": task_id,
+                        "service": service,
+                        "action": tool_name,
+                        "description": matching_task.description if matching_task else tool_name,
+                    }
+                }
+                
+                # Check if successful (basic heuristic)
+                is_success = observation and "error" not in str(observation).lower()[:50]
+                
+                if is_success:
+                    # Update plan
+                    if matching_task:
+                        task_plan.update_task_status(task_id, TaskStatus.COMPLETED, str(observation))
+                    completed_tasks[task_id] = str(observation)
+                    
+                    # Emit task completed
+                    yield {
+                        "event_type": "task_completed",
+                        "data": {
+                            "task_id": task_id,
+                            "service": service,
+                            "action": tool_name,
+                            "result": str(observation)[:500],  # Truncate for SSE
+                        }
+                    }
+                else:
+                    # Update plan
+                    if matching_task:
+                        task_plan.update_task_status(task_id, TaskStatus.FAILED, error=str(observation))
+                    
+                    # Emit task failed
+                    yield {
+                        "event_type": "task_failed",
+                        "data": {
+                            "task_id": task_id,
+                            "service": service,
+                            "action": tool_name,
+                            "error": str(observation)[:500],
+                        }
+                    }
+                
+                actions_taken.append(ActionResult(
+                    service=service,
+                    action=tool_name,
+                    success=is_success,
+                    result=str(observation) if is_success else None,
+                    error=str(observation) if not is_success else None
+                ))
+        
+        # Step 5: Emit completion
+        yield {
+            "event_type": "complete",
+            "data": {
+                "message": output,
+                "actions_taken": [a.model_dump() for a in actions_taken],
+                "total_tasks": task_plan.total,
+                "completed_tasks": task_plan.completed,
+                "failed_tasks": task_plan.failed,
+            }
+        }
+        
+    except Exception as e:
+        yield {
+            "event_type": "error",
+            "data": {"message": f"Error processing request: {str(e)}"}
+        }
+
