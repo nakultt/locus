@@ -3,7 +3,7 @@ import { Button } from "@/ui/auth/button";
 import { Input } from "@/ui/auth/input";
 import { Label } from "@/ui/auth/label";
 import { Checkbox } from "@/ui/auth/checkbox";
-import { Eye, EyeOff, Mail, Sparkles } from "lucide-react";
+import { Eye, EyeOff, Sparkles } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 
@@ -675,8 +675,6 @@ function LoginPage() {
             </div>
           </div>
         </div>
-
-        
 
         {/* Decorative elements */}
         <div className="absolute inset-0 bg-grid-white/[0.05] bg-[size:20px_20px]" />
