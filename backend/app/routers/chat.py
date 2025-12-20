@@ -78,7 +78,8 @@ async def chat(
         # Process message through LangChain agent
         result = await process_chat_message(
             message=request.message,
-            integration_configs=integration_configs
+            integration_configs=integration_configs,
+            smart_mode=request.smart_mode
         )
         return result
     except ValueError as e:
