@@ -1,14 +1,5 @@
 import { useState, useEffect } from "react";
-import {
-  Moon,
-  Sun,
-  User,
-  Bell,
-  Palette,
-  Shield,
-  HelpCircle,
-  Grid,
-} from "lucide-react";
+import { Moon, Sun, User, Bell, Palette, Grid } from "lucide-react";
 import { motion } from "framer-motion";
 import { useNavigate } from "react-router-dom";
 

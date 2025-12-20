@@ -5,6 +5,7 @@ Request/Response validation models
 
 from datetime import datetime
 from typing import Optional, Any
+from enum import Enum
 from pydantic import BaseModel, EmailStr, Field
 
 
@@ -91,6 +92,44 @@ class ChatResponse(BaseModel):
     message: str
     actions_taken: list[ActionResult] = []
     raw_response: Optional[str] = None
+
+
+# ============== Streaming Task Schemas ==============
+
+class TaskStatusEnum(str, Enum):
+    """Status of a task in the execution plan."""
+    pending = "pending"
+    in_progress = "in_progress"
+    completed = "completed"
+    failed = "failed"
+
+
+class TaskUpdate(BaseModel):
+    """Real-time update for a single task."""
+    task_id: str
+    service: str
+    action: str
+    description: str
+    status: TaskStatusEnum
+    tool_name: Optional[str] = None
+    result: Optional[str] = None
+    error: Optional[str] = None
+    depends_on: list[str] = []
+
+
+class StreamEvent(BaseModel):
+    """Server-Sent Event payload."""
+    event_type: str  # "plan", "task_started", "task_completed", "task_failed", "complete", "error"
+    data: Any
+
+
+class TaskPlanResponse(BaseModel):
+    """Initial plan response showing all extracted tasks."""
+    tasks: list[TaskUpdate]
+    total: int
+    completed: int = 0
+    failed: int = 0
+    current_task_id: Optional[str] = None
 
 
 # ============== Error Schemas ==============

@@ -1,37 +1,162 @@
 """
 Google Calendar Integration Service
-LangChain tools for calendar management
+LangChain tools for calendar management using direct HTTP API calls
 """
 
-from typing import Any
+import httpx
+from typing import Any, Optional
 from datetime import datetime, timedelta
 from langchain_core.tools import BaseTool, tool
-from langchain_core.pydantic_v1 import BaseModel, Field
+from pydantic import BaseModel, Field
 
 # Store credentials at module level for tool access
 _calendar_config: dict = {}
 
+# Google Calendar API base URL
+CALENDAR_API_BASE = "https://www.googleapis.com/calendar/v3/calendars/primary"
+
+# Google OAuth token refresh URL
+TOKEN_REFRESH_URL = "https://oauth2.googleapis.com/token"
+
 
 class CreateEventInput(BaseModel):
     """Input schema for creating a calendar event."""
-    summary: str = Field(description="Event title/name")
-    description: str = Field(default="", description="Event description")
-    start_time: str = Field(description="Start time (e.g., '2025-12-16 14:00' or 'tomorrow at 2pm')")
-    duration_minutes: int = Field(default=60, description="Duration in minutes")
-    attendees: str = Field(default="", description="Comma-separated email addresses of attendees")
+    title: str = Field(description="Event title/name")
+    start_datetime: str = Field(description="Start datetime in ISO format (e.g., '2025-12-18T14:00:00') or natural language like 'tomorrow at 2pm'")
+    end_datetime: str = Field(default="", description="End datetime in ISO format. If not provided, defaults to 1 hour after start.")
+    attendees: str = Field(default="", description="Comma-separated email addresses of attendees (optional)")
 
 
-class ViewEventsInput(BaseModel):
-    """Input schema for viewing calendar events."""
-    days: int = Field(default=7, description="Number of days to look ahead")
+class UpdateEventInput(BaseModel):
+    """Input schema for updating a calendar event."""
+    event_id: str = Field(description="The ID of the event to update")
+    title: str = Field(default="", description="New event title (optional)")
+    start_datetime: str = Field(default="", description="New start datetime in ISO format (optional)")
+    end_datetime: str = Field(default="", description="New end datetime in ISO format (optional)")
+
+
+class DeleteEventInput(BaseModel):
+    """Input schema for deleting a calendar event."""
+    event_id: str = Field(description="The ID of the event to delete")
+
+
+def _is_token_expired() -> bool:
+    """Check if the current access token is expired."""
+    credentials = _calendar_config.get("credentials", {})
+    if not credentials:
+        return True
+    
+    obtained_at = credentials.get("obtained_at")
+    expires_in = credentials.get("expires_in", 3600)
+    
+    if not obtained_at:
+        return True
+    
+    try:
+        obtained_dt = datetime.fromisoformat(obtained_at)
+        expiry_dt = obtained_dt + timedelta(seconds=expires_in - 60)  # 60 second buffer
+        return datetime.utcnow() > expiry_dt
+    except:
+        return True
+
+
+def _refresh_token() -> bool:
+    """Refresh the access token using the refresh token."""
+    credentials = _calendar_config.get("credentials", {})
+    refresh_token = credentials.get("refresh_token")
+    client_id = _calendar_config.get("client_id")
+    client_secret = _calendar_config.get("client_secret")
+    
+    if not refresh_token or not client_id or not client_secret:
+        return False
+    
+    try:
+        with httpx.Client() as client:
+            response = client.post(
+                TOKEN_REFRESH_URL,
+                data={
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "refresh_token": refresh_token,
+                    "grant_type": "refresh_token",
+                }
+            )
+            
+            if response.status_code != 200:
+                return False
+            
+            tokens = response.json()
+            # Update credentials with new access token
+            _calendar_config["credentials"]["access_token"] = tokens.get("access_token")
+            _calendar_config["credentials"]["expires_in"] = tokens.get("expires_in", 3600)
+            _calendar_config["credentials"]["obtained_at"] = datetime.utcnow().isoformat()
+            return True
+    except Exception:
+        return False
+
+
+def _get_access_token() -> str | None:
+    """Get a valid access token, refreshing if necessary."""
+    if _is_token_expired():
+        if not _refresh_token():
+            return None
+    
+    return _calendar_config.get("credentials", {}).get("access_token")
+
+
+def _get_auth_headers() -> dict | None:
+    """Get authorization headers for API requests."""
+    access_token = _get_access_token()
+    if not access_token:
+        return None
+    
+    return {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
+
+
+def _parse_datetime(dt_string: str) -> datetime:
+    """Parse datetime string to datetime object."""
+    dt_string = dt_string.strip()
+    
+    # Handle natural language
+    if "tomorrow" in dt_string.lower():
+        base = datetime.now() + timedelta(days=1)
+        if "2pm" in dt_string.lower() or "14:00" in dt_string:
+            return base.replace(hour=14, minute=0, second=0, microsecond=0)
+        elif "3pm" in dt_string.lower() or "15:00" in dt_string:
+            return base.replace(hour=15, minute=0, second=0, microsecond=0)
+        elif "10am" in dt_string.lower() or "10:00" in dt_string:
+            return base.replace(hour=10, minute=0, second=0, microsecond=0)
+        else:
+            return base.replace(hour=9, minute=0, second=0, microsecond=0)
+    
+    if "today" in dt_string.lower():
+        base = datetime.now()
+        if "2pm" in dt_string.lower() or "14:00" in dt_string:
+            return base.replace(hour=14, minute=0, second=0, microsecond=0)
+        elif "3pm" in dt_string.lower() or "15:00" in dt_string:
+            return base.replace(hour=15, minute=0, second=0, microsecond=0)
+        else:
+            return base.replace(hour=9, minute=0, second=0, microsecond=0)
+    
+    # Try ISO format
+    for fmt in ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"]:
+        try:
+            return datetime.strptime(dt_string, fmt)
+        except ValueError:
+            continue
+    
+    # Default: 1 hour from now
+    return datetime.now() + timedelta(hours=1)
 
 
 @tool("calendar_create_event", args_schema=CreateEventInput)
 def calendar_create_event(
-    summary: str,
-    description: str = "",
-    start_time: str = "",
-    duration_minutes: int = 60,
+    title: str,
+    start_datetime: str,
+    end_datetime: str = "",
     attendees: str = ""
 ) -> str:
     """
@@ -40,232 +165,181 @@ def calendar_create_event(
     Use this when the user wants to schedule a meeting, create an event, or add something to their calendar.
     """
     try:
-        if not _calendar_config.get("credentials"):
-            return "Error: Google Calendar is not configured. Please connect your Google account first."
+        headers = _get_auth_headers()
+        if not headers:
+            return "Error: Google Calendar is not configured or token expired. Please reconnect your Google account."
         
-        # Parse start time (simplified parsing)
-        try:
-            if "tomorrow" in start_time.lower():
-                start_dt = datetime.now() + timedelta(days=1)
-                start_dt = start_dt.replace(hour=14, minute=0, second=0)  # Default 2pm
-            elif "today" in start_time.lower():
-                start_dt = datetime.now()
-                start_dt = start_dt.replace(hour=14, minute=0, second=0)
-            else:
-                # Try parsing as datetime
-                for fmt in ["%Y-%m-%d %H:%M", "%Y-%m-%d", "%d/%m/%Y %H:%M"]:
-                    try:
-                        start_dt = datetime.strptime(start_time, fmt)
-                        break
-                    except ValueError:
-                        continue
-                else:
-                    start_dt = datetime.now() + timedelta(hours=1)
-        except:
-            start_dt = datetime.now() + timedelta(hours=1)
+        # Parse start time
+        start_dt = _parse_datetime(start_datetime)
         
-        end_dt = start_dt + timedelta(minutes=duration_minutes)
+        # Parse end time or default to 1 hour after start
+        if end_datetime:
+            end_dt = _parse_datetime(end_datetime)
+        else:
+            end_dt = start_dt + timedelta(hours=1)
         
-        try:
-            from googleapiclient.discovery import build
-            from google.oauth2.credentials import Credentials
-            
-            creds = Credentials.from_authorized_user_info(_calendar_config["credentials"])
-            service = build("calendar", "v3", credentials=creds)
-            
-            event = {
-                "summary": summary,
-                "description": description,
-                "start": {
-                    "dateTime": start_dt.isoformat(),
-                    "timeZone": "UTC"
-                },
-                "end": {
-                    "dateTime": end_dt.isoformat(),
-                    "timeZone": "UTC"
-                }
+        # Build event payload
+        event = {
+            "summary": title,
+            "start": {
+                "dateTime": start_dt.isoformat(),
+                "timeZone": "UTC"
+            },
+            "end": {
+                "dateTime": end_dt.isoformat(),
+                "timeZone": "UTC"
             }
+        }
+        
+        # Add attendees if provided
+        if attendees:
+            event["attendees"] = [
+                {"email": email.strip()} 
+                for email in attendees.split(",") 
+                if email.strip()
+            ]
+        
+        # Create event via Calendar API
+        with httpx.Client() as client:
+            response = client.post(
+                f"{CALENDAR_API_BASE}/events",
+                headers=headers,
+                json=event,
+                params={"sendUpdates": "all"} if attendees else {}
+            )
             
-            if attendees:
-                event["attendees"] = [
-                    {"email": email.strip()} 
-                    for email in attendees.split(",")
-                ]
-            
-            result = service.events().insert(
-                calendarId="primary",
-                body=event,
-                sendUpdates="all"
-            ).execute()
-            
-            return f"""✅ Event created!
-📅 {summary}
-🕐 {start_dt.strftime('%B %d, %Y at %I:%M %p')}
-⏱️ Duration: {duration_minutes} minutes
+            if response.status_code in [200, 201]:
+                result = response.json()
+                return f"""✅ Event created successfully!
+📅 {title}
+🕐 {start_dt.strftime('%B %d, %Y at %I:%M %p')} - {end_dt.strftime('%I:%M %p')}
+🆔 Event ID: {result.get('id', 'N/A')}
 🔗 {result.get('htmlLink', 'Link not available')}"""
-            
-        except ImportError:
-            # Mock response for demo
-            return f"""✅ Event created!
-📅 {summary}
-🕐 {start_dt.strftime('%B %d, %Y at %I:%M %p')}
-⏱️ Duration: {duration_minutes} minutes
-{"👥 Attendees: " + attendees if attendees else ""}
-
-(Demo mode - google-api-python-client not fully configured)"""
-            
+            else:
+                error_detail = response.json().get("error", {}).get("message", "Unknown error")
+                return f"❌ Failed to create event: {error_detail}"
+                
     except Exception as e:
         return f"❌ Error creating event: {str(e)}"
 
 
-@tool("calendar_view_upcoming", args_schema=ViewEventsInput)
-def calendar_view_upcoming(days: int = 7) -> str:
+@tool("calendar_update_event", args_schema=UpdateEventInput)
+def calendar_update_event(
+    event_id: str,
+    title: str = "",
+    start_datetime: str = "",
+    end_datetime: str = ""
+) -> str:
     """
-    View upcoming calendar events.
+    Update an existing calendar event.
     
-    Use this when the user asks about their schedule, upcoming meetings, or what's on their calendar.
+    Use this when the user wants to modify, reschedule, or rename an existing event.
     """
     try:
-        if not _calendar_config.get("credentials"):
-            return "Error: Google Calendar is not configured. Please connect your Google account first."
+        headers = _get_auth_headers()
+        if not headers:
+            return "Error: Google Calendar is not configured or token expired. Please reconnect your Google account."
         
-        try:
-            from googleapiclient.discovery import build
-            from google.oauth2.credentials import Credentials
+        # Build update payload with only provided fields
+        update_data = {}
+        
+        if title:
+            update_data["summary"] = title
+        
+        if start_datetime:
+            start_dt = _parse_datetime(start_datetime)
+            update_data["start"] = {
+                "dateTime": start_dt.isoformat(),
+                "timeZone": "UTC"
+            }
+        
+        if end_datetime:
+            end_dt = _parse_datetime(end_datetime)
+            update_data["end"] = {
+                "dateTime": end_dt.isoformat(),
+                "timeZone": "UTC"
+            }
+        
+        if not update_data:
+            return "❌ No update fields provided. Please specify at least one field to update (title, start_datetime, or end_datetime)."
+        
+        # Update event via Calendar API (PATCH)
+        with httpx.Client() as client:
+            response = client.patch(
+                f"{CALENDAR_API_BASE}/events/{event_id}",
+                headers=headers,
+                json=update_data
+            )
             
-            creds = Credentials.from_authorized_user_info(_calendar_config["credentials"])
-            service = build("calendar", "v3", credentials=creds)
-            
-            now = datetime.utcnow().isoformat() + "Z"
-            end = (datetime.utcnow() + timedelta(days=days)).isoformat() + "Z"
-            
-            events_result = service.events().list(
-                calendarId="primary",
-                timeMin=now,
-                timeMax=end,
-                maxResults=20,
-                singleEvents=True,
-                orderBy="startTime"
-            ).execute()
-            
-            events = events_result.get("items", [])
-            
-            if not events:
-                return f"📅 No events scheduled for the next {days} days."
-            
-            output = f"📅 Upcoming events (next {days} days):\n\n"
-            
-            for event in events:
-                start = event["start"].get("dateTime", event["start"].get("date"))
-                summary = event.get("summary", "No title")
+            if response.status_code == 200:
+                result = response.json()
+                return f"""✅ Event updated successfully!
+📅 {result.get('summary', 'N/A')}
+🆔 Event ID: {event_id}
+🔗 {result.get('htmlLink', 'Link not available')}"""
+            elif response.status_code == 404:
+                return f"❌ Event not found with ID: {event_id}"
+            else:
+                error_detail = response.json().get("error", {}).get("message", "Unknown error")
+                return f"❌ Failed to update event: {error_detail}"
                 
-                # Parse and format time
-                try:
-                    dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
-                    time_str = dt.strftime("%b %d, %I:%M %p")
-                except:
-                    time_str = start
-                
-                output += f"• {time_str}: {summary}\n"
-            
-            return output
-            
-        except ImportError:
-            # Mock response for demo
-            return f"""📅 Upcoming events (next {days} days):
-
-• Dec 16, 10:00 AM: Team Standup
-• Dec 16, 02:00 PM: Project Review Meeting
-• Dec 17, 11:00 AM: 1:1 with Manager
-• Dec 18, 03:00 PM: Sprint Planning
-• Dec 20, 09:00 AM: Client Demo
-
-(Demo mode - google-api-python-client not fully configured)"""
-            
     except Exception as e:
-        return f"❌ Error fetching calendar: {str(e)}"
+        return f"❌ Error updating event: {str(e)}"
 
 
-@tool("calendar_today")
-def calendar_today() -> str:
+@tool("calendar_delete_event", args_schema=DeleteEventInput)
+def calendar_delete_event(event_id: str) -> str:
     """
-    Get today's calendar events.
+    Delete a calendar event.
     
-    Use this when the user asks about today's schedule, today's meetings, or "what's on for today".
+    Use this when the user wants to cancel, remove, or delete an event from their calendar.
     """
     try:
-        if not _calendar_config.get("credentials"):
-            return "Error: Google Calendar is not configured. Please connect your Google account first."
+        headers = _get_auth_headers()
+        if not headers:
+            return "Error: Google Calendar is not configured or token expired. Please reconnect your Google account."
         
-        try:
-            from googleapiclient.discovery import build
-            from google.oauth2.credentials import Credentials
+        # Delete event via Calendar API
+        with httpx.Client() as client:
+            response = client.delete(
+                f"{CALENDAR_API_BASE}/events/{event_id}",
+                headers=headers
+            )
             
-            creds = Credentials.from_authorized_user_info(_calendar_config["credentials"])
-            service = build("calendar", "v3", credentials=creds)
-            
-            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-            tomorrow = today + timedelta(days=1)
-            
-            events_result = service.events().list(
-                calendarId="primary",
-                timeMin=today.isoformat() + "Z",
-                timeMax=tomorrow.isoformat() + "Z",
-                singleEvents=True,
-                orderBy="startTime"
-            ).execute()
-            
-            events = events_result.get("items", [])
-            
-            if not events:
-                return "📅 No events scheduled for today. Your calendar is clear!"
-            
-            output = f"📅 Today's schedule ({today.strftime('%B %d, %Y')}):\n\n"
-            
-            for event in events:
-                start = event["start"].get("dateTime", event["start"].get("date"))
-                summary = event.get("summary", "No title")
+            if response.status_code in [200, 204]:
+                return f"""✅ Event deleted successfully!
+🆔 Deleted Event ID: {event_id}"""
+            elif response.status_code == 404:
+                return f"❌ Event not found with ID: {event_id}"
+            else:
+                error_detail = response.json().get("error", {}).get("message", "Unknown error")
+                return f"❌ Failed to delete event: {error_detail}"
                 
-                try:
-                    dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
-                    time_str = dt.strftime("%I:%M %p")
-                except:
-                    time_str = "All day"
-                
-                output += f"• {time_str}: {summary}\n"
-            
-            return output
-            
-        except ImportError:
-            today = datetime.now()
-            return f"""📅 Today's schedule ({today.strftime('%B %d, %Y')}):
-
-• 09:00 AM: Daily Standup
-• 11:00 AM: Design Review
-• 02:00 PM: Sprint Planning
-• 04:00 PM: Code Review Session
-
-(Demo mode - google-api-python-client not fully configured)"""
-            
     except Exception as e:
-        return f"❌ Error fetching today's events: {str(e)}"
+        return f"❌ Error deleting event: {str(e)}"
 
 
-def get_calendar_tools(credentials: dict[str, Any]) -> list[BaseTool]:
+def get_calendar_tools(credentials: dict[str, Any] = None) -> list[BaseTool]:
     """
     Get LangChain tools for Google Calendar integration.
     
     Args:
-        credentials: OAuth credentials dict
+        credentials: OAuth credentials dict containing access_token, refresh_token, etc.
         
     Returns:
         List of Calendar tools
     """
     global _calendar_config
-    _calendar_config = {"credentials": credentials}
+    
+    import os
+    _calendar_config = {
+        "credentials": credentials,
+        "client_id": os.getenv("GOOGLE_CLIENT_ID", ""),
+        "client_secret": os.getenv("GOOGLE_CLIENT_SECRET", ""),
+    }
     
     return [
         calendar_create_event,
-        calendar_view_upcoming,
-        calendar_today
+        calendar_update_event,
+        calendar_delete_event,
     ]
