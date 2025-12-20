@@ -34,6 +34,7 @@ interface TaskProgress {
   isActive: boolean;
 }
 
+
 const PLACEHOLDERS = [
   "Ask me anything...",
   "What can I help you with?",
