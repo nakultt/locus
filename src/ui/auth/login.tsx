@@ -3,7 +3,7 @@ import { Button } from "@/ui/auth/button";
 import { Input } from "@/ui/auth/input";
 import { Label } from "@/ui/auth/label";
 import { Checkbox } from "@/ui/auth/checkbox";
-import { Eye, EyeOff, Mail, Sparkles } from "lucide-react";
+import { Eye, EyeOff, Sparkles } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 
@@ -676,8 +676,6 @@ function LoginPage() {
           </div>
         </div>
 
-        
-
         {/* Decorative elements */}
         <div className="absolute inset-0 bg-grid-white/[0.05] bg-[size:20px_20px]" />
         <div className="absolute top-1/4 right-1/4 size-64 bg-primary-foreground/10 rounded-full blur-3xl" />
@@ -840,18 +838,6 @@ function LoginPage() {
                 : "Log in"}
             </Button>
           </form>
-
-          {/* Social Login */}
-          <div className="mt-6">
-            <Button
-              variant="outline"
-              className="w-full h-12 bg-background border-border/60 hover:bg-accent"
-              type="button"
-            >
-              <Mail className="mr-2 size-5" />
-              {isSignupMode ? "Sign up with Google" : "Log in with Google"}
-            </Button>
-          </div>
 
           {/* Toggle Login/Signup */}
           <div className="text-center text-sm text-muted-foreground mt-8">

@@ -12,6 +12,26 @@ from app.database import get_db
 router = APIRouter()
 
 
+@router.get(
+    "/signup",
+    summary="Signup endpoint info",
+)
+async def signup_info() -> dict[str, str]:
+    """
+    Informational endpoint for browser visits.
+
+    Explains how to use the POST /auth/signup endpoint.
+    """
+    return {
+        "message": "Use POST /auth/signup with JSON body to create a user.",
+        "expected_body": {
+            "email": "user@example.com",
+            "password": "your-password",
+            "name": "Your Name",
+        },
+    }
+
+
 @router.post(
     "/signup",
     response_model=schemas.UserResponse,
@@ -113,11 +133,11 @@ async def connect_integration(
         )
     
     # Validate service name
-    valid_services = {"jira", "gmail", "calendar", "slack", "notion"}
+    valid_services = {"jira", "gmail", "calendar", "slack", "notion", "bugasura", "github", "docs", "sheets", "slides", "drive", "forms", "meet", "linear"}
     if integration.service_name.lower() not in valid_services:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid service. Must be one of: {', '.join(valid_services)}"
+            detail=f"Invalid service. Must be one of: {', '.join(sorted(valid_services))}"
         )
     
     # Validate credentials provided
