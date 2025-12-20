@@ -49,7 +49,7 @@ const INTEGRATIONS = [
     title: "Notion",
     description: "All-in-one workspace for notes and projects.",
     color: "text-gray-900",
-    logo: "https://cdn.worldvectorlogo.com/logos/notion-2.svg",
+    logo: "/notion.svg",
     authType: "api_key" as const,
     fields: [
       {
