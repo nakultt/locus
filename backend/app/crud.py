@@ -54,6 +54,36 @@ def authenticate_user(db: Session, email: str, password: str) -> Optional[models
     return user
 
 
+def update_user(db: Session, user_id: int, user_update: schemas.UserUpdate) -> Optional[models.User]:
+    """
+    Update user details.
+    
+    Args:
+        db: Database session
+        user_id: ID of user to update
+        user_update: Schema with update fields
+        
+    Returns:
+        Updated User model or None if user not found
+    """
+    db_user = get_user_by_id(db, user_id)
+    if not db_user:
+        return None
+    
+    if user_update.name is not None:
+        db_user.name = user_update.name
+    
+    if user_update.email is not None:
+        db_user.email = user_update.email
+        
+    if user_update.password is not None:
+        db_user.hashed_password = security.get_password_hash(user_update.password)
+        
+    db.commit()
+    db.refresh(db_user)
+    return db_user
+
+
 def set_user_gemini_key(db: Session, user_id: int, gemini_key: str) -> bool:
     """
     Set or update user's Gemini API key (encrypted).

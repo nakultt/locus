@@ -18,6 +18,13 @@ class UserCreate(BaseModel):
     name: Optional[str] = Field(None, description="User's display name")
 
 
+class UserUpdate(BaseModel):
+    """Schema for updating user details."""
+    email: Optional[EmailStr] = None
+    password: Optional[str] = Field(None, min_length=6, description="New password")
+    name: Optional[str] = None
+
+
 class UserResponse(BaseModel):
     """Schema for user response (excludes password)."""
     id: int
