@@ -74,15 +74,28 @@ export interface Message {
 // ============== Helper Functions ==============
 
 function getAuthToken(): string | null {
-  const user = localStorage.getItem("locus_user");
-  if (user) {
+  // Check localStorage first (Remember Me was checked)
+  const localUser = localStorage.getItem("locus_user");
+  if (localUser) {
     try {
-      const parsed = JSON.parse(user);
+      const parsed = JSON.parse(localUser);
       return parsed.token || null;
     } catch {
       return null;
     }
   }
+  
+  // Check sessionStorage (Remember Me was not checked)
+  const sessionUser = sessionStorage.getItem("locus_user");
+  if (sessionUser) {
+    try {
+      const parsed = JSON.parse(sessionUser);
+      return parsed.token || null;
+    } catch {
+      return null;
+    }
+  }
+  
   return null;
 }
 
@@ -134,10 +147,14 @@ export async function signup(
   });
 }
 
-export async function login(email: string, password: string): Promise<User> {
+export async function login(
+  email: string, 
+  password: string,
+  rememberMe: boolean = false
+): Promise<User> {
   return apiRequest<User>("/auth/login", {
     method: "POST",
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email, password, remember_me: rememberMe }),
   });
 }
 
@@ -310,10 +327,21 @@ export function streamChatMessage(
   const abortController = new AbortController();
 
   const token = (() => {
-    const user = localStorage.getItem("locus_user");
-    if (user) {
+    // Check localStorage first (Remember Me was checked)
+    const localUser = localStorage.getItem("locus_user");
+    if (localUser) {
       try {
-        const parsed = JSON.parse(user);
+        const parsed = JSON.parse(localUser);
+        return parsed.token || null;
+      } catch {
+        return null;
+      }
+    }
+    // Check sessionStorage (Remember Me was not checked)
+    const sessionUser = sessionStorage.getItem("locus_user");
+    if (sessionUser) {
+      try {
+        const parsed = JSON.parse(sessionUser);
         return parsed.token || null;
       } catch {
         return null;

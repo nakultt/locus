@@ -96,7 +96,8 @@ async def login(
     token = security.create_access_token(
         user_id=user.id,
         email=user.email,
-        name=user.name
+        name=user.name,
+        remember_me=credentials.remember_me
     )
     
     response = schemas.UserResponse.model_validate(user)

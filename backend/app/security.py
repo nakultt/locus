@@ -39,9 +39,17 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
 
 # ============== JWT Functions ==============
 
-def create_access_token(user_id: int, email: str, name: Optional[str] = None) -> str:
+def create_access_token(
+    user_id: int, 
+    email: str, 
+    name: Optional[str] = None,
+    remember_me: bool = False
+) -> str:
     """Create a JWT access token for a user."""
-    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    if remember_me:
+        expire = datetime.now(timezone.utc) + timedelta(days=30)
+    else:
+        expire = datetime.now(timezone.utc) + timedelta(hours=1)
     to_encode = {
         "sub": str(user_id),
         "email": email,
