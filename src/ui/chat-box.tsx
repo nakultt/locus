@@ -4,6 +4,7 @@ import {
   Wrench,
   CheckCircle,
   XCircle,
+  Lightbulb,
 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useAuth } from "@/context/AuthContext";
@@ -126,6 +127,7 @@ const ChatInterface = () => {
   const [placeholderIndex, setPlaceholderIndex] = useState(0);
   const [showPlaceholder, setShowPlaceholder] = useState(true);
   const [isActive, setIsActive] = useState(false);
+  const [smartMode, setSmartMode] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const { user } = useAuth();
@@ -189,7 +191,8 @@ const ChatInterface = () => {
 
       const response: ChatResponse = await sendChatMessage(
         user.id,
-        userMessage.content
+        userMessage.content,
+        smartMode
       );
 
       const aiMessage: Message = {
@@ -393,6 +396,55 @@ const ChatInterface = () => {
                   <Send size={18} />
                 </button>
               </div>
+
+              {/* Expanded Controls */}
+              <motion.div
+                className="w-full flex justify-start px-4 items-center text-sm"
+                variants={{
+                  hidden: {
+                    opacity: 0,
+                    y: 20,
+                    pointerEvents: "none" as const,
+                    transition: { duration: 0.25 },
+                  },
+                  visible: {
+                    opacity: 1,
+                    y: 0,
+                    pointerEvents: "auto" as const,
+                    transition: { duration: 0.35, delay: 0.08 },
+                  },
+                }}
+                initial="hidden"
+                animate={isActive || inputValue ? "visible" : "hidden"}
+                style={{ marginTop: 8, paddingBottom: 12 }}
+              >
+                <div className="flex gap-3 items-center">
+                  {/* Smart Toggle */}
+                  <button
+                    className={`flex items-center gap-1 px-4 py-2 rounded-full transition-all font-medium group ${
+                      smartMode
+                        ? "bg-yellow-500/20 outline outline-yellow-500/60 text-yellow-700 dark:text-yellow-300"
+                        : "bg-accent text-accent-foreground hover:bg-accent/80"
+                    }`}
+                    title="Use higher intelligence model"
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSmartMode((s) => !s);
+                    }}
+                  >
+                    <Lightbulb
+                      className={`transition-all ${
+                        smartMode
+                          ? "fill-yellow-400 text-yellow-600"
+                          : "group-hover:fill-yellow-300"
+                      }`}
+                      size={18}
+                    />
+                    Smart
+                  </button>
+                </div>
+              </motion.div>
             </div>
           </motion.div>
         </div>

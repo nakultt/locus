@@ -76,6 +76,7 @@ class ChatRequest(BaseModel):
     """Schema for chat message request."""
     user_id: int
     message: str = Field(..., min_length=1, description="User's natural language command")
+    smart_mode: bool = Field(False, description="Use higher intelligence model when enabled")
 
 
 class ActionResult(BaseModel):

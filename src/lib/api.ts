@@ -156,11 +156,12 @@ export async function disconnectIntegration(
 
 export async function sendChatMessage(
   userId: number,
-  message: string
+  message: string,
+  smartMode: boolean = false
 ): Promise<ChatResponse> {
   return apiRequest<ChatResponse>("/api/chat", {
     method: "POST",
-    body: JSON.stringify({ user_id: userId, message }),
+    body: JSON.stringify({ user_id: userId, message, smart_mode: smartMode }),
   });
 }
 

@@ -37,12 +37,21 @@ if not GOOGLE_API_KEY:
     print("WARNING: GOOGLE_API_KEY not set. Chat functionality will be limited.")
 
 llm = None
+llm_smart = None
 if GOOGLE_API_KEY:
+    # Default model - fast and efficient
     llm = ChatGoogleGenerativeAI(
         model="gemini-2.5-flash",
         google_api_key=GOOGLE_API_KEY,
         temperature=0.1,
-        convert_system_message_to_human=True,  # Required for Gemini to handle system prompts
+        convert_system_message_to_human=True,
+    )
+    # Smart mode - higher intelligence model
+    llm_smart = ChatGoogleGenerativeAI(
+        model="gemini-2.5-pro",
+        google_api_key=GOOGLE_API_KEY,
+        temperature=0.1,
+        convert_system_message_to_human=True,
     )
 
 # System prompt for the agent
@@ -277,9 +286,12 @@ def build_tools(integration_configs: dict[str, dict]) -> list[BaseTool]:
     return tools
 
 
-def create_agent_executor(tools: list[BaseTool]) -> AgentExecutor:
+def create_agent_executor(tools: list[BaseTool], smart_mode: bool = False) -> AgentExecutor:
     """Create a LangChain agent with the given tools using native tool calling."""
-    if not llm:
+    # Select the appropriate LLM based on smart mode
+    selected_llm = llm_smart if smart_mode and llm_smart else llm
+    
+    if not selected_llm:
         raise ValueError("LLM not configured. Please set GOOGLE_API_KEY.")
     
     # Create a prompt that works with the tool calling agent
@@ -290,7 +302,7 @@ def create_agent_executor(tools: list[BaseTool]) -> AgentExecutor:
     ])
     
     # Use tool calling agent instead of ReAct for better structured output
-    agent = create_tool_calling_agent(llm, tools, prompt)
+    agent = create_tool_calling_agent(selected_llm, tools, prompt)
     
     return AgentExecutor(
         agent=agent,
@@ -303,10 +315,16 @@ def create_agent_executor(tools: list[BaseTool]) -> AgentExecutor:
 
 async def process_chat_message(
     message: str,
-    integration_configs: dict[str, dict]
+    integration_configs: dict[str, dict],
+    smart_mode: bool = False
 ) -> ChatResponse:
     """
     Process a natural language message through the LangChain agent.
+    
+    Args:
+        message: User's natural language command
+        integration_configs: Dict of service name to config
+        smart_mode: Use higher intelligence model when True
     """
     # Build tools based on available integrations
     tools = build_tools(integration_configs)
@@ -326,7 +344,7 @@ async def process_chat_message(
         )
     
     # Create and run agent SYNCHRONOUSLY to avoid coroutine issues
-    agent = create_agent_executor(tools)
+    agent = create_agent_executor(tools, smart_mode=smart_mode)
     
     try:
         # Use sync invoke instead of ainvoke to avoid StopIteration errors

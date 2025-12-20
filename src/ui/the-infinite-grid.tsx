@@ -71,7 +71,7 @@ export const Component = () => {
           </p>
         </div>
 
-        <div className="flex justify-center">
+        <div className="flex justify-center pointer-events-auto">
           <button
             onClick={() => navigate("/login")}
             className="px-8 py-3 bg-primary text-primary-foreground font-semibold rounded-md hover:bg-primary/90 transition-all shadow-md active:scale-95" >
