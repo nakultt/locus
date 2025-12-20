@@ -67,7 +67,9 @@ export default function App() {
           element={
             <ProtectedRoute>
               <WithLayout>
-                <IntegrationsSection />
+               <div className="h-full overflow-y-auto">
+                    <IntegrationsSection />
+                </div>
               </WithLayout>
             </ProtectedRoute>
           }

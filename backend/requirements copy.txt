@@ -12,7 +12,6 @@ psycopg2-binary>=2.9.9
 alembic>=1.13.0
 
 # Security
-bcrypt==4.0.1
 passlib[bcrypt]>=1.7.4
 cryptography>=41.0.0
 python-jose[cryptography]>=3.3.0

@@ -4,7 +4,7 @@ LangChain tools for Notion documentation
 """
 
 from langchain_core.tools import BaseTool, tool
-from langchain_core.pydantic_v1 import BaseModel, Field
+from pydantic import BaseModel, Field
 
 # Store credentials at module level for tool access
 _notion_config: dict = {}
@@ -18,6 +18,13 @@ class SearchNotionInput(BaseModel):
 class GetPageInput(BaseModel):
     """Input schema for getting a Notion page."""
     page_title: str = Field(description="Title or partial title of the page to retrieve")
+
+
+class CreatePageInput(BaseModel):
+    """Input schema for creating a Notion page."""
+    title: str = Field(description="Title for the new page")
+    content: str = Field(default="", description="Content to add to the page (plain text)")
+    parent_page_title: str = Field(default="", description="Optional - title of parent page to create under")
 
 
 @tool("notion_search", args_schema=SearchNotionInput)
@@ -259,6 +266,191 @@ def notion_list_pages() -> str:
         return f"❌ Error listing Notion pages: {str(e)}"
 
 
+@tool("notion_create_page", args_schema=CreatePageInput)
+def notion_create_page(title: str, content: str = "", parent_page_title: str = "") -> str:
+    """
+    Create a new page in Notion.
+    
+    Use this when the user wants to create a new document, add a new page, or write something new in Notion.
+    """
+    try:
+        if not _notion_config.get("integration_token"):
+            return "Error: Notion is not configured. Please connect your Notion workspace first."
+        
+        try:
+            from notion_client import Client
+            
+            notion = Client(auth=_notion_config["integration_token"])
+            
+            # Find parent page if specified
+            parent_id = None
+            if parent_page_title:
+                search_results = notion.search(
+                    query=parent_page_title,
+                    filter={"property": "object", "value": "page"},
+                    page_size=1
+                )
+                if isinstance(search_results, dict):
+                    results = search_results.get("results", [])
+                else:
+                    results = getattr(search_results, "results", [])
+                
+                if results:
+                    parent_id = results[0]["id"]
+            
+            # Build page properties
+            page_properties = {
+                "title": {
+                    "title": [
+                        {
+                            "type": "text",
+                            "text": {"content": title}
+                        }
+                    ]
+                }
+            }
+            
+            # Build content blocks
+            children = []
+            if content:
+                # Split content into paragraphs
+                paragraphs = content.split("\n")
+                for para in paragraphs:
+                    if para.strip():
+                        children.append({
+                            "object": "block",
+                            "type": "paragraph",
+                            "paragraph": {
+                                "rich_text": [
+                                    {
+                                        "type": "text",
+                                        "text": {"content": para.strip()}
+                                    }
+                                ]
+                            }
+                        })
+            
+            # Create the page
+            if parent_id:
+                new_page = notion.pages.create(
+                    parent={"page_id": parent_id},
+                    properties=page_properties,
+                    children=children if children else []
+                )
+            else:
+                # Create as a top-level page (requires workspace access)
+                # First, try to find any page to use as parent
+                search_results = notion.search(
+                    filter={"property": "object", "value": "page"},
+                    page_size=1
+                )
+                if isinstance(search_results, dict):
+                    results = search_results.get("results", [])
+                else:
+                    results = getattr(search_results, "results", [])
+                
+                if results:
+                    parent_id = results[0]["id"]
+                    new_page = notion.pages.create(
+                        parent={"page_id": parent_id},
+                        properties=page_properties,
+                        children=children if children else []
+                    )
+                else:
+                    return "❌ No parent page found. Please specify a parent page title."
+            
+            return f"""✅ Page created successfully!
+📄 Title: {title}
+🔗 URL: {new_page.get('url', 'N/A')}
+{'📝 Content added!' if content else ''}"""
+            
+        except ImportError:
+            return f"""✅ Page created successfully! (Demo mode)
+📄 Title: {title}
+{'📝 Content: ' + content[:100] + '...' if content and len(content) > 100 else '📝 Content: ' + content if content else ''}
+
+(Demo mode - notion-client not fully configured)"""
+            
+    except Exception as e:
+        return f"❌ Error creating Notion page: {str(e)}"
+
+
+class AppendContentInput(BaseModel):
+    """Input schema for appending content to a Notion page."""
+    page_title: str = Field(description="Title of the page to add content to")
+    content: str = Field(description="Content to append to the page")
+
+
+@tool("notion_append_content", args_schema=AppendContentInput)
+def notion_append_content(page_title: str, content: str) -> str:
+    """
+    Append content to an existing Notion page.
+    
+    Use this when the user wants to add text, update a page, or write additional content to an existing Notion document.
+    """
+    try:
+        if not _notion_config.get("integration_token"):
+            return "Error: Notion is not configured. Please connect your Notion workspace first."
+        
+        try:
+            from notion_client import Client
+            
+            notion = Client(auth=_notion_config["integration_token"])
+            
+            # Find the page
+            search_results = notion.search(
+                query=page_title,
+                filter={"property": "object", "value": "page"},
+                page_size=1
+            )
+            
+            if isinstance(search_results, dict):
+                results = search_results.get("results", [])
+            else:
+                results = getattr(search_results, "results", [])
+            
+            if not results:
+                return f"❌ Page '{page_title}' not found in Notion."
+            
+            page_id = results[0]["id"]
+            
+            # Build content blocks
+            children = []
+            paragraphs = content.split("\n")
+            for para in paragraphs:
+                if para.strip():
+                    children.append({
+                        "object": "block",
+                        "type": "paragraph",
+                        "paragraph": {
+                            "rich_text": [
+                                {
+                                    "type": "text",
+                                    "text": {"content": para.strip()}
+                                }
+                            ]
+                        }
+                    })
+            
+            # Append blocks to the page
+            notion.blocks.children.append(
+                block_id=page_id,
+                children=children
+            )
+            
+            return f"""✅ Content added to '{page_title}'!
+📝 Added {len(children)} paragraph(s)"""
+            
+        except ImportError:
+            return f"""✅ Content added to '{page_title}'! (Demo mode)
+📝 Content: {content[:100]}{'...' if len(content) > 100 else ''}
+
+(Demo mode - notion-client not fully configured)"""
+            
+    except Exception as e:
+        return f"❌ Error appending to Notion page: {str(e)}"
+
+
 def get_notion_tools(integration_token: str) -> list[BaseTool]:
     """
     Get LangChain tools for Notion integration.
@@ -275,5 +467,8 @@ def get_notion_tools(integration_token: str) -> list[BaseTool]:
     return [
         notion_search,
         notion_get_page,
-        notion_list_pages
+        notion_list_pages,
+        notion_create_page,
+        notion_append_content
     ]
+

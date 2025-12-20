@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import engine, Base
-from app.routers import auth, chat
+from app.routers import auth, chat, google_oauth, linear_oauth
 
 
 @asynccontextmanager
@@ -26,9 +26,18 @@ app = FastAPI(
 )
 
 # CORS Configuration
+# NOTE:
+# - When allow_credentials=True, we CANNOT use allow_origins=["*"].
+# - Browsers will reject such responses and FastAPI/Starlette will raise at startup.
+allowed_origins = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "https://locus-gamma.vercel.app",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -36,6 +45,8 @@ app.add_middleware(
 
 # Include Routers
 app.include_router(auth.router, prefix="/auth", tags=["Authentication"])
+app.include_router(google_oauth.router, prefix="/auth", tags=["Google OAuth"])
+app.include_router(linear_oauth.router, prefix="/auth", tags=["Linear OAuth"])
 app.include_router(chat.router, prefix="/api", tags=["Chat"])
 
 
