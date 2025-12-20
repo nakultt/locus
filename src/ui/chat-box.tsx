@@ -1,7 +1,5 @@
 import { useState, useEffect, useRef } from "react";
 import {
-  Lightbulb,
-  Paperclip,
   Send,
   Wrench,
   CheckCircle,
@@ -128,7 +126,6 @@ const ChatInterface = () => {
   const [placeholderIndex, setPlaceholderIndex] = useState(0);
   const [showPlaceholder, setShowPlaceholder] = useState(true);
   const [isActive, setIsActive] = useState(false);
-  const [thinkActive, setThinkActive] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const { user } = useAuth();
@@ -340,14 +337,6 @@ const ChatInterface = () => {
             <div className="flex flex-col items-stretch w-full h-full border border-border rounded-[32px]">
               {/* Input Row */}
               <div className="flex items-center gap-2 p-3 w-full ">
-                <button
-                  className="p-2 rounded-full hover:bg-accent transition"
-                  title="Attach file"
-                  type="button"
-                  tabIndex={-1}
-                >
-                  <Paperclip size={20} className="text-muted-foreground" />
-                </button>
 
                 {/* Text Input & Placeholder */}
                 <div className="relative flex-1">
@@ -404,51 +393,6 @@ const ChatInterface = () => {
                   <Send size={18} />
                 </button>
               </div>
-
-              {/* Expanded Controls */}
-              <motion.div
-                className="w-full flex justify-start px-4 items-center text-sm"
-                variants={{
-                  hidden: {
-                    opacity: 0,
-                    y: 20,
-                    pointerEvents: "none" as const,
-                    transition: { duration: 0.25 },
-                  },
-                  visible: {
-                    opacity: 1,
-                    y: 0,
-                    pointerEvents: "auto" as const,
-                    transition: { duration: 0.35, delay: 0.08 },
-                  },
-                }}
-                initial="hidden"
-                animate={isActive || inputValue ? "visible" : "hidden"}
-                style={{ marginTop: 8, paddingBottom: 12 }}
-              >
-                <div className="flex gap-3 items-center">
-                  {/* Think Toggle */}
-                  <button
-                    className={`flex items-center gap-1 px-4 py-2 rounded-full transition-all font-medium group ${
-                      thinkActive
-                        ? "bg-blue-600/10 outline outline-blue-600/60 text-blue-950 dark:text-blue-200"
-                        : "bg-accent text-accent-foreground hover:bg-accent/80"
-                    }`}
-                    title="Think"
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setThinkActive((a) => !a);
-                    }}
-                  >
-                    <Lightbulb
-                      className="group-hover:fill-yellow-300 transition-all"
-                      size={18}
-                    />
-                    Think
-                  </button>
-                </div>
-              </motion.div>
             </div>
           </motion.div>
         </div>
