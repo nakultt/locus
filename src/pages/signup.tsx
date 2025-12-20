@@ -75,6 +75,7 @@ function SignupPage() {
             Contact
           </a>
         </div>
+        
 
         {/* Decorative elements */}
         <div className="absolute inset-0 bg-grid-white/[0.05] bg-[size:20px_20px]" />
