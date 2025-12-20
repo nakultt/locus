@@ -71,15 +71,11 @@ export const Component = () => {
           </p>
         </div>
 
-        <div className="flex gap-4 pointer-events-auto">
+        <div className="flex justify-center">
           <button
             onClick={() => navigate("/login")}
-            className="px-8 py-3 bg-primary text-primary-foreground font-semibold rounded-md hover:bg-primary/90 transition-all shadow-md active:scale-95"
-          >
+            className="px-8 py-3 bg-primary text-primary-foreground font-semibold rounded-md hover:bg-primary/90 transition-all shadow-md active:scale-95" >
             Proceed
-          </button>
-          <button className="px-8 py-3 bg-secondary text-secondary-foreground font-semibold rounded-md hover:bg-secondary/80 transition-all active:scale-95">
-            Learn More
           </button>
         </div>
       </div>
