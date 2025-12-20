@@ -214,6 +214,7 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
   // Live streaming state
   const [currentStatus, setCurrentStatus] = useState<string>("");
   const [liveTasks, setLiveTasks] = useState<LiveTask[]>([]);
+  const [currentConversationId, setCurrentConversationId] = useState<number | undefined>(initialConversationId);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -248,6 +249,7 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
       } else {
         // Reset for new conversation
         setMessages([]);
+        setCurrentConversationId(undefined);
       }
     };
     loadMessages();
@@ -329,6 +331,11 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
       userMessage.content,
       // onEvent
       (event: StreamEvent) => {
+        // Capture conversation_id from any event
+        if (event.data?.conversation_id && !currentConversationId) {
+          setCurrentConversationId(event.data.conversation_id as number);
+        }
+        
         switch (event.event_type) {
           case "planning":
             setCurrentStatus(event.data.status || "Planning tasks...");
@@ -452,7 +459,9 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
       () => {
         setIsLoading(false);
         setCurrentStatus("");
-      }
+      },
+      // conversationId
+      currentConversationId
     );
 
     abortRef.current = abort;
