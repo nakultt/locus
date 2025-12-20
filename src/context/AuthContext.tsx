@@ -19,7 +19,7 @@ interface AuthContextType {
   user: User | null;
   isLoading: boolean;
   isAuthenticated: boolean;
-  login: (email: string, password: string) => Promise<User>;
+  login: (email: string, password: string, rememberMe?: boolean) => Promise<User>;
   signup: (email: string, password: string, name?: string) => Promise<User>;
   logout: () => void;
 }
@@ -33,12 +33,16 @@ const STORAGE_KEY = "locus_user";
 // ============== Provider ==============
 
 function getStoredUser(): User | null {
-  const stored = localStorage.getItem(STORAGE_KEY);
+  let stored = localStorage.getItem(STORAGE_KEY);
+  if (!stored) {
+    stored = sessionStorage.getItem(STORAGE_KEY);
+  }
   if (stored) {
     try {
       return JSON.parse(stored);
     } catch {
       localStorage.removeItem(STORAGE_KEY);
+      sessionStorage.removeItem(STORAGE_KEY);
     }
   }
   return null;
@@ -48,18 +52,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Use lazy initialization to avoid useEffect for initial load
   const [user, setUser] = useState<User | null>(() => getStoredUser());
 
-  // Save user to localStorage whenever it changes
-  useEffect(() => {
-    if (user) {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(user));
-    } else {
-      localStorage.removeItem(STORAGE_KEY);
-    }
-  }, [user]);
+  // No automatic saving; only save in login based on rememberMe
 
-  const login = async (email: string, password: string): Promise<User> => {
+  const login = async (email: string, password: string, rememberMe: boolean = true): Promise<User> => {
     const userData = await apiLogin(email, password);
     setUser(userData);
+    // Store based on rememberMe
+    if (rememberMe) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(userData));
+    } else {
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(userData));
+    }
     return userData;
   };
 
@@ -76,6 +79,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logout = () => {
     setUser(null);
     localStorage.removeItem(STORAGE_KEY);
+    sessionStorage.removeItem(STORAGE_KEY);
   };
 
   const value: AuthContextType = {

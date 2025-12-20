@@ -7,12 +7,25 @@ interface CheckboxProps extends React.InputHTMLAttributes<HTMLInputElement> {
 }
 
 const Checkbox = React.forwardRef<HTMLInputElement, CheckboxProps>(
-  ({ className, onCheckedChange, ...props }, ref) => {
-    const [checked, setChecked] = React.useState(false);
+  ({ className, onCheckedChange, checked: controlledChecked, ...props }, ref) => {
+    const [internalChecked, setInternalChecked] = React.useState(false);
+
+    const isControlled = controlledChecked !== undefined;
+    const checked = isControlled ? controlledChecked : internalChecked;
 
     const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-      setChecked(e.target.checked);
+      if (!isControlled) {
+        setInternalChecked(e.target.checked);
+      }
       onCheckedChange?.(e.target.checked);
+    };
+
+    const handleClick = () => {
+      const newChecked = !checked;
+      if (!isControlled) {
+        setInternalChecked(newChecked);
+      }
+      onCheckedChange?.(newChecked);
     };
 
     return (
@@ -26,10 +39,7 @@ const Checkbox = React.forwardRef<HTMLInputElement, CheckboxProps>(
           {...props}
         />
         <div
-          onClick={() => {
-            setChecked(!checked);
-            onCheckedChange?.(!checked);
-          }}
+          onClick={handleClick}
           className={cn(
             "h-4 w-4 shrink-0 rounded-sm border border-primary ring-offset-background cursor-pointer transition-colors",
             "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
