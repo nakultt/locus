@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import engine, Base
-from app.routers import auth, chat, google_oauth, linear_oauth, conversations
+from app.routers import auth, chat, google_oauth, linear_oauth, conversations, settings
 
 
 @asynccontextmanager
@@ -49,6 +49,7 @@ app.include_router(google_oauth.router, prefix="/auth", tags=["Google OAuth"])
 app.include_router(linear_oauth.router, prefix="/auth", tags=["Linear OAuth"])
 app.include_router(chat.router, prefix="/api", tags=["Chat"])
 app.include_router(conversations.router, prefix="/api", tags=["Conversations"])
+app.include_router(settings.router, prefix="/api/settings", tags=["Settings"])
 
 
 @app.get("/", tags=["Health"])

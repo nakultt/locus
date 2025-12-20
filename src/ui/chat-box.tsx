@@ -8,7 +8,6 @@ import {
   Loader2,
 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
-import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import {
   streamChatMessage,
@@ -211,7 +210,6 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
   const [showPlaceholder, setShowPlaceholder] = useState(true);
   const [isActive, setIsActive] = useState(false);
   const [smartMode, setSmartMode] = useState(false);
-  const [currentConversationId, setCurrentConversationId] = useState<number | undefined>(initialConversationId);
   
   // Live streaming state
   const [currentStatus, setCurrentStatus] = useState<string>("");
@@ -221,7 +219,6 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
   const wrapperRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<(() => void) | null>(null);
   const { user } = useAuth();
-  const navigate = useNavigate();
 
   // Scroll to bottom when new messages arrive
   useEffect(() => {
@@ -243,7 +240,6 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
             actions: msg.actions_taken,
           }));
           setMessages(loadedMessages);
-          setCurrentConversationId(initialConversationId);
         } catch (err) {
           console.error("Failed to load messages:", err);
         } finally {
@@ -252,7 +248,6 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
       } else {
         // Reset for new conversation
         setMessages([]);
-        setCurrentConversationId(undefined);
       }
     };
     loadMessages();
@@ -409,7 +404,7 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
             );
             break;
 
-          case "complete":
+          case "complete": {
             // Create final AI message with all actions
             const aiMessage: Message = {
               id: (Date.now() + 1).toString(),
@@ -423,8 +418,9 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
             setCurrentStatus("");
             setLiveTasks([]);
             break;
+          }
 
-          case "error":
+          case "error": {
             const errorMessage: Message = {
               id: (Date.now() + 1).toString(),
               role: "assistant",
@@ -436,6 +432,7 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
             setCurrentStatus("");
             setLiveTasks([]);
             break;
+          }
         }
       },
       // onError

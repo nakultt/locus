@@ -381,6 +381,35 @@ export async function getSupportedCommands(): Promise<Record<string, unknown>> {
   return apiRequest<Record<string, unknown>>("/api/supported-commands");
 }
 
+// ============== Settings API ==============
+
+export interface GeminiKeyStatus {
+  has_key: boolean;
+  message: string;
+}
+
+export async function setGeminiKey(
+  userId: number,
+  apiKey: string
+): Promise<GeminiKeyStatus> {
+  return apiRequest<GeminiKeyStatus>("/api/settings/gemini-key", {
+    method: "POST",
+    body: JSON.stringify({ user_id: userId, api_key: apiKey }),
+  });
+}
+
+export async function checkGeminiKey(userId: number): Promise<GeminiKeyStatus> {
+  return apiRequest<GeminiKeyStatus>(`/api/settings/gemini-key/${userId}`);
+}
+
+export async function deleteGeminiKey(
+  userId: number
+): Promise<GeminiKeyStatus> {
+  return apiRequest<GeminiKeyStatus>(`/api/settings/gemini-key/${userId}`, {
+    method: "DELETE",
+  });
+}
+
 // ============== Health Check ==============
 
 export async function healthCheck(): Promise<{
