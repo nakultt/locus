@@ -10,8 +10,8 @@ import {
   useEffect,
   type ReactNode,
 } from "react";
-import type { User } from "@/lib/api";
-import { login as apiLogin, signup as apiSignup } from "@/lib/api";
+import type { User, UserUpdate } from "@/lib/api";
+import { login as apiLogin, signup as apiSignup, updateUser as apiUpdateUser } from "@/lib/api";
 
 // ============== Types ==============
 
@@ -21,6 +21,7 @@ interface AuthContextType {
   isAuthenticated: boolean;
   login: (email: string, password: string, rememberMe?: boolean) => Promise<User>;
   signup: (email: string, password: string, name?: string) => Promise<User>;
+  updateProfile: (data: UserUpdate) => Promise<User>;
   logout: () => void;
 }
 
@@ -108,6 +109,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return userData;
   };
 
+  const updateProfile = async (data: UserUpdate): Promise<User> => {
+    if (!user?.id) throw new Error("User not logged in");
+    const updatedUser = await apiUpdateUser(user.id, data);
+    setUser(updatedUser);
+    return updatedUser;
+  };
+
   const logout = () => {
     setUser(null);
     setRememberMe(false);
@@ -122,6 +130,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     isAuthenticated: !!user,
     login,
     signup,
+    updateProfile,
     logout,
   };
 

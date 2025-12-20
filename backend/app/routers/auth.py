@@ -105,6 +105,42 @@ async def login(
     return response
 
 
+@router.put(
+    "/user/{user_id}",
+    response_model=schemas.UserResponse,
+    summary="Update user details"
+)
+async def update_user(
+    user_id: int,
+    user_update: schemas.UserUpdate,
+    db: Session = Depends(get_db)
+) -> schemas.UserResponse:
+    """
+    Update user profile details.
+    
+    Allows updating name, email, or password.
+    """
+    # Check if user exists
+    user = crud.get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+        
+    # If email is being changed, check if new email is already taken
+    if user_update.email and user_update.email != user.email:
+        existing_user = crud.get_user_by_email(db, user_update.email)
+        if existing_user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already registered"
+            )
+    
+    updated_user = crud.update_user(db, user_id, user_update)
+    return schemas.UserResponse.model_validate(updated_user)
+
+
 @router.post(
     "/connect",
     response_model=schemas.IntegrationResponse,

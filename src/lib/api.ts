@@ -158,6 +158,19 @@ export async function login(
   });
 }
 
+export interface UserUpdate {
+  email?: string;
+  password?: string;
+  name?: string;
+}
+
+export async function updateUser(userId: number, data: UserUpdate): Promise<User> {
+  return apiRequest<User>(`/auth/user/${userId}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
 // ============== Integration API ==============
 
 export async function connectIntegration(
