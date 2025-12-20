@@ -184,6 +184,7 @@ function LoginPage() {
   const [isSignupMode, setIsSignupMode] = useState(false);
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [rememberMe, setRememberMe] = useState(false);
   const navigate = useNavigate();
   const [mouseX, setMouseX] = useState<number>(0);
   const [mouseY, setMouseY] = useState<number>(0);
@@ -330,9 +331,9 @@ function LoginPage() {
         console.log("✅ Signup successful!");
         navigate("/chatbot");
       } else {
-        // Call real login API
-        await authLogin(email, password);
-        console.log("✅ Login successful!");
+        // Call real login API with rememberMe flag
+        await authLogin(email, password, rememberMe);
+        console.log("Login successful!");
         navigate("/chatbot");
       }
     } catch (err) {
@@ -802,7 +803,11 @@ function LoginPage() {
             {!isSignupMode && (
               <div className="flex items-center justify-between">
                 <div className="flex items-center space-x-2">
-                  <Checkbox id="remember" />
+                  <Checkbox 
+                    id="remember" 
+                    checked={rememberMe}
+                    onCheckedChange={(checked) => setRememberMe(!!checked)}
+                  />
                   <Label
                     htmlFor="remember"
                     className="text-sm font-normal cursor-pointer"

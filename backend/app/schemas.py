@@ -35,6 +35,7 @@ class UserLogin(BaseModel):
     """Schema for user login."""
     email: EmailStr
     password: str
+    remember_me: bool = Field(False, description="Keep user logged in for 30 days")
 
 
 class GeminiKeySet(BaseModel):
