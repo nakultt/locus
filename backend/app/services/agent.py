@@ -4,7 +4,7 @@ Main agent that processes natural language and routes to appropriate tools
 """
 
 import os
-from typing import Any
+from typing import Any, Optional
 from dotenv import load_dotenv
 
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -30,29 +30,30 @@ from app.services.linear import get_linear_tools
 
 load_dotenv()
 
-# Initialize Gemini LLM
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+# Fallback to server-level API key if user hasn't configured their own
+FALLBACK_GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-if not GOOGLE_API_KEY:
-    print("WARNING: GOOGLE_API_KEY not set. Chat functionality will be limited.")
 
-llm = None
-llm_smart = None
-if GOOGLE_API_KEY:
-    # Default model - fast and efficient
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
-        google_api_key=GOOGLE_API_KEY,
+def get_llm(api_key: str, smart_mode: bool = False) -> ChatGoogleGenerativeAI:
+    """
+    Create a Gemini LLM instance with the given API key.
+    
+    Args:
+        api_key: User's Gemini API key
+        smart_mode: Use higher intelligence model when True
+        
+    Returns:
+        ChatGoogleGenerativeAI instance
+    """
+    model = "gemini-2.5-pro" if smart_mode else "gemini-2.5-flash"
+    
+    return ChatGoogleGenerativeAI(
+        model=model,
+        google_api_key=api_key,
         temperature=0.1,
         convert_system_message_to_human=True,
     )
-    # Smart mode - higher intelligence model
-    llm_smart = ChatGoogleGenerativeAI(
-        model="gemini-2.5-pro",
-        google_api_key=GOOGLE_API_KEY,
-        temperature=0.1,
-        convert_system_message_to_human=True,
-    )
+
 
 # System prompt for the agent
 SYSTEM_PROMPT = """You are Locus, an intelligent enterprise integration assistant.
@@ -286,13 +287,16 @@ def build_tools(integration_configs: dict[str, dict]) -> list[BaseTool]:
     return tools
 
 
-def create_agent_executor(tools: list[BaseTool], smart_mode: bool = False) -> AgentExecutor:
-    """Create a LangChain agent with the given tools using native tool calling."""
-    # Select the appropriate LLM based on smart mode
-    selected_llm = llm_smart if smart_mode and llm_smart else llm
+def create_agent_executor(tools: list[BaseTool], api_key: str, smart_mode: bool = False) -> AgentExecutor:
+    """Create a LangChain agent with the given tools using native tool calling.
     
-    if not selected_llm:
-        raise ValueError("LLM not configured. Please set GOOGLE_API_KEY.")
+    Args:
+        tools: List of available tools
+        api_key: User's Gemini API key
+        smart_mode: Use higher intelligence model when True
+    """
+    # Create LLM with user's API key
+    selected_llm = get_llm(api_key, smart_mode)
     
     # Create a prompt that works with the tool calling agent
     prompt = ChatPromptTemplate.from_messages([
@@ -316,6 +320,7 @@ def create_agent_executor(tools: list[BaseTool], smart_mode: bool = False) -> Ag
 async def process_chat_message(
     message: str,
     integration_configs: dict[str, dict],
+    gemini_api_key: Optional[str] = None,
     smart_mode: bool = False
 ) -> ChatResponse:
     """
@@ -324,6 +329,7 @@ async def process_chat_message(
     Args:
         message: User's natural language command
         integration_configs: Dict of service name to config
+        gemini_api_key: User's Gemini API key (required)
         smart_mode: Use higher intelligence model when True
     """
     # Build tools based on available integrations
@@ -336,15 +342,18 @@ async def process_chat_message(
             raw_response=None
         )
     
-    if not llm:
+    # Check for API key - use user's key or fall back to server key
+    api_key = gemini_api_key or FALLBACK_GOOGLE_API_KEY
+    
+    if not api_key:
         return ChatResponse(
-            message="LLM not configured. Please set GOOGLE_API_KEY.",
+            message="No Gemini API key configured. Please add your Gemini API key in Settings.",
             actions_taken=[],
             raw_response=None
         )
     
     # Create and run agent SYNCHRONOUSLY to avoid coroutine issues
-    agent = create_agent_executor(tools, smart_mode=smart_mode)
+    agent = create_agent_executor(tools, api_key=api_key, smart_mode=smart_mode)
     
     try:
         # Use sync invoke instead of ainvoke to avoid StopIteration errors
@@ -545,7 +554,8 @@ from app.services.task_planner import parse_tasks_from_message, TaskPlan, TaskSt
 
 async def process_chat_message_streaming(
     message: str,
-    integration_configs: dict[str, dict]
+    integration_configs: dict[str, dict],
+    gemini_api_key: Optional[str] = None
 ) -> AsyncGenerator[dict, None]:
     """
     Process a chat message with streaming task updates.
@@ -570,10 +580,13 @@ async def process_chat_message_streaming(
         }
         return
     
-    if not llm:
+    # Check for API key - use user's key or fall back to server key
+    api_key = gemini_api_key or FALLBACK_GOOGLE_API_KEY
+    
+    if not api_key:
         yield {
             "event_type": "error",
-            "data": {"message": "LLM not configured. Please set GOOGLE_API_KEY."}
+            "data": {"message": "No Gemini API key configured. Please add your Gemini API key in Settings."}
         }
         return
     
@@ -594,7 +607,7 @@ async def process_chat_message_streaming(
         
         # Use regular agent for single/unclear requests
         try:
-            result = await process_chat_message(message, integration_configs)
+            result = await process_chat_message(message, integration_configs, gemini_api_key=api_key)
             yield {
                 "event_type": "complete",
                 "data": {
@@ -615,8 +628,8 @@ async def process_chat_message_streaming(
         "data": task_plan.to_dict()
     }
     
-    # Step 3: Create agent for execution
-    agent = create_agent_executor(tools)
+    # Step 3: Create agent for execution with user's API key
+    agent = create_agent_executor(tools, api_key=api_key)
     
     # Step 4: Execute using the agent with enhanced prompt
     # Build a prompt that explicitly lists all tasks

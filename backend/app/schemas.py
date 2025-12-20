@@ -25,6 +25,7 @@ class UserResponse(BaseModel):
     name: Optional[str] = None
     created_at: Optional[datetime] = None
     token: Optional[str] = Field(None, description="JWT access token")
+    has_gemini_key: bool = Field(False, description="Whether user has configured Gemini API key")
 
     class Config:
         from_attributes = True
@@ -34,6 +35,18 @@ class UserLogin(BaseModel):
     """Schema for user login."""
     email: EmailStr
     password: str
+
+
+class GeminiKeySet(BaseModel):
+    """Schema for setting Gemini API key."""
+    user_id: int
+    api_key: str = Field(..., min_length=1, description="Google Gemini API key")
+
+
+class GeminiKeyStatus(BaseModel):
+    """Schema for Gemini key status response."""
+    has_key: bool
+    message: str
 
 
 # ============== Integration Schemas ==============

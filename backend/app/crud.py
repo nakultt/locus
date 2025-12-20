@@ -54,6 +54,59 @@ def authenticate_user(db: Session, email: str, password: str) -> Optional[models
     return user
 
 
+def set_user_gemini_key(db: Session, user_id: int, gemini_key: str) -> bool:
+    """
+    Set or update user's Gemini API key (encrypted).
+    
+    Args:
+        db: Database session
+        user_id: User ID
+        gemini_key: Gemini API key (will be encrypted)
+        
+    Returns:
+        True if successful, False if user not found
+    """
+    user = get_user_by_id(db, user_id)
+    if not user:
+        return False
+    
+    user.encrypted_gemini_key = security.encrypt_token(gemini_key) if gemini_key else None
+    db.commit()
+    return True
+
+
+def get_user_gemini_key(db: Session, user_id: int) -> Optional[str]:
+    """
+    Get decrypted Gemini API key for a user.
+    
+    Args:
+        db: Database session
+        user_id: User ID
+        
+    Returns:
+        Decrypted Gemini API key or None if not set
+    """
+    user = get_user_by_id(db, user_id)
+    if not user or not user.encrypted_gemini_key:
+        return None
+    return security.decrypt_token(user.encrypted_gemini_key)
+
+
+def has_gemini_key(db: Session, user_id: int) -> bool:
+    """Check if user has a Gemini API key configured."""
+    user = get_user_by_id(db, user_id)
+    return user is not None and user.encrypted_gemini_key is not None
+
+
+def delete_user_gemini_key(db: Session, user_id: int) -> bool:
+    """Delete user's Gemini API key."""
+    user = get_user_by_id(db, user_id)
+    if not user:
+        return False
+    user.encrypted_gemini_key = None
+    db.commit()
+    return True
+
 # ============== Integration Operations ==============
 
 def get_user_integrations(db: Session, user_id: int) -> list[models.Integration]:

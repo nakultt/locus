@@ -111,11 +111,15 @@ async def chat(
         if config:
             integration_configs[integration.service_name] = config
     
+    # Get user's Gemini API key
+    gemini_api_key = crud.get_user_gemini_key(db, request.user_id)
+    
     try:
         # Process message through LangChain agent
         result = await process_chat_message(
             message=request.message,
             integration_configs=integration_configs,
+            gemini_api_key=gemini_api_key,
             smart_mode=request.smart_mode
         )
         
@@ -211,12 +215,16 @@ async def chat_stream(
         if config:
             integration_configs[integration.service_name] = config
     
+    # Get user's Gemini API key
+    gemini_api_key = crud.get_user_gemini_key(db, request.user_id)
+    
     async def event_generator():
         """Generate SSE events from the streaming chat processor."""
         try:
             async for event in process_chat_message_streaming(
                 message=request.message,
-                integration_configs=integration_configs
+                integration_configs=integration_configs,
+                gemini_api_key=gemini_api_key
             ):
                 yield f"data: {json.dumps(event)}\n\n"
         except Exception as e:
