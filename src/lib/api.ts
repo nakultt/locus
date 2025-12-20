@@ -303,6 +303,7 @@ export interface StreamEvent {
     total_tasks?: number;
     completed_tasks?: number;
     failed_tasks?: number;
+    conversation_id?: number;
   };
 }
 
@@ -315,6 +316,7 @@ export interface StreamEvent {
  * @param onEvent - Callback for each SSE event
  * @param onError - Callback for errors
  * @param onComplete - Callback when stream completes
+ * @param conversationId - Optional existing conversation ID
  * @returns Abort function to cancel the stream
  */
 export function streamChatMessage(
@@ -322,7 +324,8 @@ export function streamChatMessage(
   message: string,
   onEvent: (event: StreamEvent) => void,
   onError: (error: Error) => void,
-  onComplete: () => void
+  onComplete: () => void,
+  conversationId?: number
 ): () => void {
   const abortController = new AbortController();
 
@@ -356,7 +359,11 @@ export function streamChatMessage(
       "Content-Type": "application/json",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
-    body: JSON.stringify({ user_id: userId, message }),
+    body: JSON.stringify({ 
+      user_id: userId, 
+      message,
+      conversation_id: conversationId 
+    }),
     signal: abortController.signal,
   })
     .then(async (response) => {
