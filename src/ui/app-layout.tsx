@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Home,
@@ -24,28 +24,44 @@ interface AppLayoutProps {
   children: React.ReactNode;
 }
 
-// Mock chat history (replace with actual state management)
-const mockChatHistory: ChatHistory[] = [
-  { id: "1", title: "Getting started with Locus", timestamp: new Date() },
-  {
-    id: "2",
-    title: "Project ideas discussion",
-    timestamp: new Date(Date.now() - 86400000),
-  },
-  {
-    id: "3",
-    title: "Code review help",
-    timestamp: new Date(Date.now() - 172800000),
-  },
-];
-
 const AppLayout = ({ children }: AppLayoutProps) => {
+  const [chatHistory, setChatHistory] = useState<ChatHistory[]>([]);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [chatHistoryOpen, setChatHistoryOpen] = useState(true);
   const [isPinned, setIsPinned] = useState(true); // Sidebar is pinned open by default
   const [isHovered, setIsHovered] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
+
+  // Load chat history from localStorage
+  useEffect(() => {
+    const loadChatHistory = () => {
+      const saved = localStorage.getItem('chatHistory');
+      if (saved) {
+        try {
+          const parsed = JSON.parse(saved).map((chat: any) => ({
+            ...chat,
+            timestamp: new Date(chat.timestamp),
+          }));
+          setChatHistory(parsed);
+        } catch (error) {
+          console.error('Error loading chat history:', error);
+        }
+      }
+    };
+
+    loadChatHistory();
+
+    // Listen for storage changes (in case another tab updates)
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === 'chatHistory') {
+        loadChatHistory();
+      }
+    };
+
+    window.addEventListener('storage', handleStorageChange);
+    return () => window.removeEventListener('storage', handleStorageChange);
+  }, []);
 
   const navItems = [
     { icon: Home, label: "Home", path: "/" },
@@ -136,7 +152,7 @@ const AppLayout = ({ children }: AppLayoutProps) => {
                     className="overflow-hidden"
                   >
                     <div className="space-y-1 pb-4">
-                      {mockChatHistory.map((chat) => (
+                      {chatHistory.map((chat) => (
                         <button
                           key={chat.id}
                           onClick={() => navigate(`/chatbot?id=${chat.id}`)}
