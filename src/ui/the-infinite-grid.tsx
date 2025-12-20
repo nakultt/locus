@@ -61,13 +61,13 @@ export const Component = () => {
       </div>
 
       <div className="relative z-10 flex flex-col items-center text-center px-4 max-w-3xl mx-auto space-y-6 pointer-events-none">
-        <div className="space-y-2">
+        <div className="space-y-4">
           <h1 className="text-4xl md:text-6xl font-extrabold tracking-tight text-foreground drop-shadow-sm">
-            Get started with Locus
+            Your AI-Powered <br />Productivity Hub
           </h1>
-          <p className="text-lg md:text-xl text-muted-foreground">
-            Get started with Locus <br />
-            AI powered ...
+          <p className="text-lg md:text-xl text-muted-foreground max-w-xl mx-auto">
+            Locus connects all your tools in one place. Chat with AI to manage tasks, 
+            send emails, schedule meetings, and automate your workflow seamlessly.
           </p>
         </div>
 
