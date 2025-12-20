@@ -5,15 +5,16 @@ import {
   CheckCircle,
   XCircle,
   Lightbulb,
+  Loader2,
 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import {
-  sendChatMessage,
+  streamChatMessage,
   getConversationMessages,
   type ActionResult,
-  type ChatResponse,
+  type StreamEvent,
   type Message as ApiMessage,
 } from "@/lib/api";
 
@@ -25,6 +26,16 @@ interface Message {
   actions?: ActionResult[];
 }
 
+interface LiveTask {
+  task_id: string;
+  service: string;
+  action: string;
+  description: string;
+  status: "pending" | "in_progress" | "completed" | "failed";
+  result?: string;
+  error?: string;
+}
+
 const PLACEHOLDERS = [
   "Ask me anything...",
   "What can I help you with?",
@@ -32,7 +43,7 @@ const PLACEHOLDERS = [
   "Type your message here...",
 ];
 
-// Service icon mapping
+// Service icon mapping - extended for all services
 const getServiceIcon = (service: string) => {
   switch (service.toLowerCase()) {
     case "slack":
@@ -45,12 +56,76 @@ const getServiceIcon = (service: string) => {
       return "📅";
     case "notion":
       return "📝";
+    case "docs":
+      return "📄";
+    case "sheets":
+      return "📊";
+    case "slides":
+      return "📽️";
+    case "drive":
+      return "📁";
+    case "forms":
+      return "📋";
+    case "meet":
+      return "🎥";
+    case "github":
+      return "🐙";
+    case "linear":
+      return "🔷";
+    case "bugasura":
+      return "🐛";
     default:
       return "🔧";
   }
 };
 
-// Tool Action Card component
+// Live Tool Card - shows tools being called in real-time
+const LiveToolCard = ({ task }: { task: LiveTask }) => (
+  <motion.div
+    initial={{ opacity: 0, scale: 0.95, x: -10 }}
+    animate={{ opacity: 1, scale: 1, x: 0 }}
+    className={`flex items-start gap-3 p-3 rounded-lg border mb-2 ${
+      task.status === "in_progress"
+        ? "bg-blue-50 dark:bg-blue-950/30 border-blue-200 dark:border-blue-800"
+        : task.status === "completed"
+        ? "bg-green-50 dark:bg-green-950/30 border-green-200 dark:border-green-800"
+        : task.status === "failed"
+        ? "bg-red-50 dark:bg-red-950/30 border-red-200 dark:border-red-800"
+        : "bg-muted/50 border-border"
+    }`}
+  >
+    <span className="text-lg">{getServiceIcon(task.service)}</span>
+    <div className="flex-1 min-w-0">
+      <div className="flex items-center gap-2">
+        <Wrench size={14} className="text-muted-foreground" />
+        <span className="text-sm font-medium text-foreground">
+          {task.action}
+        </span>
+        {task.status === "in_progress" && (
+          <Loader2 size={14} className="text-blue-500 animate-spin" />
+        )}
+        {task.status === "completed" && (
+          <CheckCircle size={14} className="text-green-500" />
+        )}
+        {task.status === "failed" && (
+          <XCircle size={14} className="text-red-500" />
+        )}
+      </div>
+      <p className="text-xs text-muted-foreground mt-1">{task.description}</p>
+      {task.result && task.status === "completed" && (
+        <p className="text-xs text-green-600 dark:text-green-400 mt-1 truncate">
+          {task.result.substring(0, 100)}
+          {task.result.length > 100 ? "..." : ""}
+        </p>
+      )}
+      {task.error && (
+        <p className="text-xs text-red-400 mt-1">{task.error}</p>
+      )}
+    </div>
+  </motion.div>
+);
+
+// Tool Action Card component (for completed messages)
 const ToolActionCard = ({ action }: { action: ActionResult }) => (
   <motion.div
     initial={{ opacity: 0, scale: 0.95 }}
@@ -137,15 +212,21 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
   const [isActive, setIsActive] = useState(false);
   const [smartMode, setSmartMode] = useState(false);
   const [currentConversationId, setCurrentConversationId] = useState<number | undefined>(initialConversationId);
+  
+  // Live streaming state
+  const [currentStatus, setCurrentStatus] = useState<string>("");
+  const [liveTasks, setLiveTasks] = useState<LiveTask[]>([]);
+  
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<(() => void) | null>(null);
   const { user } = useAuth();
   const navigate = useNavigate();
 
   // Scroll to bottom when new messages arrive
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, liveTasks]);
 
   // Load existing messages when conversationId changes
   useEffect(() => {
@@ -176,6 +257,15 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
     };
     loadMessages();
   }, [initialConversationId]);
+
+  // Cleanup abort on unmount
+  useEffect(() => {
+    return () => {
+      if (abortRef.current) {
+        abortRef.current();
+      }
+    };
+  }, []);
 
   // Cycle placeholder text when input is inactive
   useEffect(() => {
@@ -222,49 +312,153 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
     setMessages((prev) => [...prev, userMessage]);
     setInputValue("");
     setIsLoading(true);
+    setCurrentStatus("Analyzing your request...");
+    setLiveTasks([]);
 
-    try {
-      // Call real backend API
-      if (!user?.id) {
-        throw new Error("Please log in to use the chat");
-      }
-
-      const response: ChatResponse = await sendChatMessage(
-        user.id,
-        userMessage.content,
-        smartMode,
-        currentConversationId
-      );
-
-      // Update conversation ID if this was a new conversation
-      if (response.conversation_id && !currentConversationId) {
-        setCurrentConversationId(response.conversation_id);
-        // Update URL without causing a navigation/reload
-        navigate(`/chatbot?id=${response.conversation_id}`, { replace: true });
-      }
-
-      const aiMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: "assistant",
-        content: response.message,
-        timestamp: new Date(),
-        actions: response.actions_taken,
-      };
-      setMessages((prev) => [...prev, aiMessage]);
-    } catch (err) {
+    if (!user?.id) {
       const errorMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: "assistant",
-        content:
-          err instanceof Error
-            ? err.message
-            : "Sorry, I encountered an error. Please try again.",
+        content: "Please log in to use the chat",
         timestamp: new Date(),
       };
       setMessages((prev) => [...prev, errorMessage]);
-    } finally {
       setIsLoading(false);
+      setCurrentStatus("");
+      return;
     }
+
+    // Use streaming API for live updates
+    const abort = streamChatMessage(
+      user.id,
+      userMessage.content,
+      // onEvent
+      (event: StreamEvent) => {
+        switch (event.event_type) {
+          case "planning":
+            setCurrentStatus(event.data.status || "Planning tasks...");
+            break;
+
+          case "plan":
+            if (event.data.tasks) {
+              const tasks: LiveTask[] = event.data.tasks.map((t) => ({
+                task_id: t.task_id,
+                service: t.service,
+                action: t.action,
+                description: t.description,
+                status: "pending" as const,
+              }));
+              setLiveTasks(tasks);
+              setCurrentStatus(`Executing ${tasks.length} task${tasks.length > 1 ? 's' : ''}...`);
+            }
+            break;
+
+          case "task_started":
+            setCurrentStatus(`Calling ${event.data.service || 'tool'}...`);
+            setLiveTasks((prev) =>
+              prev.map((t) =>
+                t.task_id === event.data.task_id
+                  ? { ...t, status: "in_progress" as const }
+                  : t
+              )
+            );
+            // If task not in list, add it
+            setLiveTasks((prev) => {
+              const exists = prev.some((t) => t.task_id === event.data.task_id);
+              if (!exists && event.data.task_id) {
+                return [
+                  ...prev,
+                  {
+                    task_id: event.data.task_id,
+                    service: event.data.service || "unknown",
+                    action: event.data.action || "unknown",
+                    description: event.data.description || "",
+                    status: "in_progress" as const,
+                  },
+                ];
+              }
+              return prev;
+            });
+            break;
+
+          case "task_completed":
+            setLiveTasks((prev) =>
+              prev.map((t) =>
+                t.task_id === event.data.task_id
+                  ? {
+                      ...t,
+                      status: "completed" as const,
+                      result: event.data.result,
+                    }
+                  : t
+              )
+            );
+            break;
+
+          case "task_failed":
+            setLiveTasks((prev) =>
+              prev.map((t) =>
+                t.task_id === event.data.task_id
+                  ? {
+                      ...t,
+                      status: "failed" as const,
+                      error: event.data.error,
+                    }
+                  : t
+              )
+            );
+            break;
+
+          case "complete":
+            // Create final AI message with all actions
+            const aiMessage: Message = {
+              id: (Date.now() + 1).toString(),
+              role: "assistant",
+              content: event.data.message || "Done!",
+              timestamp: new Date(),
+              actions: event.data.actions_taken as ActionResult[],
+            };
+            setMessages((prev) => [...prev, aiMessage]);
+            setIsLoading(false);
+            setCurrentStatus("");
+            setLiveTasks([]);
+            break;
+
+          case "error":
+            const errorMessage: Message = {
+              id: (Date.now() + 1).toString(),
+              role: "assistant",
+              content: event.data.message || "An error occurred",
+              timestamp: new Date(),
+            };
+            setMessages((prev) => [...prev, errorMessage]);
+            setIsLoading(false);
+            setCurrentStatus("");
+            setLiveTasks([]);
+            break;
+        }
+      },
+      // onError
+      (error: Error) => {
+        const errorMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: `Sorry, I encountered an error: ${error.message}`,
+          timestamp: new Date(),
+        };
+        setMessages((prev) => [...prev, errorMessage]);
+        setIsLoading(false);
+        setCurrentStatus("");
+        setLiveTasks([]);
+      },
+      // onComplete
+      () => {
+        setIsLoading(false);
+        setCurrentStatus("");
+      }
+    );
+
+    abortRef.current = abort;
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
@@ -334,7 +528,7 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
             </div>
             <p className="text-muted-foreground">Loading conversation...</p>
           </div>
-        ) : messages.length === 0 ? (
+        ) : messages.length === 0 && !isLoading ? (
           // Welcome state
           <div className="flex flex-col items-center justify-center h-full text-center">
             <h2 className="text-2xl font-semibold text-foreground mb-2">
@@ -351,39 +545,64 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
             {messages.map((message) => (
               <ChatMessage key={message.id} message={message} />
             ))}
+            
+            {/* Live streaming indicator */}
             {isLoading && (
               <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                className="flex justify-start mb-4"
+                className="mb-4"
               >
-                <div className="py-2">
-                  <div className="flex gap-1">
-                    <motion.span
-                      animate={{ opacity: [0.4, 1, 0.4] }}
-                      transition={{ duration: 1.5, repeat: Infinity }}
-                      className="w-2 h-2 bg-muted-foreground rounded-full"
-                    />
-                    <motion.span
-                      animate={{ opacity: [0.4, 1, 0.4] }}
-                      transition={{
-                        duration: 1.5,
-                        repeat: Infinity,
-                        delay: 0.2,
-                      }}
-                      className="w-2 h-2 bg-muted-foreground rounded-full"
-                    />
-                    <motion.span
-                      animate={{ opacity: [0.4, 1, 0.4] }}
-                      transition={{
-                        duration: 1.5,
-                        repeat: Infinity,
-                        delay: 0.4,
-                      }}
-                      className="w-2 h-2 bg-muted-foreground rounded-full"
-                    />
-                  </div>
+                {/* Status indicator */}
+                <div className="flex items-center gap-2 mb-3">
+                  <Loader2 size={16} className="text-primary animate-spin" />
+                  <span className="text-sm text-muted-foreground">
+                    {currentStatus || "Processing..."}
+                  </span>
                 </div>
+                
+                {/* Live tool execution cards */}
+                {liveTasks.length > 0 && (
+                  <div className="mb-3">
+                    <p className="text-xs text-muted-foreground mb-2">Live execution:</p>
+                    <AnimatePresence>
+                      {liveTasks.map((task) => (
+                        <LiveToolCard key={task.task_id} task={task} />
+                      ))}
+                    </AnimatePresence>
+                  </div>
+                )}
+                
+                {/* Fallback dots if no tasks yet */}
+                {liveTasks.length === 0 && (
+                  <div className="py-2">
+                    <div className="flex gap-1">
+                      <motion.span
+                        animate={{ opacity: [0.4, 1, 0.4] }}
+                        transition={{ duration: 1.5, repeat: Infinity }}
+                        className="w-2 h-2 bg-muted-foreground rounded-full"
+                      />
+                      <motion.span
+                        animate={{ opacity: [0.4, 1, 0.4] }}
+                        transition={{
+                          duration: 1.5,
+                          repeat: Infinity,
+                          delay: 0.2,
+                        }}
+                        className="w-2 h-2 bg-muted-foreground rounded-full"
+                      />
+                      <motion.span
+                        animate={{ opacity: [0.4, 1, 0.4] }}
+                        transition={{
+                          duration: 1.5,
+                          repeat: Infinity,
+                          delay: 0.4,
+                        }}
+                        className="w-2 h-2 bg-muted-foreground rounded-full"
+                      />
+                    </div>
+                  </div>
+                )}
               </motion.div>
             )}
             <div ref={messagesEndRef} />

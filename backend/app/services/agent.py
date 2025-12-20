@@ -309,7 +309,7 @@ def create_agent_executor(tools: list[BaseTool], smart_mode: bool = False) -> Ag
         tools=tools,
         verbose=True,
         handle_parsing_errors=True,
-        max_iterations=15  # Increased for multi-tool requests
+        max_iterations=25  # Increased for multi-tool requests (up to 25 tools)
     )
 
 
