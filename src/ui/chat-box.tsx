@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useAuth } from "@/context/AuthContext";
+import { useSearchParams } from "react-router-dom";
 import {
   sendChatMessage,
   type ActionResult,
@@ -129,6 +130,34 @@ const ChatInterface = () => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const { user } = useAuth();
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  const chatId = searchParams.get('id') || 'default';
+
+  // Load messages from localStorage on mount or when chatId changes
+  useEffect(() => {
+    const savedMessages = localStorage.getItem(`chat_${chatId}`);
+    if (savedMessages) {
+      try {
+        const parsedMessages = JSON.parse(savedMessages).map((msg: any) => ({
+          ...msg,
+          timestamp: new Date(msg.timestamp),
+        }));
+        setMessages(parsedMessages);
+      } catch (error) {
+        console.error('Error loading messages:', error);
+      }
+    } else {
+      setMessages([]);
+    }
+  }, [chatId]);
+
+  // Save messages to localStorage whenever messages change
+  useEffect(() => {
+    if (messages.length > 0) {
+      localStorage.setItem(`chat_${chatId}`, JSON.stringify(messages));
+    }
+  }, [messages, chatId]);
 
   // Scroll to bottom when new messages arrive
   useEffect(() => {
@@ -169,6 +198,24 @@ const ChatInterface = () => {
 
   const sendMessage = async () => {
     if (!inputValue.trim() || isLoading) return;
+
+    let currentChatId = chatId;
+
+    // If no chatId and this is the first message, create a new chat
+    if (!currentChatId && messages.length === 0) {
+      currentChatId = Date.now().toString();
+      setSearchParams({ id: currentChatId });
+
+      // Add to chat history
+      const chatHistory = JSON.parse(localStorage.getItem('chatHistory') || '[]');
+      const newChat = {
+        id: currentChatId,
+        title: inputValue.trim().substring(0, 50) + (inputValue.trim().length > 50 ? '...' : ''),
+        timestamp: new Date(),
+      };
+      chatHistory.unshift(newChat); // Add to beginning
+      localStorage.setItem('chatHistory', JSON.stringify(chatHistory));
+    }
 
     const userMessage: Message = {
       id: Date.now().toString(),
