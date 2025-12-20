@@ -312,7 +312,29 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
     <div className="flex flex-col h-full">
       {/* Messages Area */}
       <div className="flex-1 overflow-y-auto px-4 py-6">
-        {messages.length === 0 ? (
+        {isLoadingHistory ? (
+          // Loading history state
+          <div className="flex flex-col items-center justify-center h-full text-center">
+            <div className="flex gap-1 mb-4">
+              <motion.span
+                animate={{ opacity: [0.4, 1, 0.4] }}
+                transition={{ duration: 1.5, repeat: Infinity }}
+                className="w-2 h-2 bg-muted-foreground rounded-full"
+              />
+              <motion.span
+                animate={{ opacity: [0.4, 1, 0.4] }}
+                transition={{ duration: 1.5, repeat: Infinity, delay: 0.2 }}
+                className="w-2 h-2 bg-muted-foreground rounded-full"
+              />
+              <motion.span
+                animate={{ opacity: [0.4, 1, 0.4] }}
+                transition={{ duration: 1.5, repeat: Infinity, delay: 0.4 }}
+                className="w-2 h-2 bg-muted-foreground rounded-full"
+              />
+            </div>
+            <p className="text-muted-foreground">Loading conversation...</p>
+          </div>
+        ) : messages.length === 0 ? (
           // Welcome state
           <div className="flex flex-col items-center justify-center h-full text-center">
             <h2 className="text-2xl font-semibold text-foreground mb-2">
