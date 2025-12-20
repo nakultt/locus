@@ -7,9 +7,11 @@ import {
   useMotionTemplate,
   useAnimationFrame,
 } from "framer-motion";
+import { useAuth } from "@/context/AuthContext";
 
 export const Component = () => {
   const navigate = useNavigate();
+  const { isAuthenticated } = useAuth();
   const containerRef = useRef<HTMLDivElement>(null);
 
   const mouseX = useMotionValue(0);
@@ -35,6 +37,14 @@ export const Component = () => {
   });
 
   const maskImage = useMotionTemplate`radial-gradient(300px circle at ${mouseX}px ${mouseY}px, black, transparent)`;
+
+  const handleProceed = () => {
+    if (isAuthenticated) {
+      navigate("/chatbot");
+    } else {
+      navigate("/login");
+    }
+  };
 
   return (
     <div
@@ -73,9 +83,9 @@ export const Component = () => {
 
         <div className="flex justify-center pointer-events-auto">
           <button
-            onClick={() => navigate("/login")}
+            onClick={handleProceed}
             className="px-8 py-3 bg-primary text-primary-foreground font-semibold rounded-md hover:bg-primary/90 transition-all shadow-md active:scale-95" >
-            Proceed
+            {isAuthenticated ? "Go to Dashboard" : "Get Started"}
           </button>
         </div>
       </div>
