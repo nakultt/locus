@@ -7,11 +7,14 @@ import {
   Lightbulb,
 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
+import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import {
   sendChatMessage,
+  getConversationMessages,
   type ActionResult,
   type ChatResponse,
+  type Message as ApiMessage,
 } from "@/lib/api";
 
 interface Message {
@@ -120,22 +123,59 @@ const ChatMessage = ({ message }: { message: Message }) => {
 };
 
 // Main Chat Interface component
-const ChatInterface = () => {
+interface ChatInterfaceProps {
+  conversationId?: number;
+}
+
+const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceProps) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [placeholderIndex, setPlaceholderIndex] = useState(0);
   const [showPlaceholder, setShowPlaceholder] = useState(true);
   const [isActive, setIsActive] = useState(false);
   const [smartMode, setSmartMode] = useState(false);
+  const [currentConversationId, setCurrentConversationId] = useState<number | undefined>(initialConversationId);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const { user } = useAuth();
+  const navigate = useNavigate();
 
   // Scroll to bottom when new messages arrive
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // Load existing messages when conversationId changes
+  useEffect(() => {
+    const loadMessages = async () => {
+      if (initialConversationId) {
+        setIsLoadingHistory(true);
+        try {
+          const apiMessages = await getConversationMessages(initialConversationId);
+          const loadedMessages: Message[] = apiMessages.map((msg: ApiMessage) => ({
+            id: msg.id.toString(),
+            role: msg.role as "user" | "assistant",
+            content: msg.content,
+            timestamp: new Date(msg.created_at),
+            actions: msg.actions_taken,
+          }));
+          setMessages(loadedMessages);
+          setCurrentConversationId(initialConversationId);
+        } catch (err) {
+          console.error("Failed to load messages:", err);
+        } finally {
+          setIsLoadingHistory(false);
+        }
+      } else {
+        // Reset for new conversation
+        setMessages([]);
+        setCurrentConversationId(undefined);
+      }
+    };
+    loadMessages();
+  }, [initialConversationId]);
 
   // Cycle placeholder text when input is inactive
   useEffect(() => {
@@ -192,8 +232,16 @@ const ChatInterface = () => {
       const response: ChatResponse = await sendChatMessage(
         user.id,
         userMessage.content,
-        smartMode
+        smartMode,
+        currentConversationId
       );
+
+      // Update conversation ID if this was a new conversation
+      if (response.conversation_id && !currentConversationId) {
+        setCurrentConversationId(response.conversation_id);
+        // Update URL without causing a navigation/reload
+        navigate(`/chatbot?id=${response.conversation_id}`, { replace: true });
+      }
 
       const aiMessage: Message = {
         id: (Date.now() + 1).toString(),

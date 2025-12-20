@@ -48,12 +48,49 @@ async def chat(
             detail="User not found"
         )
     
+    # Get or create conversation
+    conversation_id = request.conversation_id
+    if conversation_id:
+        # Validate conversation exists and belongs to user
+        conversation = crud.get_conversation(db, conversation_id)
+        if not conversation:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Conversation not found"
+            )
+        if conversation.owner_id != request.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Conversation does not belong to user"
+            )
+    else:
+        # Create new conversation with first few words of message as title
+        title = request.message[:50] + "..." if len(request.message) > 50 else request.message
+        conversation = crud.create_conversation(db, request.user_id, title)
+        conversation_id = conversation.id
+    
+    # Save user message to database
+    crud.add_message(
+        db=db,
+        conversation_id=conversation_id,
+        role="user",
+        content=request.message
+    )
+    
     # Get user's connected integrations
     integrations = crud.get_user_integrations(db, request.user_id)
     if not integrations:
+        # Save error as assistant message
+        error_msg = "No integrations connected. Please connect at least one service first."
+        crud.add_message(
+            db=db,
+            conversation_id=conversation_id,
+            role="assistant",
+            content=error_msg
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No integrations connected. Please connect at least one service first."
+            detail=error_msg
         )
     
     # Build integration credentials map
@@ -81,7 +118,27 @@ async def chat(
             integration_configs=integration_configs,
             smart_mode=request.smart_mode
         )
-        return result
+        
+        # Save assistant response to database
+        actions_json = None
+        if result.actions_taken:
+            actions_json = json.dumps([action.model_dump() for action in result.actions_taken])
+        
+        crud.add_message(
+            db=db,
+            conversation_id=conversation_id,
+            role="assistant",
+            content=result.message,
+            actions_json=actions_json
+        )
+        
+        # Return response with conversation_id
+        return schemas.ChatResponse(
+            message=result.message,
+            actions_taken=result.actions_taken,
+            raw_response=result.raw_response,
+            conversation_id=conversation_id
+        )
     except ValueError as e:
         # Specific integration not connected
         raise HTTPException(

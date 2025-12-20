@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Home,
@@ -11,41 +11,54 @@ import {
   Grid,
   PanelLeftClose,
   PanelLeft,
+  Loader2,
 } from "lucide-react";
 import { useNavigate, useLocation } from "react-router-dom";
+import { useAuth } from "@/context/AuthContext";
+import { getUserConversations, type Conversation } from "@/lib/api";
 
-interface ChatHistory {
-  id: string;
-  title: string;
-  timestamp: Date;
-}
+
 
 interface AppLayoutProps {
   children: React.ReactNode;
 }
 
-// Mock chat history (replace with actual state management)
-const mockChatHistory: ChatHistory[] = [
-  { id: "1", title: "Getting started with Locus", timestamp: new Date() },
-  {
-    id: "2",
-    title: "Project ideas discussion",
-    timestamp: new Date(Date.now() - 86400000),
-  },
-  {
-    id: "3",
-    title: "Code review help",
-    timestamp: new Date(Date.now() - 172800000),
-  },
-];
-
 const AppLayout = ({ children }: AppLayoutProps) => {
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [chatHistoryOpen, setChatHistoryOpen] = useState(true);
-  const [isPinned, setIsPinned] = useState(true); // Sidebar is pinned open by default
+  const [isPinned, setIsPinned] = useState(true);
   const [isHovered, setIsHovered] = useState(false);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [isLoadingConversations, setIsLoadingConversations] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
+  const { user } = useAuth();
+
+  // Load conversations from API
+  const loadConversations = useCallback(async () => {
+    if (!user?.id) return;
+    setIsLoadingConversations(true);
+    try {
+      const response = await getUserConversations(user.id);
+      setConversations(response.conversations);
+    } catch (err) {
+      console.error("Failed to load conversations:", err);
+    } finally {
+      setIsLoadingConversations(false);
+    }
+  }, [user?.id]);
+
+  // Load conversations on mount and when user changes
+  useEffect(() => {
+    loadConversations();
+  }, [loadConversations]);
+
+  // Reload conversations when navigating to chatbot (to catch new conversations)
+  useEffect(() => {
+    if (location.pathname === "/chatbot") {
+      loadConversations();
+    }
+  }, [location.pathname, loadConversations]);
 
   const navItems = [
     { icon: Home, label: "Home", path: "/" },
@@ -136,15 +149,25 @@ const AppLayout = ({ children }: AppLayoutProps) => {
                     className="overflow-hidden"
                   >
                     <div className="space-y-1 pb-4">
-                      {mockChatHistory.map((chat) => (
-                        <button
-                          key={chat.id}
-                          onClick={() => navigate(`/chatbot?id=${chat.id}`)}
-                          className="w-full text-left px-3 py-2 text-sm text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground rounded-lg transition truncate"
-                        >
-                          {chat.title}
-                        </button>
-                      ))}
+                      {isLoadingConversations ? (
+                        <div className="flex items-center justify-center py-4">
+                          <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                        </div>
+                      ) : conversations.length === 0 ? (
+                        <p className="px-3 py-2 text-sm text-muted-foreground">
+                          No conversations yet
+                        </p>
+                      ) : (
+                        conversations.map((chat) => (
+                          <button
+                            key={chat.id}
+                            onClick={() => navigate(`/chatbot?id=${chat.id}`)}
+                            className="w-full text-left px-3 py-2 text-sm text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground rounded-lg transition truncate"
+                          >
+                            {chat.title}
+                          </button>
+                        ))
+                      )}
                     </div>
                   </motion.div>
                 )}
@@ -237,18 +260,28 @@ const AppLayout = ({ children }: AppLayoutProps) => {
                   Chat History
                 </div>
                 <div className="space-y-1 pb-4">
-                  {mockChatHistory.map((chat) => (
-                    <button
-                      key={chat.id}
-                      onClick={() => {
-                        navigate(`/chatbot?id=${chat.id}`);
-                        setIsMobileSidebarOpen(false);
-                      }}
-                      className="w-full text-left px-3 py-2 text-sm text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground rounded-lg transition truncate"
-                    >
-                      {chat.title}
-                    </button>
-                  ))}
+                  {isLoadingConversations ? (
+                    <div className="flex items-center justify-center py-4">
+                      <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                    </div>
+                  ) : conversations.length === 0 ? (
+                    <p className="px-3 py-2 text-sm text-muted-foreground">
+                      No conversations yet
+                    </p>
+                  ) : (
+                    conversations.map((chat) => (
+                      <button
+                        key={chat.id}
+                        onClick={() => {
+                          navigate(`/chatbot?id=${chat.id}`);
+                          setIsMobileSidebarOpen(false);
+                        }}
+                        className="w-full text-left px-3 py-2 text-sm text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground rounded-lg transition truncate"
+                      >
+                        {chat.title}
+                      </button>
+                    ))
+                  )}
                 </div>
               </div>
 

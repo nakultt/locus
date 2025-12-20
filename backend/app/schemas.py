@@ -77,6 +77,7 @@ class ChatRequest(BaseModel):
     user_id: int
     message: str = Field(..., min_length=1, description="User's natural language command")
     smart_mode: bool = Field(False, description="Use higher intelligence model when enabled")
+    conversation_id: Optional[int] = Field(None, description="Existing conversation ID, or None to create new")
 
 
 class ActionResult(BaseModel):
@@ -93,6 +94,7 @@ class ChatResponse(BaseModel):
     message: str
     actions_taken: list[ActionResult] = []
     raw_response: Optional[str] = None
+    conversation_id: Optional[int] = None
 
 
 # ============== Streaming Task Schemas ==============
@@ -131,6 +133,50 @@ class TaskPlanResponse(BaseModel):
     completed: int = 0
     failed: int = 0
     current_task_id: Optional[str] = None
+
+
+# ============== Conversation Schemas ==============
+
+class ConversationCreate(BaseModel):
+    """Schema for creating a new conversation."""
+    user_id: int
+    title: Optional[str] = Field("New Chat", description="Conversation title")
+
+
+class ConversationResponse(BaseModel):
+    """Schema for conversation response."""
+    id: int
+    title: str
+    owner_id: int
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ConversationList(BaseModel):
+    """Schema for listing conversations."""
+    conversations: list[ConversationResponse]
+    total: int
+
+
+class MessageResponse(BaseModel):
+    """Schema for message response."""
+    id: int
+    conversation_id: int
+    role: str
+    content: str
+    actions_taken: Optional[list[ActionResult]] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ConversationUpdate(BaseModel):
+    """Schema for updating conversation."""
+    title: str
 
 
 # ============== Error Schemas ==============

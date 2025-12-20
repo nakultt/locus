@@ -28,6 +28,7 @@ export interface ChatResponse {
   message: string;
   actions_taken: ActionResult[];
   raw_response?: string;
+  conversation_id?: number;
 }
 
 export interface Integration {
@@ -46,6 +47,28 @@ export interface IntegrationList {
 export interface ApiError {
   detail: string;
   error_code?: string;
+}
+
+export interface Conversation {
+  id: number;
+  title: string;
+  owner_id: number;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface ConversationList {
+  conversations: Conversation[];
+  total: number;
+}
+
+export interface Message {
+  id: number;
+  conversation_id: number;
+  role: "user" | "assistant";
+  content: string;
+  actions_taken?: ActionResult[];
+  created_at: string;
 }
 
 // ============== Helper Functions ==============
@@ -157,11 +180,59 @@ export async function disconnectIntegration(
 export async function sendChatMessage(
   userId: number,
   message: string,
-  smartMode: boolean = false
+  smartMode: boolean = false,
+  conversationId?: number
 ): Promise<ChatResponse> {
   return apiRequest<ChatResponse>("/api/chat", {
     method: "POST",
-    body: JSON.stringify({ user_id: userId, message, smart_mode: smartMode }),
+    body: JSON.stringify({
+      user_id: userId,
+      message,
+      smart_mode: smartMode,
+      conversation_id: conversationId,
+    }),
+  });
+}
+
+// ============== Conversations API ==============
+
+export async function createConversation(
+  userId: number,
+  title?: string
+): Promise<Conversation> {
+  return apiRequest<Conversation>("/api/conversations", {
+    method: "POST",
+    body: JSON.stringify({ user_id: userId, title }),
+  });
+}
+
+export async function getUserConversations(
+  userId: number
+): Promise<ConversationList> {
+  return apiRequest<ConversationList>(`/api/conversations/${userId}`);
+}
+
+export async function getConversationMessages(
+  conversationId: number
+): Promise<Message[]> {
+  return apiRequest<Message[]>(`/api/conversations/${conversationId}/messages`);
+}
+
+export async function updateConversationTitle(
+  conversationId: number,
+  title: string
+): Promise<Conversation> {
+  return apiRequest<Conversation>(`/api/conversations/${conversationId}`, {
+    method: "PUT",
+    body: JSON.stringify({ title }),
+  });
+}
+
+export async function deleteConversation(
+  conversationId: number
+): Promise<void> {
+  return apiRequest<void>(`/api/conversations/${conversationId}`, {
+    method: "DELETE",
   });
 }
 

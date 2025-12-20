@@ -209,3 +209,88 @@ def update_integration_credentials(
     db.commit()
     return True
 
+
+# ============== Conversation Operations ==============
+
+def create_conversation(
+    db: Session,
+    user_id: int,
+    title: str = "New Chat"
+) -> models.Conversation:
+    """Create a new conversation for a user."""
+    db_conversation = models.Conversation(
+        owner_id=user_id,
+        title=title
+    )
+    db.add(db_conversation)
+    db.commit()
+    db.refresh(db_conversation)
+    return db_conversation
+
+
+def get_conversation(db: Session, conversation_id: int) -> Optional[models.Conversation]:
+    """Get a conversation by ID."""
+    return db.query(models.Conversation).filter(
+        models.Conversation.id == conversation_id
+    ).first()
+
+
+def get_user_conversations(db: Session, user_id: int) -> list[models.Conversation]:
+    """Get all conversations for a user, ordered by most recent first."""
+    return db.query(models.Conversation).filter(
+        models.Conversation.owner_id == user_id
+    ).order_by(models.Conversation.updated_at.desc().nullsfirst(), models.Conversation.created_at.desc()).all()
+
+
+def update_conversation_title(
+    db: Session,
+    conversation_id: int,
+    title: str
+) -> Optional[models.Conversation]:
+    """Update a conversation's title."""
+    conversation = get_conversation(db, conversation_id)
+    if not conversation:
+        return None
+    conversation.title = title
+    db.commit()
+    db.refresh(conversation)
+    return conversation
+
+
+def delete_conversation(db: Session, conversation_id: int) -> bool:
+    """Delete a conversation and all its messages."""
+    conversation = get_conversation(db, conversation_id)
+    if not conversation:
+        return False
+    db.delete(conversation)
+    db.commit()
+    return True
+
+
+# ============== Message Operations ==============
+
+def add_message(
+    db: Session,
+    conversation_id: int,
+    role: str,
+    content: str,
+    actions_json: Optional[str] = None
+) -> models.Message:
+    """Add a message to a conversation."""
+    db_message = models.Message(
+        conversation_id=conversation_id,
+        role=role,
+        content=content,
+        actions_json=actions_json
+    )
+    db.add(db_message)
+    db.commit()
+    db.refresh(db_message)
+    return db_message
+
+
+def get_conversation_messages(db: Session, conversation_id: int) -> list[models.Message]:
+    """Get all messages for a conversation, ordered by creation time."""
+    return db.query(models.Message).filter(
+        models.Message.conversation_id == conversation_id
+    ).order_by(models.Message.created_at).all()
