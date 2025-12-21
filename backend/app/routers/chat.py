@@ -113,6 +113,11 @@ async def chat(
     
     # Get user's Gemini API key
     gemini_api_key = crud.get_user_gemini_key(db, request.user_id)
+    if not gemini_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Gemini API Key is required. Please set it in Settings."
+        )
     
     try:
         # Process message through LangChain agent
@@ -258,6 +263,14 @@ async def chat_stream(
     
     # Get user's Gemini API key
     gemini_api_key = crud.get_user_gemini_key(db, request.user_id)
+    if not gemini_api_key:
+        error_msg = "Gemini API Key is required. Please set it in Settings."
+        async def error_generator():
+            yield f"data: {json.dumps({'event_type': 'error', 'data': {'message': error_msg}})}\n\n"
+        return StreamingResponse(
+            error_generator(),
+            media_type="text/event-stream"
+        )
     
     async def event_generator():
         """Generate SSE events from the streaming chat processor."""

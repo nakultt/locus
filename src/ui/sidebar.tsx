@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Home, User, Settings, Bell, Grid } from "lucide-react";
+import { Home, Settings, Bell, Grid } from "lucide-react";
 import { useNavigate } from "react-router-dom";
+const locusLogo = "/locus_logo.png";
 
 const AnimatedMenuToggle = ({
   toggle,
@@ -151,12 +152,10 @@ const Sidebar = () => {
               {/* Profile Section */}
               <div className="p-4 border-b border-gray-200">
                 <div className="flex items-center space-x-3">
-                  <div className="w-12 h-12 bg-gray-200 rounded-full flex items-center justify-center">
-                    <User className="h-6 w-6" />
-                  </div>
+                   <img src={locusLogo} alt="Locus Logo" className="w-10 h-10 object-contain" />
                   <div>
-                    <p className="font-semibold">HextaUI</p>
-                    <p className="text-sm text-gray-500">hi@preetsuthar.me</p>
+                    <p className="font-semibold">Locus</p>
+                    <p className="text-xs text-gray-500">Workspace</p>
                   </div>
                 </div>
               </div>
@@ -221,12 +220,10 @@ const Sidebar = () => {
         {/* Profile Section */}
         <div className="p-4 border-b border-gray-200">
           <div className="flex items-center space-x-3">
-            <div className="w-12 h-12 bg-gray-200 rounded-full flex items-center justify-center">
-              <User className="h-6 w-6" />
-            </div>
+             <img src={locusLogo} alt="Locus Logo" className="w-10 h-10 object-contain" />
             <div>
-              <p className="font-semibold">HextaUI</p>
-              <p className="text-sm text-gray-500">hi@preetsuthar.me</p>
+              <p className="font-semibold">Locus</p>
+              <p className="text-xs text-gray-500">Workspace</p>
             </div>
           </div>
         </div>
