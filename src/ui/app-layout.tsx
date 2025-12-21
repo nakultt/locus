@@ -16,6 +16,7 @@ import {
 import { useNavigate, useLocation } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { getUserConversations, type Conversation } from "@/lib/api";
+const locusLogo = "/locus_logo.png";
 
 
 
@@ -91,15 +92,16 @@ const AppLayout = ({ children }: AppLayoutProps) => {
       >
         {/* Logo & Pin Button */}
         <div className="p-4 border-b border-sidebar-border flex items-center justify-between">
-          <motion.h1
-            className="text-xl font-bold text-sidebar-foreground overflow-hidden whitespace-nowrap"
+          <motion.div
+            className="flex items-center gap-2 overflow-hidden whitespace-nowrap"
             animate={{
               opacity: showSidebar ? 1 : 0,
               width: showSidebar ? "auto" : 0,
             }}
           >
-            Locus
-          </motion.h1>
+            <img src={locusLogo} alt="Locus" className="w-6 h-6 object-contain" />
+            <span className="text-xl font-bold text-sidebar-foreground">Locus</span>
+          </motion.div>
           <button
             onClick={() => setIsPinned(!isPinned)}
             className="p-1.5 rounded-md hover:bg-sidebar-accent transition text-sidebar-foreground/70 hover:text-sidebar-foreground"
@@ -201,7 +203,10 @@ const AppLayout = ({ children }: AppLayoutProps) => {
       {/* Mobile Header */}
       <div className="md:hidden fixed top-0 left-0 right-0 z-50 bg-background border-b border-border">
         <div className="flex items-center justify-between p-4">
-          <h1 className="text-lg font-bold">Locus</h1>
+          <div className="flex items-center gap-2">
+            <img src={locusLogo} alt="Locus" className="w-6 h-6 object-contain" />
+            <span className="text-lg font-bold">Locus</span>
+          </div>
           <button
             onClick={() => setIsMobileSidebarOpen(!isMobileSidebarOpen)}
             className="p-2 hover:bg-accent rounded-lg transition"
@@ -231,9 +236,10 @@ const AppLayout = ({ children }: AppLayoutProps) => {
             >
               {/* Mobile sidebar content (same as desktop) */}
               <div className="p-4 border-b border-sidebar-border flex items-center justify-between">
-                <h1 className="text-xl font-bold text-sidebar-foreground">
-                  Locus
-                </h1>
+                <div className="flex items-center gap-2">
+                  <img src={locusLogo} alt="Locus" className="w-6 h-6 object-contain" />
+                  <span className="text-xl font-bold text-sidebar-foreground">Locus</span>
+                </div>
                 <button
                   onClick={() => setIsMobileSidebarOpen(false)}
                   className="p-2 hover:bg-sidebar-accent rounded-lg transition"

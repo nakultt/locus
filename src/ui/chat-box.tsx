@@ -9,9 +9,11 @@ import {
 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useAuth } from "@/context/AuthContext";
+import { useNavigate } from "react-router-dom";
 import {
   streamChatMessage,
   getConversationMessages,
+  checkGeminiKey,
   type ActionResult,
   type StreamEvent,
   type Message as ApiMessage,
@@ -210,6 +212,7 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
   const [showPlaceholder, setShowPlaceholder] = useState(true);
   const [isActive, setIsActive] = useState(false);
   const [smartMode, setSmartMode] = useState(false);
+  const [showApiKeyModal, setShowApiKeyModal] = useState(false);
   
   // Live streaming state
   const [currentStatus, setCurrentStatus] = useState<string>("");
@@ -220,6 +223,7 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
   const wrapperRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<(() => void) | null>(null);
   const { user } = useAuth();
+  const navigate = useNavigate();
 
   // Scroll to bottom when new messages arrive
   useEffect(() => {
@@ -322,6 +326,27 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
       setMessages((prev) => [...prev, errorMessage]);
       setIsLoading(false);
       setCurrentStatus("");
+      return;
+    }
+
+    // Check if Gemini API key is set
+    try {
+      const keyStatus = await checkGeminiKey(user.id);
+      if (!keyStatus.has_key) {
+        setShowApiKeyModal(true);
+        setIsLoading(false);
+        setCurrentStatus("");
+        // Remove the user message we just added
+        setMessages((prev) => prev.slice(0, -1));
+        return;
+      }
+    } catch (err) {
+      console.error("Error checking Gemini key:", err);
+      // Show modal on error - assume key is missing
+      setShowApiKeyModal(true);
+      setIsLoading(false);
+      setCurrentStatus("");
+      setMessages((prev) => prev.slice(0, -1));
       return;
     }
 
@@ -510,6 +535,56 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
 
   return (
     <div className="flex flex-col h-full">
+      {/* API Key Required Modal */}
+      <AnimatePresence>
+        {showApiKeyModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
+            onClick={() => setShowApiKeyModal(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-background rounded-2xl p-6 max-w-md w-full shadow-2xl border border-border"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="text-center">
+                <div className="w-16 h-16 bg-yellow-100 dark:bg-yellow-900/30 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <Lightbulb className="w-8 h-8 text-yellow-600 dark:text-yellow-400" />
+                </div>
+                <h2 className="text-xl font-bold text-foreground mb-2">
+                  Gemini API Key Required
+                </h2>
+                <p className="text-muted-foreground mb-6">
+                  Please add your Gemini API Key in Settings to start chatting with Locus.
+                </p>
+                <div className="flex gap-3 justify-center">
+                  <button
+                    onClick={() => setShowApiKeyModal(false)}
+                    className="px-4 py-2 rounded-lg border border-border text-foreground hover:bg-accent transition"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowApiKeyModal(false);
+                      navigate("/settings");
+                    }}
+                    className="px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition font-medium"
+                  >
+                    Go to Settings
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Messages Area */}
       <div className="flex-1 overflow-y-auto px-4 py-6">
         {isLoadingHistory ? (
