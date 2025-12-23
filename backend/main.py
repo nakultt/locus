@@ -1,5 +1,5 @@
 """
-Conflux - Enterprise Integration Store
+Locus - Enterprise Integration Store
 FastAPI Backend Entry Point
 """
 
@@ -19,7 +19,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Conflux",
+    title="Locus",
     description="Enterprise Integration Store - Connect your tools, command with chat",
     version="1.0.0",
     lifespan=lifespan,
@@ -55,7 +55,7 @@ app.include_router(settings.router, prefix="/api/settings", tags=["Settings"])
 @app.get("/", tags=["Health"])
 async def health_check() -> dict[str, str]:
     """Health check endpoint."""
-    return {"status": "healthy", "service": "Conflux API"}
+    return {"status": "healthy", "service": "Locus API"}
 
 
 @app.get("/health", tags=["Health"])
@@ -63,7 +63,7 @@ async def detailed_health() -> dict[str, str]:
     """Detailed health check for Render."""
     return {
         "status": "healthy",
-        "service": "Conflux API",
+        "service": "Locus API",
         "version": "1.0.0",
     }
 
