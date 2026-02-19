@@ -98,18 +98,18 @@ async def linear_oauth_callback(
     # Handle errors from Linear
     if error:
         return RedirectResponse(
-            url=f"{FRONTEND_URL}/integrations?error={error}"
+            url=f"{FRONTEND_URL}/integrations/integrations-page?error={error}"
         )
     
     if not code or not state:
         return RedirectResponse(
-            url=f"{FRONTEND_URL}/integrations?error=missing_params"
+            url=f"{FRONTEND_URL}/integrations/integrations-page?error=missing_params"
         )
     
     # Validate state
     if state not in _oauth_states:
         return RedirectResponse(
-            url=f"{FRONTEND_URL}/integrations?error=invalid_state"
+            url=f"{FRONTEND_URL}/integrations/integrations-page?error=invalid_state"
         )
     
     state_data = _oauth_states.pop(state)
@@ -119,7 +119,7 @@ async def linear_oauth_callback(
     created_at = datetime.fromisoformat(state_data["created_at"])
     if datetime.utcnow() - created_at > timedelta(minutes=10):
         return RedirectResponse(
-            url=f"{FRONTEND_URL}/integrations?error=state_expired"
+            url=f"{FRONTEND_URL}/integrations/integrations-page?error=state_expired"
         )
     
     # Exchange code for tokens
@@ -142,7 +142,7 @@ async def linear_oauth_callback(
             if response.status_code != 200:
                 error_detail = response.json().get("error_description", "Token exchange failed")
                 return RedirectResponse(
-                    url=f"{FRONTEND_URL}/integrations?error={error_detail}"
+                    url=f"{FRONTEND_URL}/integrations/integrations-page?error={error_detail}"
                 )
             
             tokens = response.json()
@@ -150,7 +150,7 @@ async def linear_oauth_callback(
     except Exception as e:
         print(f"Linear OAuth error: {e}")
         return RedirectResponse(
-            url=f"{FRONTEND_URL}/integrations?error=token_exchange_failed"
+            url=f"{FRONTEND_URL}/integrations/integrations-page?error=token_exchange_failed"
         )
     
     # Store tokens as credentials
@@ -166,7 +166,7 @@ async def linear_oauth_callback(
     user = crud.get_user_by_id(db, user_id)
     if not user:
         return RedirectResponse(
-            url=f"{FRONTEND_URL}/integrations?error=user_not_found"
+            url=f"{FRONTEND_URL}/integrations/integrations-page?error=user_not_found"
         )
     
     # Store Linear integration
@@ -188,12 +188,12 @@ async def linear_oauth_callback(
     except Exception as e:
         print(f"Error storing Linear integration: {e}")
         return RedirectResponse(
-            url=f"{FRONTEND_URL}/integrations?error=storage_failed"
+            url=f"{FRONTEND_URL}/integrations/integrations-page?error=storage_failed"
         )
     
     # Redirect back to frontend with success
     return RedirectResponse(
-        url=f"{FRONTEND_URL}/integrations?success=linear_connected&service=linear"
+        url=f"{FRONTEND_URL}/integrations/integrations-page?success=linear_connected&service=linear"
     )
 
 
