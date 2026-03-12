@@ -39,3 +39,7 @@ notion-client>=2.2.0
 # HTTP Client
 requests>=2.31.0
 httpx>=0.25.0
+
+# Testing
+pytest>=7.4.0
+hypothesis>=6.88.0

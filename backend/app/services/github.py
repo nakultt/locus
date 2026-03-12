@@ -6,9 +6,18 @@ Uses classic Personal Access Token (ghp_...) for authentication.
 """
 
 import requests
-from typing import Optional
+import time
+from datetime import datetime
+from typing import Optional, List, Dict, Any
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, Field
+
+from .repository_cache import (
+    RepositoryMetadata, 
+    get_cached_metadata, 
+    cache_metadata,
+    invalidate_metadata
+)
 
 # Store credentials at module level for tool access
 _github_config: dict = {}
@@ -110,6 +119,67 @@ class AddPRCommentInput(BaseModel):
     body: str = Field(description="Comment body")
 
 
+class FetchCommitsInput(BaseModel):
+    """Input schema for fetching commits."""
+    owner: str = Field(description="Repository owner")
+    repo: str = Field(description="Repository name")
+    since: str = Field(description="ISO 8601 timestamp to fetch commits since")
+    until: str = Field(description="ISO 8601 timestamp to fetch commits until")
+    per_page: int = Field(default=100, description="Number of commits per page (max 100)")
+
+
+class FetchPullRequestInput(BaseModel):
+    """Input schema for fetching a specific pull request."""
+    owner: str = Field(description="Repository owner")
+    repo: str = Field(description="Repository name")
+    pr_number: int = Field(description="Pull request number")
+
+
+class GetCommitMetadataInput(BaseModel):
+    """Input schema for getting commit metadata."""
+    owner: str = Field(description="Repository owner")
+    repo: str = Field(description="Repository name")
+    sha: str = Field(description="Commit SHA")
+
+
+# ============================================================================
+# RATE LIMITING AND ERROR HANDLING
+# ============================================================================
+
+def _handle_rate_limit_with_backoff(func, *args, max_retries: int = 3, **kwargs):
+    """
+    Handle GitHub API rate limiting with exponential backoff.
+    
+    Args:
+        func: Function to call
+        max_retries: Maximum number of retry attempts
+        *args, **kwargs: Arguments to pass to the function
+        
+    Returns:
+        Tuple of (result, error_message)
+    """
+    for attempt in range(max_retries + 1):
+        result, error = func(*args, **kwargs)
+        
+        if error is None:
+            return result, None
+            
+        # Check if it's a rate limit error
+        if "rate limit" in error.lower() or "403" in error:
+            if attempt < max_retries:
+                # Exponential backoff: 2^attempt seconds
+                wait_time = 2 ** attempt
+                time.sleep(wait_time)
+                continue
+            else:
+                return None, f"Rate limit exceeded after {max_retries} retries: {error}"
+        else:
+            # Non-rate-limit error, don't retry
+            return None, error
+    
+    return None, "Maximum retries exceeded"
+
+
 # ============================================================================
 # HELPER FUNCTION
 # ============================================================================
@@ -154,6 +224,189 @@ def _make_request(method: str, endpoint: str, json_data: dict = None, params: di
         return response.json(), None
     except Exception as e:
         return None, f"Request failed: {str(e)}"
+
+
+# ============================================================================
+# REPOSITORY METADATA FUNCTIONS (Non-tool functions for internal use)
+# ============================================================================
+
+def fetch_repository_metadata(owner: str, name: str, token: Optional[str] = None) -> tuple[Optional[RepositoryMetadata], Optional[str]]:
+    """
+    Fetch repository metadata with caching.
+    
+    Args:
+        owner: Repository owner
+        name: Repository name  
+        token: GitHub token (uses global config if not provided)
+        
+    Returns:
+        Tuple of (RepositoryMetadata, error_message)
+    """
+    # Check cache first
+    cached = get_cached_metadata(owner, name)
+    if cached:
+        return cached, None
+    
+    # Set token if provided
+    original_token = _github_config.get("token")
+    if token:
+        _github_config["token"] = token
+    
+    try:
+        # Fetch from GitHub API
+        data, error = _make_request("GET", f"/repos/{owner}/{name}")
+        if error:
+            return None, error
+        
+        # Convert to RepositoryMetadata
+        metadata = RepositoryMetadata(
+            owner=data.get("owner", {}).get("login", owner),
+            name=data.get("name", name),
+            default_branch=data.get("default_branch", "main"),
+            description=data.get("description"),
+            language=data.get("language"),
+            stars=data.get("stargazers_count", 0),
+            forks=data.get("forks_count", 0),
+            open_issues=data.get("open_issues_count", 0),
+            last_push=data.get("pushed_at"),
+            created_at=data.get("created_at"),
+            updated_at=data.get("updated_at")
+        )
+        
+        # Cache the metadata
+        cache_metadata(metadata)
+        
+        return metadata, None
+        
+    finally:
+        # Restore original token
+        if token and original_token:
+            _github_config["token"] = original_token
+
+
+def fetch_commits_for_analysis(
+    owner: str, 
+    name: str, 
+    since: datetime, 
+    until: datetime,
+    token: Optional[str] = None
+) -> tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+    """
+    Fetch commits for incident analysis with rate limiting.
+    
+    Args:
+        owner: Repository owner
+        name: Repository name
+        since: Start datetime
+        until: End datetime
+        token: GitHub token (uses global config if not provided)
+        
+    Returns:
+        Tuple of (commits_list, error_message)
+    """
+    # Set token if provided
+    original_token = _github_config.get("token")
+    if token:
+        _github_config["token"] = token
+    
+    try:
+        params = {
+            "since": since.isoformat(),
+            "until": until.isoformat(),
+            "per_page": 100
+        }
+        
+        def _fetch_commits_request():
+            return _make_request("GET", f"/repos/{owner}/{name}/commits", params=params)
+        
+        data, error = _handle_rate_limit_with_backoff(_fetch_commits_request)
+        if error:
+            return None, error
+        
+        return data, None
+        
+    finally:
+        # Restore original token
+        if token and original_token:
+            _github_config["token"] = original_token
+
+
+def fetch_pull_request_details(
+    owner: str, 
+    name: str, 
+    pr_number: int,
+    token: Optional[str] = None
+) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """
+    Fetch pull request details with rate limiting.
+    
+    Args:
+        owner: Repository owner
+        name: Repository name
+        pr_number: Pull request number
+        token: GitHub token (uses global config if not provided)
+        
+    Returns:
+        Tuple of (pr_data, error_message)
+    """
+    # Set token if provided
+    original_token = _github_config.get("token")
+    if token:
+        _github_config["token"] = token
+    
+    try:
+        def _fetch_pr_request():
+            return _make_request("GET", f"/repos/{owner}/{name}/pulls/{pr_number}")
+        
+        data, error = _handle_rate_limit_with_backoff(_fetch_pr_request)
+        if error:
+            return None, error
+        
+        return data, None
+        
+    finally:
+        # Restore original token
+        if token and original_token:
+            _github_config["token"] = original_token
+
+
+def fetch_commit_details(
+    owner: str, 
+    name: str, 
+    sha: str,
+    token: Optional[str] = None
+) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """
+    Fetch commit details with rate limiting.
+    
+    Args:
+        owner: Repository owner
+        name: Repository name
+        sha: Commit SHA
+        token: GitHub token (uses global config if not provided)
+        
+    Returns:
+        Tuple of (commit_data, error_message)
+    """
+    # Set token if provided
+    original_token = _github_config.get("token")
+    if token:
+        _github_config["token"] = token
+    
+    try:
+        def _fetch_commit_request():
+            return _make_request("GET", f"/repos/{owner}/{name}/commits/{sha}")
+        
+        data, error = _handle_rate_limit_with_backoff(_fetch_commit_request)
+        if error:
+            return None, error
+        
+        return data, None
+        
+    finally:
+        # Restore original token
+        if token and original_token:
+            _github_config["token"] = original_token
 
 
 # ============================================================================
@@ -509,6 +762,171 @@ def github_add_pr_comment(
 
 
 # ============================================================================
+# INCIDENT ANALYSIS TOOLS
+# ============================================================================
+
+@tool("github_fetch_commits", args_schema=FetchCommitsInput)
+def github_fetch_commits(
+    owner: str,
+    repo: str,
+    since: str,
+    until: str,
+    per_page: int = 100
+) -> str:
+    """
+    Fetch commit history for incident analysis.
+    
+    Use this to retrieve commits within a specific time range for correlating with incidents.
+    """
+    params = {
+        "since": since,
+        "until": until,
+        "per_page": min(per_page, 100)
+    }
+    
+    def _fetch_commits_request():
+        return _make_request("GET", f"/repos/{owner}/{repo}/commits", params=params)
+    
+    data, error = _handle_rate_limit_with_backoff(_fetch_commits_request)
+    if error:
+        return f"❌ {error}"
+    
+    if not data:
+        return f"📝 No commits found in {owner}/{repo} between {since} and {until}."
+    
+    output = f"📝 Found {len(data)} commits in **{owner}/{repo}**:\n\n"
+    for commit in data:
+        commit_info = commit.get("commit", {})
+        author = commit_info.get("author", {})
+        message = commit_info.get("message", "").split('\n')[0][:60]
+        
+        output += f"• **{commit['sha'][:8]}** {message}\n"
+        output += f"  👤 {author.get('name', 'Unknown')} • 📅 {author.get('date', 'Unknown')[:10]}\n"
+        
+        # Include files changed if available
+        if 'files' in commit:
+            files_count = len(commit['files'])
+            output += f"  📁 {files_count} files changed\n"
+        
+        output += "\n"
+    
+    return output
+
+
+@tool("github_fetch_pull_request", args_schema=FetchPullRequestInput)
+def github_fetch_pull_request(owner: str, repo: str, pr_number: int) -> str:
+    """
+    Fetch detailed pull request information for incident analysis.
+    
+    Use this to get PR details including reviewers, linked issues, and merge information.
+    """
+    def _fetch_pr_request():
+        return _make_request("GET", f"/repos/{owner}/{repo}/pulls/{pr_number}")
+    
+    data, error = _handle_rate_limit_with_backoff(_fetch_pr_request)
+    if error:
+        return f"❌ {error}"
+    
+    # Get linked issues from PR body
+    linked_issues = []
+    body = data.get("body", "") or ""
+    # Simple regex to find issue references like #123, fixes #456, closes #789
+    import re
+    issue_patterns = re.findall(r'(?:fixes?|closes?|resolves?)\s*#(\d+)|#(\d+)', body.lower())
+    for pattern in issue_patterns:
+        issue_num = pattern[0] or pattern[1]
+        if issue_num:
+            linked_issues.append(f"#{issue_num}")
+    
+    # Get reviewers
+    reviewers = []
+    if data.get("requested_reviewers"):
+        reviewers.extend([r.get("login", "Unknown") for r in data["requested_reviewers"]])
+    
+    merged_info = ""
+    if data.get("merged"):
+        merged_info = f"✅ Merged at: {data.get('merged_at', 'Unknown')[:19]}\n"
+        if data.get("merged_by"):
+            merged_info += f"🔀 Merged by: {data['merged_by'].get('login', 'Unknown')}\n"
+    
+    return f"""🔀 Pull Request **#{data['number']}** in {owner}/{repo}
+
+📝 Title: {data['title']}
+👤 Author: {data.get('user', {}).get('login', 'Unknown')}
+🌿 Branch: {data['head']['ref']} → {data['base']['ref']}
+📊 State: {data['state']}
+{merged_info}
+👥 Reviewers: {', '.join(reviewers) if reviewers else 'None'}
+🔗 Linked Issues: {', '.join(linked_issues) if linked_issues else 'None'}
+📅 Created: {data.get('created_at', 'Unknown')[:19]}
+📅 Updated: {data.get('updated_at', 'Unknown')[:19]}
+
+📝 Description:
+{data.get('body', 'No description')[:200]}{'...' if len(data.get('body', '')) > 200 else ''}
+
+🔗 URL: {data.get('html_url')}"""
+
+
+@tool("github_get_commit_metadata", args_schema=GetCommitMetadataInput)
+def github_get_commit_metadata(owner: str, repo: str, sha: str) -> str:
+    """
+    Get detailed commit metadata for incident analysis.
+    
+    Use this to get commit details including author, timestamp, message, and changed files.
+    """
+    def _fetch_commit_request():
+        return _make_request("GET", f"/repos/{owner}/{repo}/commits/{sha}")
+    
+    data, error = _handle_rate_limit_with_backoff(_fetch_commit_request)
+    if error:
+        return f"❌ {error}"
+    
+    commit_info = data.get("commit", {})
+    author = commit_info.get("author", {})
+    committer = commit_info.get("committer", {})
+    stats = data.get("stats", {})
+    
+    # Get changed files
+    files_info = ""
+    if "files" in data:
+        files_info = f"\n📁 Files Changed ({len(data['files'])}):\n"
+        for file in data["files"][:10]:  # Limit to first 10 files
+            status_icon = {"added": "➕", "modified": "📝", "removed": "❌"}.get(file.get("status", ""), "📝")
+            files_info += f"  {status_icon} {file.get('filename', 'Unknown')}\n"
+        
+        if len(data["files"]) > 10:
+            files_info += f"  ... and {len(data['files']) - 10} more files\n"
+    
+    # Check if this commit is associated with a PR
+    pr_info = ""
+    # Try to find associated PR by searching for PRs that include this commit
+    def _search_prs_request():
+        return _make_request("GET", f"/repos/{owner}/{repo}/pulls", params={"state": "all", "per_page": 100})
+    
+    prs_data, prs_error = _handle_rate_limit_with_backoff(_search_prs_request)
+    if not prs_error and prs_data and isinstance(prs_data, list):
+        for pr in prs_data:
+            if isinstance(pr, dict) and pr.get("merge_commit_sha") == sha:
+                pr_info = f"\n🔀 Associated PR: #{pr['number']} - {pr['title']}\n"
+                break
+    
+    return f"""📝 Commit **{sha[:8]}** in {owner}/{repo}
+
+💬 Message: {commit_info.get('message', 'No message')}
+👤 Author: {author.get('name', 'Unknown')} <{author.get('email', 'unknown@example.com')}>
+📅 Authored: {author.get('date', 'Unknown')[:19]}
+👤 Committer: {committer.get('name', 'Unknown')} <{committer.get('email', 'unknown@example.com')}>
+📅 Committed: {committer.get('date', 'Unknown')[:19]}
+
+📊 Stats:
+  ➕ Additions: {stats.get('additions', 0)}
+  ❌ Deletions: {stats.get('deletions', 0)}
+  📝 Total Changes: {stats.get('total', 0)}
+{pr_info}{files_info}
+🔗 URL: {data.get('html_url')}"""
+
+
+# ============================================================================
 # USER TOOLS
 # ============================================================================
 
@@ -566,6 +984,10 @@ def get_github_tools(token: str) -> list[BaseTool]:
         github_create_pr,
         github_merge_pr,
         github_add_pr_comment,
+        # Incident analysis tools
+        github_fetch_commits,
+        github_fetch_pull_request,
+        github_get_commit_metadata,
         # User tools
         github_get_user,
     ]

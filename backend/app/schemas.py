@@ -206,3 +206,131 @@ class ErrorResponse(BaseModel):
     """Schema for error responses."""
     detail: str
     error_code: Optional[str] = None
+
+
+# ============== Incident Analysis Schemas ==============
+
+class RepositoryCreate(BaseModel):
+    """Schema for creating a repository."""
+    owner: str = Field(..., description="Repository owner/organization")
+    name: str = Field(..., description="Repository name")
+    default_branch: str = Field("main", description="Default branch name")
+    github_token: Optional[str] = Field(None, description="GitHub personal access token")
+
+
+class RepositoryResponse(BaseModel):
+    """Schema for repository response."""
+    id: int
+    owner: str
+    name: str
+    default_branch: str
+    last_synced: Optional[datetime] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ErrorPatternResponse(BaseModel):
+    """Schema for error pattern response."""
+    id: int
+    error_type: str
+    message: str
+    file_paths: Optional[list[str]] = None
+    function_names: Optional[list[str]] = None
+    line_numbers: Optional[list[int]] = None
+    timestamps: Optional[list[str]] = None
+    raw_stack_trace: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class SuspectCommitResponse(BaseModel):
+    """Schema for suspect commit response."""
+    id: int
+    commit_sha: str
+    author_name: Optional[str] = None
+    author_email: Optional[str] = None
+    commit_message: Optional[str] = None
+    commit_timestamp: Optional[datetime] = None
+    confidence_score: int
+    matching_files: Optional[list[str]] = None
+    matching_functions: Optional[list[str]] = None
+    pr_number: Optional[int] = None
+    pr_title: Optional[str] = None
+    repository: RepositoryResponse
+
+    class Config:
+        from_attributes = True
+
+
+class TimelineEventResponse(BaseModel):
+    """Schema for timeline event response."""
+    id: int
+    timestamp: datetime
+    event_type: str
+    title: str
+    description: Optional[str] = None
+    event_metadata: Optional[dict[str, Any]] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ShareableReportResponse(BaseModel):
+    """Schema for shareable report response."""
+    id: int
+    share_uuid: str
+    created_at: datetime
+    expires_at: Optional[datetime] = None
+    access_count: int
+
+    class Config:
+        from_attributes = True
+
+
+class IncidentAnalysisCreate(BaseModel):
+    """Schema for creating an incident analysis."""
+    log_content: str = Field(..., min_length=1, description="Incident log content")
+    log_format: Optional[str] = Field(None, description="Log format (e.g., json, plain, syslog)")
+    repository_ids: list[int] = Field(default_factory=list, description="Repository IDs to analyze against")
+
+
+class IncidentAnalysisResponse(BaseModel):
+    """Schema for incident analysis response."""
+    id: int
+    analysis_uuid: str
+    log_content: str
+    log_format: Optional[str] = None
+    status: str
+    created_at: datetime
+    completed_at: Optional[datetime] = None
+    error_patterns: list[ErrorPatternResponse] = []
+    suspect_commits: list[SuspectCommitResponse] = []
+    timeline_events: list[TimelineEventResponse] = []
+    shareable_reports: list[ShareableReportResponse] = []
+    repositories: list[RepositoryResponse] = []
+
+    class Config:
+        from_attributes = True
+
+
+class IncidentAnalysisListItem(BaseModel):
+    """Schema for incident analysis list item (summary)."""
+    id: int
+    analysis_uuid: str
+    status: str
+    created_at: datetime
+    completed_at: Optional[datetime] = None
+    error_count: int = 0
+    suspect_commit_count: int = 0
+
+    class Config:
+        from_attributes = True
+
+
+class IncidentAnalysisListResponse(BaseModel):
+    """Schema for listing incident analyses."""
+    analyses: list[IncidentAnalysisListItem]
+    total: int

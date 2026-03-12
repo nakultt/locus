@@ -1,0 +1,4 @@
+# file: E:\Github\locus\backend\app\services\repository_cache.py
+# hypothesis_version: 6.151.9
+
+['entries', 'expires_at', 'key', 'repository', 'total_entries', 'ttl_minutes']

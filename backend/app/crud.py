@@ -377,3 +377,158 @@ def get_conversation_messages(db: Session, conversation_id: int) -> list[models.
     return db.query(models.Message).filter(
         models.Message.conversation_id == conversation_id
     ).order_by(models.Message.created_at).all()
+
+
+# ============== Repository Operations ==============
+
+def create_repository(
+    db: Session,
+    user_id: int,
+    owner: str,
+    name: str,
+    default_branch: str = "main",
+    github_token: Optional[str] = None
+) -> models.Repository:
+    """
+    Create a new repository connection with encrypted credentials.
+    
+    Args:
+        db: Database session
+        user_id: Owner user ID
+        owner: Repository owner/organization
+        name: Repository name
+        default_branch: Default branch name
+        github_token: GitHub personal access token (will be encrypted)
+        
+    Returns:
+        Created Repository model instance
+    """
+    # Check if repository already exists for this user
+    existing = get_repository_by_name(db, user_id, owner, name)
+    if existing:
+        raise ValueError(f"Repository {owner}/{name} already connected")
+    
+    # Encrypt GitHub token if provided
+    encrypted_token = security.encrypt_token(github_token) if github_token else None
+    
+    # Create repository
+    db_repository = models.Repository(
+        user_id=user_id,
+        owner=owner,
+        name=name,
+        default_branch=default_branch,
+        github_token_encrypted=encrypted_token
+    )
+    db.add(db_repository)
+    db.commit()
+    db.refresh(db_repository)
+    return db_repository
+
+
+def get_repository_by_id(db: Session, user_id: int, repository_id: int) -> Optional[models.Repository]:
+    """Get a repository by ID for a specific user."""
+    return db.query(models.Repository).filter(
+        models.Repository.id == repository_id,
+        models.Repository.user_id == user_id
+    ).first()
+
+
+def get_repository_by_name(
+    db: Session, 
+    user_id: int, 
+    owner: str, 
+    name: str
+) -> Optional[models.Repository]:
+    """Get a repository by owner/name for a specific user."""
+    return db.query(models.Repository).filter(
+        models.Repository.user_id == user_id,
+        models.Repository.owner == owner,
+        models.Repository.name == name
+    ).first()
+
+
+def get_user_repositories(db: Session, user_id: int) -> list[models.Repository]:
+    """Get all repositories for a user, ordered by most recent first."""
+    return db.query(models.Repository).filter(
+        models.Repository.user_id == user_id
+    ).order_by(models.Repository.created_at.desc()).all()
+
+
+def update_repository(
+    db: Session,
+    user_id: int,
+    repository_id: int,
+    default_branch: Optional[str] = None,
+    github_token: Optional[str] = None
+) -> Optional[models.Repository]:
+    """
+    Update repository details.
+    
+    Args:
+        db: Database session
+        user_id: Owner user ID
+        repository_id: Repository ID to update
+        default_branch: New default branch name
+        github_token: New GitHub token (will be encrypted)
+        
+    Returns:
+        Updated Repository model or None if not found
+    """
+    repository = get_repository_by_id(db, user_id, repository_id)
+    if not repository:
+        return None
+    
+    if default_branch is not None:
+        repository.default_branch = default_branch
+    
+    if github_token is not None:
+        repository.github_token_encrypted = security.encrypt_token(github_token) if github_token else None
+    
+    db.commit()
+    db.refresh(repository)
+    return repository
+
+
+def delete_repository(db: Session, user_id: int, repository_id: int) -> bool:
+    """Delete a repository connection."""
+    repository = get_repository_by_id(db, user_id, repository_id)
+    if not repository:
+        return False
+    
+    db.delete(repository)
+    db.commit()
+    return True
+
+
+def get_repository_github_token(db: Session, user_id: int, repository_id: int) -> Optional[str]:
+    """
+    Get decrypted GitHub token for a repository.
+    
+    Args:
+        db: Database session
+        user_id: Owner user ID
+        repository_id: Repository ID
+        
+    Returns:
+        Decrypted GitHub token or None if not set
+    """
+    repository = get_repository_by_id(db, user_id, repository_id)
+    if not repository or not repository.github_token_encrypted:
+        return None
+    return security.decrypt_token(repository.github_token_encrypted)
+
+
+def update_repository_sync_time(db: Session, repository_id: int) -> bool:
+    """Update the last_synced timestamp for a repository."""
+    from datetime import datetime
+    
+    repository = db.query(models.Repository).filter(
+        models.Repository.id == repository_id
+    ).first()
+    
+    if not repository:
+        return False
+    
+    repository.last_synced = datetime.utcnow()
+    db.commit()
+    return True
