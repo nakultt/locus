@@ -30,7 +30,7 @@ load_dotenv()
 
 # Initialize Ollama with Qwen3 model (local LLM - no API calls)
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:4b")
 
 print(f"Using Ollama with model: {OLLAMA_MODEL} at {OLLAMA_BASE_URL}")
 
@@ -131,7 +131,10 @@ EXAMPLE: If user says "send a Slack message to #general, create a Jira ticket, a
 - Call gmail_send_email (mention the Jira ticket key)
 - Then respond with summary of all three actions
 
-NEVER stop after just 1-2 actions if the user requested more. ALWAYS complete ALL requested tasks."""
+NEVER stop after just 1-2 actions if the user requested more. ALWAYS complete ALL requested tasks.
+- DO NOT use any <thought> or <reasoning> tags in your response. 
+- Provide only the direct answer or tool calls requested.
+"""
 
 
 def build_tools(integration_configs: dict[str, dict]) -> list[BaseTool]:
