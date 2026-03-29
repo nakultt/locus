@@ -12,6 +12,26 @@ from app.database import get_db
 router = APIRouter()
 
 
+@router.get(
+    "/signup",
+    summary="Signup endpoint info",
+)
+async def signup_info() -> dict[str, str]:
+    """
+    Informational endpoint for browser visits.
+
+    Explains how to use the POST /auth/signup endpoint.
+    """
+    return {
+        "message": "Use POST /auth/signup with JSON body to create a user.",
+        "expected_body": {
+            "email": "user@example.com",
+            "password": "your-password",
+            "name": "Your Name",
+        },
+    }
+
+
 @router.post(
     "/signup",
     response_model=schemas.UserResponse,
@@ -76,12 +96,49 @@ async def login(
     token = security.create_access_token(
         user_id=user.id,
         email=user.email,
-        name=user.name
+        name=user.name,
+        remember_me=credentials.remember_me
     )
     
     response = schemas.UserResponse.model_validate(user)
     response.token = token
     return response
+
+
+@router.put(
+    "/user/{user_id}",
+    response_model=schemas.UserResponse,
+    summary="Update user details"
+)
+async def update_user(
+    user_id: int,
+    user_update: schemas.UserUpdate,
+    db: Session = Depends(get_db)
+) -> schemas.UserResponse:
+    """
+    Update user profile details.
+    
+    Allows updating name, email, or password.
+    """
+    # Check if user exists
+    user = crud.get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+        
+    # If email is being changed, check if new email is already taken
+    if user_update.email and user_update.email != user.email:
+        existing_user = crud.get_user_by_email(db, user_update.email)
+        if existing_user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already registered"
+            )
+    
+    updated_user = crud.update_user(db, user_id, user_update)
+    return schemas.UserResponse.model_validate(updated_user)
 
 
 @router.post(
@@ -113,11 +170,11 @@ async def connect_integration(
         )
     
     # Validate service name
-    valid_services = {"jira", "gmail", "calendar", "slack", "notion", "bugasura"}
+    valid_services = {"jira", "gmail", "calendar", "slack", "notion", "bugasura", "github", "docs", "sheets", "slides", "drive", "forms", "meet", "linear"}
     if integration.service_name.lower() not in valid_services:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid service. Must be one of: {', '.join(valid_services)}"
+            detail=f"Invalid service. Must be one of: {', '.join(sorted(valid_services))}"
         )
     
     # Validate credentials provided

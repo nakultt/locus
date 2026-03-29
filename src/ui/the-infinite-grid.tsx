@@ -7,9 +7,11 @@ import {
   useMotionTemplate,
   useAnimationFrame,
 } from "framer-motion";
+import { useAuth } from "@/context/AuthContext";
 
 export const Component = () => {
   const navigate = useNavigate();
+  const { isAuthenticated } = useAuth();
   const containerRef = useRef<HTMLDivElement>(null);
 
   const mouseX = useMotionValue(0);
@@ -36,6 +38,14 @@ export const Component = () => {
 
   const maskImage = useMotionTemplate`radial-gradient(300px circle at ${mouseX}px ${mouseY}px, black, transparent)`;
 
+  const handleProceed = () => {
+    if (isAuthenticated) {
+      navigate("/chatbot");
+    } else {
+      navigate("/login");
+    }
+  };
+
   return (
     <div
       ref={containerRef}
@@ -61,25 +71,21 @@ export const Component = () => {
       </div>
 
       <div className="relative z-10 flex flex-col items-center text-center px-4 max-w-3xl mx-auto space-y-6 pointer-events-none">
-        <div className="space-y-2">
+        <div className="space-y-4">
           <h1 className="text-4xl md:text-6xl font-extrabold tracking-tight text-foreground drop-shadow-sm">
-            Get started with Locus
+            Your AI-Powered <br />Productivity Hub
           </h1>
-          <p className="text-lg md:text-xl text-muted-foreground">
-            Get started with Locus <br />
-            AI powered ...
+          <p className="text-lg md:text-xl text-muted-foreground max-w-xl mx-auto">
+            Locus connects all your tools in one place. Chat with AI to manage tasks, 
+            send emails, schedule meetings, and automate your workflow seamlessly.
           </p>
         </div>
 
-        <div className="flex gap-4 pointer-events-auto">
+        <div className="flex justify-center pointer-events-auto">
           <button
-            onClick={() => navigate("/login")}
-            className="px-8 py-3 bg-primary text-primary-foreground font-semibold rounded-md hover:bg-primary/90 transition-all shadow-md active:scale-95"
-          >
-            Proceed
-          </button>
-          <button className="px-8 py-3 bg-secondary text-secondary-foreground font-semibold rounded-md hover:bg-secondary/80 transition-all active:scale-95">
-            Learn More
+            onClick={handleProceed}
+            className="px-8 py-3 bg-primary text-primary-foreground font-semibold rounded-md hover:bg-primary/90 transition-all shadow-md active:scale-95" >
+            {isAuthenticated ? "Go to Dashboard" : "Get Started"}
           </button>
         </div>
       </div>

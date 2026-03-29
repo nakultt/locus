@@ -151,18 +151,18 @@ async def google_oauth_callback(
     # Handle errors from Google
     if error:
         return RedirectResponse(
-            url=f"{FRONTEND_URL}/integrations?error={error}"
+            url=f"{FRONTEND_URL}/integrations/integrations-page?error={error}"
         )
     
     if not code or not state:
         return RedirectResponse(
-            url=f"{FRONTEND_URL}/integrations?error=missing_params"
+            url=f"{FRONTEND_URL}/integrations/integrations-page?error=missing_params"
         )
     
     # Validate state
     if state not in _oauth_states:
         return RedirectResponse(
-            url=f"{FRONTEND_URL}/integrations?error=invalid_state"
+            url=f"{FRONTEND_URL}/integrations/integrations-page?error=invalid_state"
         )
     
     state_data = _oauth_states.pop(state)
@@ -173,7 +173,7 @@ async def google_oauth_callback(
     created_at = datetime.fromisoformat(state_data["created_at"])
     if datetime.utcnow() - created_at > timedelta(minutes=10):
         return RedirectResponse(
-            url=f"{FRONTEND_URL}/integrations?error=state_expired"
+            url=f"{FRONTEND_URL}/integrations/integrations-page?error=state_expired"
         )
     
     # Exchange code for tokens
@@ -193,14 +193,14 @@ async def google_oauth_callback(
             if response.status_code != 200:
                 error_detail = response.json().get("error_description", "Token exchange failed")
                 return RedirectResponse(
-                    url=f"{FRONTEND_URL}/integrations?error={error_detail}"
+                    url=f"{FRONTEND_URL}/integrations/integrations-page?error={error_detail}"
                 )
             
             tokens = response.json()
             
     except Exception as e:
         return RedirectResponse(
-            url=f"{FRONTEND_URL}/integrations?error=token_exchange_failed"
+            url=f"{FRONTEND_URL}/integrations/integrations-page?error=token_exchange_failed"
         )
     
     # Store tokens as credentials
@@ -217,7 +217,7 @@ async def google_oauth_callback(
     user = crud.get_user_by_id(db, user_id)
     if not user:
         return RedirectResponse(
-            url=f"{FRONTEND_URL}/integrations?error=user_not_found"
+            url=f"{FRONTEND_URL}/integrations/integrations-page?error=user_not_found"
         )
     
     # Store credentials for all Google services if user requested "google"
@@ -245,7 +245,7 @@ async def google_oauth_callback(
     
     # Redirect back to frontend with success
     return RedirectResponse(
-        url=f"{FRONTEND_URL}/integrations?success=google_connected&service={service}"
+        url=f"{FRONTEND_URL}/integrations/integrations-page?success=google_connected&service={service}"
     )
 
 

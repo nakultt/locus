@@ -1,22 +1,22 @@
 import { useState, useEffect, useRef } from "react";
 import {
-  Lightbulb,
-  Paperclip,
   Send,
   Wrench,
   CheckCircle,
   XCircle,
+  Lightbulb,
   Loader2,
-  Clock,
 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useAuth } from "@/context/AuthContext";
+import { useNavigate } from "react-router-dom";
 import {
   streamChatMessage,
+  getConversationMessages,
+  checkGeminiKey,
   type ActionResult,
-  type TaskUpdate,
   type StreamEvent,
-  type TaskStatusType,
+  type Message as ApiMessage,
 } from "@/lib/api";
 
 interface Message {
@@ -27,11 +27,14 @@ interface Message {
   actions?: ActionResult[];
 }
 
-interface TaskProgress {
-  tasks: TaskUpdate[];
-  currentTaskId: string | null;
-  status: string;
-  isActive: boolean;
+interface LiveTask {
+  task_id: string;
+  service: string;
+  action: string;
+  description: string;
+  status: "pending" | "in_progress" | "completed" | "failed";
+  result?: string;
+  error?: string;
 }
 
 const PLACEHOLDERS = [
@@ -41,7 +44,7 @@ const PLACEHOLDERS = [
   "Type your message here...",
 ];
 
-// Service icon mapping
+// Service icon mapping - extended for all services
 const getServiceIcon = (service: string) => {
   switch (service.toLowerCase()) {
     case "slack":
@@ -54,12 +57,76 @@ const getServiceIcon = (service: string) => {
       return "📅";
     case "notion":
       return "📝";
+    case "docs":
+      return "📄";
+    case "sheets":
+      return "📊";
+    case "slides":
+      return "📽️";
+    case "drive":
+      return "📁";
+    case "forms":
+      return "📋";
+    case "meet":
+      return "🎥";
+    case "github":
+      return "🐙";
+    case "linear":
+      return "🔷";
+    case "bugasura":
+      return "🐛";
     default:
       return "🔧";
   }
 };
 
-// Tool Action Card component
+// Live Tool Card - shows tools being called in real-time
+const LiveToolCard = ({ task }: { task: LiveTask }) => (
+  <motion.div
+    initial={{ opacity: 0, scale: 0.95, x: -10 }}
+    animate={{ opacity: 1, scale: 1, x: 0 }}
+    className={`flex items-start gap-3 p-3 rounded-lg border mb-2 ${
+      task.status === "in_progress"
+        ? "bg-blue-50 dark:bg-blue-950/30 border-blue-200 dark:border-blue-800"
+        : task.status === "completed"
+        ? "bg-green-50 dark:bg-green-950/30 border-green-200 dark:border-green-800"
+        : task.status === "failed"
+        ? "bg-red-50 dark:bg-red-950/30 border-red-200 dark:border-red-800"
+        : "bg-muted/50 border-border"
+    }`}
+  >
+    <span className="text-lg">{getServiceIcon(task.service)}</span>
+    <div className="flex-1 min-w-0">
+      <div className="flex items-center gap-2">
+        <Wrench size={14} className="text-muted-foreground" />
+        <span className="text-sm font-medium text-foreground">
+          {task.action}
+        </span>
+        {task.status === "in_progress" && (
+          <Loader2 size={14} className="text-blue-500 animate-spin" />
+        )}
+        {task.status === "completed" && (
+          <CheckCircle size={14} className="text-green-500" />
+        )}
+        {task.status === "failed" && (
+          <XCircle size={14} className="text-red-500" />
+        )}
+      </div>
+      <p className="text-xs text-muted-foreground mt-1">{task.description}</p>
+      {task.result && task.status === "completed" && (
+        <p className="text-xs text-green-600 dark:text-green-400 mt-1 truncate">
+          {task.result.substring(0, 100)}
+          {task.result.length > 100 ? "..." : ""}
+        </p>
+      )}
+      {task.error && (
+        <p className="text-xs text-red-400 mt-1">{task.error}</p>
+      )}
+    </div>
+  </motion.div>
+);
+
+// Tool Action Card component (for completed messages)
 const ToolActionCard = ({ action }: { action: ActionResult }) => (
   <motion.div
     initial={{ opacity: 0, scale: 0.95 }}
@@ -91,128 +158,6 @@ const ToolActionCard = ({ action }: { action: ActionResult }) => (
     </div>
   </motion.div>
 );
-
-// Task Progress Panel - Shows live task execution status
-const TaskProgressPanel = ({
-  tasks,
-  status,
-}: {
-  tasks: TaskUpdate[];
-  status: string;
-}) => {
-  const completedCount = tasks.filter((t) => t.status === "completed").length;
-  const failedCount = tasks.filter((t) => t.status === "failed").length;
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, height: 0 }}
-      animate={{ opacity: 1, height: "auto" }}
-      exit={{ opacity: 0, height: 0 }}
-      className="bg-card border border-border rounded-xl p-4 mb-4 shadow-sm"
-    >
-      {/* Header */}
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <Loader2 className="w-4 h-4 animate-spin text-primary" />
-          <span className="text-sm font-medium text-foreground">
-            {status || `Executing tasks...`}
-          </span>
-        </div>
-        <span className="text-xs text-muted-foreground">
-          {completedCount}/{tasks.length} completed
-          {failedCount > 0 && ` • ${failedCount} failed`}
-        </span>
-      </div>
-
-      {/* Progress bar */}
-      <div className="h-1.5 bg-muted rounded-full overflow-hidden mb-4">
-        <motion.div
-          className="h-full bg-gradient-to-r from-primary to-primary/70"
-          initial={{ width: 0 }}
-          animate={{ width: `${(completedCount / tasks.length) * 100}%` }}
-          transition={{ duration: 0.3 }}
-        />
-      </div>
-
-      {/* Task list */}
-      <div className="space-y-2">
-        {tasks.map((task) => (
-          <motion.div
-            key={task.task_id}
-            initial={{ opacity: 0, x: -10 }}
-            animate={{ opacity: 1, x: 0 }}
-            className={`flex items-center gap-3 p-2.5 rounded-lg transition-colors ${
-              task.status === "in_progress"
-                ? "bg-primary/10 border border-primary/30"
-                : task.status === "completed"
-                ? "bg-green-500/10"
-                : task.status === "failed"
-                ? "bg-red-500/10"
-                : "bg-muted/30"
-            }`}
-          >
-            {/* Status Icon */}
-            <div className="flex-shrink-0">
-              {task.status === "pending" && (
-                <Clock className="w-4 h-4 text-muted-foreground" />
-              )}
-              {task.status === "in_progress" && (
-                <Loader2 className="w-4 h-4 animate-spin text-primary" />
-              )}
-              {task.status === "completed" && (
-                <CheckCircle className="w-4 h-4 text-green-500" />
-              )}
-              {task.status === "failed" && (
-                <XCircle className="w-4 h-4 text-red-500" />
-              )}
-            </div>
-
-            {/* Service Icon */}
-            <span className="text-base flex-shrink-0">
-              {getServiceIcon(task.service)}
-            </span>
-
-            {/* Description */}
-            <div className="flex-1 min-w-0">
-              <p className="text-sm text-foreground truncate">
-                {task.description}
-              </p>
-              {task.result && task.status === "completed" && (
-                <p className="text-xs text-green-600 truncate mt-0.5">
-                  ✓ {task.result.substring(0, 60)}...
-                </p>
-              )}
-              {task.error && (
-                <p className="text-xs text-red-400 truncate mt-0.5">
-                  {task.error}
-                </p>
-              )}
-            </div>
-
-            {/* Status Badge */}
-            <span
-              className={`text-xs px-2 py-0.5 rounded-full flex-shrink-0 ${
-                task.status === "in_progress"
-                  ? "bg-primary text-primary-foreground"
-                  : task.status === "completed"
-                  ? "bg-green-500 text-white"
-                  : task.status === "failed"
-                  ? "bg-red-500 text-white"
-                  : "bg-muted text-muted-foreground"
-              }`}
-            >
-              {task.status === "in_progress"
-                ? "Running..."
-                : task.status === "pending"
-                ? "Waiting"
-                : task.status}
-            </span>
-          </motion.div>
-        ))}
-      </div>
-    </motion.div>
-  );
-};
 
 // Message component for individual messages
 const ChatMessage = ({ message }: { message: Message }) => {
@@ -254,29 +199,74 @@ const ChatMessage = ({ message }: { message: Message }) => {
 };
 
 // Main Chat Interface component
-const ChatInterface = () => {
+interface ChatInterfaceProps {
+  conversationId?: number;
+}
+
+const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceProps) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [placeholderIndex, setPlaceholderIndex] = useState(0);
   const [showPlaceholder, setShowPlaceholder] = useState(true);
   const [isActive, setIsActive] = useState(false);
-  const [thinkActive, setThinkActive] = useState(false);
-  const [taskProgress, setTaskProgress] = useState<TaskProgress>({
-    tasks: [],
-    currentTaskId: null,
-    status: "",
-    isActive: false,
-  });
+  const [smartMode, setSmartMode] = useState(false);
+  const [showApiKeyModal, setShowApiKeyModal] = useState(false);
+  
+  // Live streaming state
+  const [currentStatus, setCurrentStatus] = useState<string>("");
+  const [liveTasks, setLiveTasks] = useState<LiveTask[]>([]);
+  const [currentConversationId, setCurrentConversationId] = useState<number | undefined>(initialConversationId);
+  
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<(() => void) | null>(null);
   const { user } = useAuth();
+  const navigate = useNavigate();
 
-  // Scroll to bottom when new messages arrive or task progress updates
+  // Scroll to bottom when new messages arrive
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, taskProgress]);
+  }, [messages, liveTasks]);
+
+  // Load existing messages when conversationId changes
+  useEffect(() => {
+    const loadMessages = async () => {
+      if (initialConversationId) {
+        setIsLoadingHistory(true);
+        try {
+          const apiMessages = await getConversationMessages(initialConversationId);
+          const loadedMessages: Message[] = apiMessages.map((msg: ApiMessage) => ({
+            id: msg.id.toString(),
+            role: msg.role as "user" | "assistant",
+            content: msg.content,
+            timestamp: new Date(msg.created_at),
+            actions: msg.actions_taken,
+          }));
+          setMessages(loadedMessages);
+        } catch (err) {
+          console.error("Failed to load messages:", err);
+        } finally {
+          setIsLoadingHistory(false);
+        }
+      } else {
+        // Reset for new conversation
+        setMessages([]);
+        setCurrentConversationId(undefined);
+      }
+    };
+    loadMessages();
+  }, [initialConversationId]);
+
+  // Cleanup abort on unmount
+  useEffect(() => {
+    return () => {
+      if (abortRef.current) {
+        abortRef.current();
+      }
+    };
+  }, []);
 
   // Cycle placeholder text when input is inactive
   useEffect(() => {
@@ -308,15 +298,6 @@ const ChatInterface = () => {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [inputValue]);
 
-  // Cleanup abort on unmount
-  useEffect(() => {
-    return () => {
-      if (abortRef.current) {
-        abortRef.current();
-      }
-    };
-  }, []);
-
   const handleActivate = () => setIsActive(true);
 
   const sendMessage = async () => {
@@ -330,15 +311,10 @@ const ChatInterface = () => {
     };
 
     setMessages((prev) => [...prev, userMessage]);
-    const messageContent = inputValue.trim();
     setInputValue("");
     setIsLoading(true);
-    setTaskProgress({
-      tasks: [],
-      currentTaskId: null,
-      status: "Analyzing your request...",
-      isActive: true,
-    });
+    setCurrentStatus("Analyzing your request...");
+    setLiveTasks([]);
 
     if (!user?.id) {
       const errorMessage: Message = {
@@ -349,112 +325,144 @@ const ChatInterface = () => {
       };
       setMessages((prev) => [...prev, errorMessage]);
       setIsLoading(false);
-      setTaskProgress((prev) => ({ ...prev, isActive: false }));
+      setCurrentStatus("");
       return;
     }
 
-    // Use streaming API for real-time updates
-    abortRef.current = streamChatMessage(
+    // Check if Gemini API key is set
+    try {
+      const keyStatus = await checkGeminiKey(user.id);
+      if (!keyStatus.has_key) {
+        setShowApiKeyModal(true);
+        setIsLoading(false);
+        setCurrentStatus("");
+        // Remove the user message we just added
+        setMessages((prev) => prev.slice(0, -1));
+        return;
+      }
+    } catch (err) {
+      console.error("Error checking Gemini key:", err);
+      // Show modal on error - assume key is missing
+      setShowApiKeyModal(true);
+      setIsLoading(false);
+      setCurrentStatus("");
+      setMessages((prev) => prev.slice(0, -1));
+      return;
+    }
+
+    // Use streaming API for live updates
+    const abort = streamChatMessage(
       user.id,
-      messageContent,
-      // onEvent - handle each SSE event
+      userMessage.content,
+      // onEvent
       (event: StreamEvent) => {
+        // Capture conversation_id from any event
+        if (event.data?.conversation_id && !currentConversationId) {
+          setCurrentConversationId(event.data.conversation_id as number);
+        }
+        
         switch (event.event_type) {
           case "planning":
-            setTaskProgress((prev) => ({
-              ...prev,
-              status: event.data.status || "Planning...",
-            }));
+            setCurrentStatus(event.data.status || "Planning tasks...");
             break;
 
           case "plan":
-            // Received the task plan
             if (event.data.tasks) {
-              const tasks: TaskUpdate[] = event.data.tasks.map((t) => ({
-                ...t,
-                status: "pending" as TaskStatusType,
+              const tasks: LiveTask[] = event.data.tasks.map((t) => ({
+                task_id: t.task_id,
+                service: t.service,
+                action: t.action,
+                description: t.description,
+                status: "pending" as const,
               }));
-              setTaskProgress({
-                tasks,
-                currentTaskId: null,
-                status: `Executing ${tasks.length} tasks...`,
-                isActive: true,
-              });
+              setLiveTasks(tasks);
+              setCurrentStatus(`Executing ${tasks.length} task${tasks.length > 1 ? 's' : ''}...`);
             }
             break;
 
           case "task_started":
-            setTaskProgress((prev) => ({
-              ...prev,
-              currentTaskId: event.data.task_id || null,
-              status: `Running: ${event.data.description || event.data.action}`,
-              tasks: prev.tasks.map((t) =>
+            setCurrentStatus(`Calling ${event.data.service || 'tool'}...`);
+            setLiveTasks((prev) =>
+              prev.map((t) =>
                 t.task_id === event.data.task_id
-                  ? { ...t, status: "in_progress" as TaskStatusType }
+                  ? { ...t, status: "in_progress" as const }
                   : t
-              ),
-            }));
+              )
+            );
+            // If task not in list, add it
+            setLiveTasks((prev) => {
+              const exists = prev.some((t) => t.task_id === event.data.task_id);
+              if (!exists && event.data.task_id) {
+                return [
+                  ...prev,
+                  {
+                    task_id: event.data.task_id,
+                    service: event.data.service || "unknown",
+                    action: event.data.action || "unknown",
+                    description: event.data.description || "",
+                    status: "in_progress" as const,
+                  },
+                ];
+              }
+              return prev;
+            });
             break;
 
           case "task_completed":
-            setTaskProgress((prev) => ({
-              ...prev,
-              tasks: prev.tasks.map((t) =>
+            setLiveTasks((prev) =>
+              prev.map((t) =>
                 t.task_id === event.data.task_id
                   ? {
                       ...t,
-                      status: "completed" as TaskStatusType,
+                      status: "completed" as const,
                       result: event.data.result,
                     }
                   : t
-              ),
-            }));
+              )
+            );
             break;
 
           case "task_failed":
-            setTaskProgress((prev) => ({
-              ...prev,
-              tasks: prev.tasks.map((t) =>
+            setLiveTasks((prev) =>
+              prev.map((t) =>
                 t.task_id === event.data.task_id
                   ? {
                       ...t,
-                      status: "failed" as TaskStatusType,
+                      status: "failed" as const,
                       error: event.data.error,
                     }
                   : t
-              ),
-            }));
+              )
+            );
             break;
 
           case "complete": {
-            // Final response - add AI message
+            // Create final AI message with all actions
             const aiMessage: Message = {
               id: (Date.now() + 1).toString(),
               role: "assistant",
-              content: event.data.message || "Tasks completed.",
+              content: event.data.message || "Done!",
               timestamp: new Date(),
-              actions: event.data.actions_taken,
+              actions: event.data.actions_taken as ActionResult[],
             };
             setMessages((prev) => [...prev, aiMessage]);
-            setTaskProgress((prev) => ({
-              ...prev,
-              status: "Complete!",
-              isActive: false,
-            }));
             setIsLoading(false);
+            setCurrentStatus("");
+            setLiveTasks([]);
             break;
           }
 
           case "error": {
-            const errorMsg: Message = {
+            const errorMessage: Message = {
               id: (Date.now() + 1).toString(),
               role: "assistant",
-              content: event.data.message || "An error occurred.",
+              content: event.data.message || "An error occurred",
               timestamp: new Date(),
             };
-            setMessages((prev) => [...prev, errorMsg]);
-            setTaskProgress((prev) => ({ ...prev, isActive: false }));
+            setMessages((prev) => [...prev, errorMessage]);
             setIsLoading(false);
+            setCurrentStatus("");
+            setLiveTasks([]);
             break;
           }
         }
@@ -464,22 +472,24 @@ const ChatInterface = () => {
         const errorMessage: Message = {
           id: (Date.now() + 1).toString(),
           role: "assistant",
-          content: error.message || "Sorry, I encountered an error.",
+          content: `Sorry, I encountered an error: ${error.message}`,
           timestamp: new Date(),
         };
         setMessages((prev) => [...prev, errorMessage]);
-        setTaskProgress((prev) => ({ ...prev, isActive: false }));
         setIsLoading(false);
+        setCurrentStatus("");
+        setLiveTasks([]);
       },
       // onComplete
       () => {
-        // Stream finished
-        if (isLoading) {
-          setIsLoading(false);
-          setTaskProgress((prev) => ({ ...prev, isActive: false }));
-        }
-      }
+        setIsLoading(false);
+        setCurrentStatus("");
+      },
+      // conversationId
+      currentConversationId
     );
+
+    abortRef.current = abort;
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
@@ -525,9 +535,81 @@ const ChatInterface = () => {
 
   return (
     <div className="flex flex-col h-full">
+      {/* API Key Required Modal */}
+      <AnimatePresence>
+        {showApiKeyModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
+            onClick={() => setShowApiKeyModal(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-background rounded-2xl p-6 max-w-md w-full shadow-2xl border border-border"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="text-center">
+                <div className="w-16 h-16 bg-yellow-100 dark:bg-yellow-900/30 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <Lightbulb className="w-8 h-8 text-yellow-600 dark:text-yellow-400" />
+                </div>
+                <h2 className="text-xl font-bold text-foreground mb-2">
+                  Gemini API Key Required
+                </h2>
+                <p className="text-muted-foreground mb-6">
+                  Please add your Gemini API Key in Settings to start chatting with Locus.
+                </p>
+                <div className="flex gap-3 justify-center">
+                  <button
+                    onClick={() => setShowApiKeyModal(false)}
+                    className="px-4 py-2 rounded-lg border border-border text-foreground hover:bg-accent transition"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowApiKeyModal(false);
+                      navigate("/settings");
+                    }}
+                    className="px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition font-medium"
+                  >
+                    Go to Settings
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Messages Area */}
       <div className="flex-1 overflow-y-auto px-4 py-6">
-        {messages.length === 0 ? (
+        {isLoadingHistory ? (
+          // Loading history state
+          <div className="flex flex-col items-center justify-center h-full text-center">
+            <div className="flex gap-1 mb-4">
+              <motion.span
+                animate={{ opacity: [0.4, 1, 0.4] }}
+                transition={{ duration: 1.5, repeat: Infinity }}
+                className="w-2 h-2 bg-muted-foreground rounded-full"
+              />
+              <motion.span
+                animate={{ opacity: [0.4, 1, 0.4] }}
+                transition={{ duration: 1.5, repeat: Infinity, delay: 0.2 }}
+                className="w-2 h-2 bg-muted-foreground rounded-full"
+              />
+              <motion.span
+                animate={{ opacity: [0.4, 1, 0.4] }}
+                transition={{ duration: 1.5, repeat: Infinity, delay: 0.4 }}
+                className="w-2 h-2 bg-muted-foreground rounded-full"
+              />
+            </div>
+            <p className="text-muted-foreground">Loading conversation...</p>
+          </div>
+        ) : messages.length === 0 && !isLoading ? (
           // Welcome state
           <div className="flex flex-col items-center justify-center h-full text-center">
             <h2 className="text-2xl font-semibold text-foreground mb-2">
@@ -544,28 +626,64 @@ const ChatInterface = () => {
             {messages.map((message) => (
               <ChatMessage key={message.id} message={message} />
             ))}
-            {/* Show TaskProgressPanel when streaming with tasks */}
-            {taskProgress.isActive && taskProgress.tasks.length > 0 && (
-              <TaskProgressPanel
-                tasks={taskProgress.tasks}
-                status={taskProgress.status}
-              />
-            )}
-            {/* Show simple loading indicator when no task plan yet */}
-            {isLoading && taskProgress.tasks.length === 0 && (
+            
+            {/* Live streaming indicator */}
+            {isLoading && (
               <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                className="flex justify-start mb-4"
+                className="mb-4"
               >
-                <div className="py-2">
-                  <div className="flex items-center gap-2">
-                    <Loader2 className="w-4 h-4 animate-spin text-primary" />
-                    <span className="text-sm text-muted-foreground">
-                      {taskProgress.status || "Processing..."}
-                    </span>
-                  </div>
+                {/* Status indicator */}
+                <div className="flex items-center gap-2 mb-3">
+                  <Loader2 size={16} className="text-primary animate-spin" />
+                  <span className="text-sm text-muted-foreground">
+                    {currentStatus || "Processing..."}
+                  </span>
                 </div>
+                
+                {/* Live tool execution cards */}
+                {liveTasks.length > 0 && (
+                  <div className="mb-3">
+                    <p className="text-xs text-muted-foreground mb-2">Live execution:</p>
+                    <AnimatePresence>
+                      {liveTasks.map((task) => (
+                        <LiveToolCard key={task.task_id} task={task} />
+                      ))}
+                    </AnimatePresence>
+                  </div>
+                )}
+                
+                {/* Fallback dots if no tasks yet */}
+                {liveTasks.length === 0 && (
+                  <div className="py-2">
+                    <div className="flex gap-1">
+                      <motion.span
+                        animate={{ opacity: [0.4, 1, 0.4] }}
+                        transition={{ duration: 1.5, repeat: Infinity }}
+                        className="w-2 h-2 bg-muted-foreground rounded-full"
+                      />
+                      <motion.span
+                        animate={{ opacity: [0.4, 1, 0.4] }}
+                        transition={{
+                          duration: 1.5,
+                          repeat: Infinity,
+                          delay: 0.2,
+                        }}
+                        className="w-2 h-2 bg-muted-foreground rounded-full"
+                      />
+                      <motion.span
+                        animate={{ opacity: [0.4, 1, 0.4] }}
+                        transition={{
+                          duration: 1.5,
+                          repeat: Infinity,
+                          delay: 0.4,
+                        }}
+                        className="w-2 h-2 bg-muted-foreground rounded-full"
+                      />
+                    </div>
+                  </div>
+                )}
               </motion.div>
             )}
             <div ref={messagesEndRef} />
@@ -592,14 +710,6 @@ const ChatInterface = () => {
             <div className="flex flex-col items-stretch w-full h-full border border-border rounded-[32px]">
               {/* Input Row */}
               <div className="flex items-center gap-2 p-3 w-full ">
-                <button
-                  className="p-2 rounded-full hover:bg-accent transition"
-                  title="Attach file"
-                  type="button"
-                  tabIndex={-1}
-                >
-                  <Paperclip size={20} className="text-muted-foreground" />
-                </button>
 
                 {/* Text Input & Placeholder */}
                 <div className="relative flex-1">
@@ -679,25 +789,29 @@ const ChatInterface = () => {
                 style={{ marginTop: 8, paddingBottom: 12 }}
               >
                 <div className="flex gap-3 items-center">
-                  {/* Think Toggle */}
+                  {/* Smart Toggle */}
                   <button
                     className={`flex items-center gap-1 px-4 py-2 rounded-full transition-all font-medium group ${
-                      thinkActive
-                        ? "bg-blue-600/10 outline outline-blue-600/60 text-blue-950 dark:text-blue-200"
+                      smartMode
+                        ? "bg-yellow-500/20 outline outline-yellow-500/60 text-yellow-700 dark:text-yellow-300"
                         : "bg-accent text-accent-foreground hover:bg-accent/80"
                     }`}
-                    title="Think"
+                    title="Use higher intelligence model"
                     type="button"
                     onClick={(e) => {
                       e.stopPropagation();
-                      setThinkActive((a) => !a);
+                      setSmartMode((s) => !s);
                     }}
                   >
                     <Lightbulb
-                      className="group-hover:fill-yellow-300 transition-all"
+                      className={`transition-all ${
+                        smartMode
+                          ? "fill-yellow-400 text-yellow-600"
+                          : "group-hover:fill-yellow-300"
+                      }`}
                       size={18}
                     />
-                    Think
+                    Smart
                   </button>
                 </div>
               </motion.div>

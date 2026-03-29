@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Home,
@@ -11,41 +11,55 @@ import {
   Grid,
   PanelLeftClose,
   PanelLeft,
+  Loader2,
 } from "lucide-react";
 import { useNavigate, useLocation } from "react-router-dom";
+import { useAuth } from "@/context/AuthContext";
+import { getUserConversations, type Conversation } from "@/lib/api";
+const locusLogo = "/locus_logo.png";
 
-interface ChatHistory {
-  id: string;
-  title: string;
-  timestamp: Date;
-}
+
 
 interface AppLayoutProps {
   children: React.ReactNode;
 }
 
-// Mock chat history (replace with actual state management)
-const mockChatHistory: ChatHistory[] = [
-  { id: "1", title: "Getting started with Locus", timestamp: new Date() },
-  {
-    id: "2",
-    title: "Project ideas discussion",
-    timestamp: new Date(Date.now() - 86400000),
-  },
-  {
-    id: "3",
-    title: "Code review help",
-    timestamp: new Date(Date.now() - 172800000),
-  },
-];
-
 const AppLayout = ({ children }: AppLayoutProps) => {
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [chatHistoryOpen, setChatHistoryOpen] = useState(true);
-  const [isPinned, setIsPinned] = useState(true); // Sidebar is pinned open by default
+  const [isPinned, setIsPinned] = useState(true);
   const [isHovered, setIsHovered] = useState(false);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [isLoadingConversations, setIsLoadingConversations] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
+  const { user } = useAuth();
+
+  // Load conversations from API
+  const loadConversations = useCallback(async () => {
+    if (!user?.id) return;
+    setIsLoadingConversations(true);
+    try {
+      const response = await getUserConversations(user.id);
+      setConversations(response.conversations);
+    } catch (err) {
+      console.error("Failed to load conversations:", err);
+    } finally {
+      setIsLoadingConversations(false);
+    }
+  }, [user?.id]);
+
+  // Load conversations on mount and when user changes
+  useEffect(() => {
+    loadConversations();
+  }, [loadConversations]);
+
+  // Reload conversations when navigating to chatbot (to catch new conversations)
+  useEffect(() => {
+    if (location.pathname === "/chatbot") {
+      loadConversations();
+    }
+  }, [location.pathname, loadConversations]);
 
   const navItems = [
     { icon: Home, label: "Home", path: "/" },
@@ -78,15 +92,16 @@ const AppLayout = ({ children }: AppLayoutProps) => {
       >
         {/* Logo & Pin Button */}
         <div className="p-4 border-b border-sidebar-border flex items-center justify-between">
-          <motion.h1
-            className="text-xl font-bold text-sidebar-foreground overflow-hidden whitespace-nowrap"
+          <motion.div
+            className="flex items-center gap-2 overflow-hidden whitespace-nowrap"
             animate={{
               opacity: showSidebar ? 1 : 0,
               width: showSidebar ? "auto" : 0,
             }}
           >
-            Locus
-          </motion.h1>
+            <img src={locusLogo} alt="Locus" className="w-6 h-6 object-contain" />
+            <span className="text-xl font-bold text-sidebar-foreground">Locus</span>
+          </motion.div>
           <button
             onClick={() => setIsPinned(!isPinned)}
             className="p-1.5 rounded-md hover:bg-sidebar-accent transition text-sidebar-foreground/70 hover:text-sidebar-foreground"
@@ -136,15 +151,25 @@ const AppLayout = ({ children }: AppLayoutProps) => {
                     className="overflow-hidden"
                   >
                     <div className="space-y-1 pb-4">
-                      {mockChatHistory.map((chat) => (
-                        <button
-                          key={chat.id}
-                          onClick={() => navigate(`/chatbot?id=${chat.id}`)}
-                          className="w-full text-left px-3 py-2 text-sm text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground rounded-lg transition truncate"
-                        >
-                          {chat.title}
-                        </button>
-                      ))}
+                      {isLoadingConversations ? (
+                        <div className="flex items-center justify-center py-4">
+                          <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                        </div>
+                      ) : conversations.length === 0 ? (
+                        <p className="px-3 py-2 text-sm text-muted-foreground">
+                          No conversations yet
+                        </p>
+                      ) : (
+                        conversations.map((chat) => (
+                          <button
+                            key={chat.id}
+                            onClick={() => navigate(`/chatbot?id=${chat.id}`)}
+                            className="w-full text-left px-3 py-2 text-sm text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground rounded-lg transition truncate"
+                          >
+                            {chat.title}
+                          </button>
+                        ))
+                      )}
                     </div>
                   </motion.div>
                 )}
@@ -178,7 +203,10 @@ const AppLayout = ({ children }: AppLayoutProps) => {
       {/* Mobile Header */}
       <div className="md:hidden fixed top-0 left-0 right-0 z-50 bg-background border-b border-border">
         <div className="flex items-center justify-between p-4">
-          <h1 className="text-lg font-bold">Locus</h1>
+          <div className="flex items-center gap-2">
+            <img src={locusLogo} alt="Locus" className="w-6 h-6 object-contain" />
+            <span className="text-lg font-bold">Locus</span>
+          </div>
           <button
             onClick={() => setIsMobileSidebarOpen(!isMobileSidebarOpen)}
             className="p-2 hover:bg-accent rounded-lg transition"
@@ -208,9 +236,10 @@ const AppLayout = ({ children }: AppLayoutProps) => {
             >
               {/* Mobile sidebar content (same as desktop) */}
               <div className="p-4 border-b border-sidebar-border flex items-center justify-between">
-                <h1 className="text-xl font-bold text-sidebar-foreground">
-                  Locus
-                </h1>
+                <div className="flex items-center gap-2">
+                  <img src={locusLogo} alt="Locus" className="w-6 h-6 object-contain" />
+                  <span className="text-xl font-bold text-sidebar-foreground">Locus</span>
+                </div>
                 <button
                   onClick={() => setIsMobileSidebarOpen(false)}
                   className="p-2 hover:bg-sidebar-accent rounded-lg transition"
@@ -237,18 +266,28 @@ const AppLayout = ({ children }: AppLayoutProps) => {
                   Chat History
                 </div>
                 <div className="space-y-1 pb-4">
-                  {mockChatHistory.map((chat) => (
-                    <button
-                      key={chat.id}
-                      onClick={() => {
-                        navigate(`/chatbot?id=${chat.id}`);
-                        setIsMobileSidebarOpen(false);
-                      }}
-                      className="w-full text-left px-3 py-2 text-sm text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground rounded-lg transition truncate"
-                    >
-                      {chat.title}
-                    </button>
-                  ))}
+                  {isLoadingConversations ? (
+                    <div className="flex items-center justify-center py-4">
+                      <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                    </div>
+                  ) : conversations.length === 0 ? (
+                    <p className="px-3 py-2 text-sm text-muted-foreground">
+                      No conversations yet
+                    </p>
+                  ) : (
+                    conversations.map((chat) => (
+                      <button
+                        key={chat.id}
+                        onClick={() => {
+                          navigate(`/chatbot?id=${chat.id}`);
+                          setIsMobileSidebarOpen(false);
+                        }}
+                        className="w-full text-left px-3 py-2 text-sm text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground rounded-lg transition truncate"
+                      >
+                        {chat.title}
+                      </button>
+                    ))
+                  )}
                 </div>
               </div>
 

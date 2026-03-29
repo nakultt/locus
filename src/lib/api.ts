@@ -28,6 +28,7 @@ export interface ChatResponse {
   message: string;
   actions_taken: ActionResult[];
   raw_response?: string;
+  conversation_id?: number;
 }
 
 export interface Integration {
@@ -48,18 +49,53 @@ export interface ApiError {
   error_code?: string;
 }
 
+export interface Conversation {
+  id: number;
+  title: string;
+  owner_id: number;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface ConversationList {
+  conversations: Conversation[];
+  total: number;
+}
+
+export interface Message {
+  id: number;
+  conversation_id: number;
+  role: "user" | "assistant";
+  content: string;
+  actions_taken?: ActionResult[];
+  created_at: string;
+}
+
 // ============== Helper Functions ==============
 
 function getAuthToken(): string | null {
-  const user = localStorage.getItem("locus_user");
-  if (user) {
+  // Check localStorage first (Remember Me was checked)
+  const localUser = localStorage.getItem("locus_user");
+  if (localUser) {
     try {
-      const parsed = JSON.parse(user);
+      const parsed = JSON.parse(localUser);
       return parsed.token || null;
     } catch {
       return null;
     }
   }
+  
+  // Check sessionStorage (Remember Me was not checked)
+  const sessionUser = sessionStorage.getItem("locus_user");
+  if (sessionUser) {
+    try {
+      const parsed = JSON.parse(sessionUser);
+      return parsed.token || null;
+    } catch {
+      return null;
+    }
+  }
+  
   return null;
 }
 
@@ -111,10 +147,27 @@ export async function signup(
   });
 }
 
-export async function login(email: string, password: string): Promise<User> {
+export async function login(
+  email: string, 
+  password: string,
+  rememberMe: boolean = false
+): Promise<User> {
   return apiRequest<User>("/auth/login", {
     method: "POST",
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email, password, remember_me: rememberMe }),
+  });
+}
+
+export interface UserUpdate {
+  email?: string;
+  password?: string;
+  name?: string;
+}
+
+export async function updateUser(userId: number, data: UserUpdate): Promise<User> {
+  return apiRequest<User>(`/auth/user/${userId}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
   });
 }
 
@@ -156,11 +209,60 @@ export async function disconnectIntegration(
 
 export async function sendChatMessage(
   userId: number,
-  message: string
+  message: string,
+  smartMode: boolean = false,
+  conversationId?: number
 ): Promise<ChatResponse> {
   return apiRequest<ChatResponse>("/api/chat", {
     method: "POST",
-    body: JSON.stringify({ user_id: userId, message }),
+    body: JSON.stringify({
+      user_id: userId,
+      message,
+      smart_mode: smartMode,
+      conversation_id: conversationId,
+    }),
+  });
+}
+
+// ============== Conversations API ==============
+
+export async function createConversation(
+  userId: number,
+  title?: string
+): Promise<Conversation> {
+  return apiRequest<Conversation>("/api/conversations", {
+    method: "POST",
+    body: JSON.stringify({ user_id: userId, title }),
+  });
+}
+
+export async function getUserConversations(
+  userId: number
+): Promise<ConversationList> {
+  return apiRequest<ConversationList>(`/api/conversations/${userId}`);
+}
+
+export async function getConversationMessages(
+  conversationId: number
+): Promise<Message[]> {
+  return apiRequest<Message[]>(`/api/conversations/${conversationId}/messages`);
+}
+
+export async function updateConversationTitle(
+  conversationId: number,
+  title: string
+): Promise<Conversation> {
+  return apiRequest<Conversation>(`/api/conversations/${conversationId}`, {
+    method: "PUT",
+    body: JSON.stringify({ title }),
+  });
+}
+
+export async function deleteConversation(
+  conversationId: number
+): Promise<void> {
+  return apiRequest<void>(`/api/conversations/${conversationId}`, {
+    method: "DELETE",
   });
 }
 
@@ -214,6 +316,7 @@ export interface StreamEvent {
     total_tasks?: number;
     completed_tasks?: number;
     failed_tasks?: number;
+    conversation_id?: number;
   };
 }
 
@@ -226,6 +329,7 @@ export interface StreamEvent {
  * @param onEvent - Callback for each SSE event
  * @param onError - Callback for errors
  * @param onComplete - Callback when stream completes
+ * @param conversationId - Optional existing conversation ID
  * @returns Abort function to cancel the stream
  */
 export function streamChatMessage(
@@ -233,15 +337,27 @@ export function streamChatMessage(
   message: string,
   onEvent: (event: StreamEvent) => void,
   onError: (error: Error) => void,
-  onComplete: () => void
+  onComplete: () => void,
+  conversationId?: number
 ): () => void {
   const abortController = new AbortController();
 
   const token = (() => {
-    const user = localStorage.getItem("locus_user");
-    if (user) {
+    // Check localStorage first (Remember Me was checked)
+    const localUser = localStorage.getItem("locus_user");
+    if (localUser) {
       try {
-        const parsed = JSON.parse(user);
+        const parsed = JSON.parse(localUser);
+        return parsed.token || null;
+      } catch {
+        return null;
+      }
+    }
+    // Check sessionStorage (Remember Me was not checked)
+    const sessionUser = sessionStorage.getItem("locus_user");
+    if (sessionUser) {
+      try {
+        const parsed = JSON.parse(sessionUser);
         return parsed.token || null;
       } catch {
         return null;
@@ -256,7 +372,11 @@ export function streamChatMessage(
       "Content-Type": "application/json",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
-    body: JSON.stringify({ user_id: userId, message }),
+    body: JSON.stringify({ 
+      user_id: userId, 
+      message,
+      conversation_id: conversationId 
+    }),
     signal: abortController.signal,
   })
     .then(async (response) => {
@@ -307,6 +427,35 @@ export function streamChatMessage(
 
 export async function getSupportedCommands(): Promise<Record<string, unknown>> {
   return apiRequest<Record<string, unknown>>("/api/supported-commands");
+}
+
+// ============== Settings API ==============
+
+export interface GeminiKeyStatus {
+  has_key: boolean;
+  message: string;
+}
+
+export async function setGeminiKey(
+  userId: number,
+  apiKey: string
+): Promise<GeminiKeyStatus> {
+  return apiRequest<GeminiKeyStatus>("/api/settings/gemini-key", {
+    method: "POST",
+    body: JSON.stringify({ user_id: userId, api_key: apiKey }),
+  });
+}
+
+export async function checkGeminiKey(userId: number): Promise<GeminiKeyStatus> {
+  return apiRequest<GeminiKeyStatus>(`/api/settings/gemini-key/${userId}`);
+}
+
+export async function deleteGeminiKey(
+  userId: number
+): Promise<GeminiKeyStatus> {
+  return apiRequest<GeminiKeyStatus>(`/api/settings/gemini-key/${userId}`, {
+    method: "DELETE",
+  });
 }
 
 // ============== Health Check ==============

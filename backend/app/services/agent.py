@@ -4,7 +4,7 @@ Main agent that processes natural language and routes to appropriate tools
 """
 
 import os
-from typing import Any
+from typing import Any, Optional
 from dotenv import load_dotenv
 
 from langchain_ollama import ChatOllama
@@ -25,6 +25,8 @@ from app.services.google_slides import get_slides_tools
 from app.services.google_drive import get_drive_tools
 from app.services.google_forms import get_forms_tools
 from app.services.google_meet import get_meet_tools
+from app.services.github import get_github_tools
+from app.services.linear import get_linear_tools
 
 load_dotenv()
 
@@ -40,6 +42,7 @@ llm = ChatOllama(
     temperature=0.1,
     reasoning=False
 )
+
 
 # System prompt for the agent
 SYSTEM_PROMPT = """You are Locus, an intelligent enterprise integration assistant.
@@ -101,6 +104,18 @@ Your role is to help users interact with their connected workplace tools through
 - Create and list bugs/issues
 - Add comments to issues
 - Get issue details
+
+### GitHub (Source Control & Issues)
+- List, view and create repositories
+- Create, update, and comment on issues
+- List, create, and merge pull requests
+- Get authenticated user info
+
+### Linear (Issue Tracking)
+- List teams and workflow states
+- Create, update, and list issues
+- Add comments to issues
+- Update issue status and priority
 
 ## Guidelines:
 - When the user asks you to do something, use the appropriate tool with correct parameters.
@@ -245,13 +260,35 @@ def build_tools(integration_configs: dict[str, dict]) -> list[BaseTool]:
         )
         tools.extend(meet_tools)
     
+    # GitHub tools
+    if "github" in integration_configs:
+        config = integration_configs["github"]
+        github_tools = get_github_tools(
+            token=config.get("api_key", "")
+        )
+        tools.extend(github_tools)
+    
+    # Linear tools
+    if "linear" in integration_configs:
+        config = integration_configs["linear"]
+        linear_tools = get_linear_tools(
+            api_key=config.get("api_key", "")
+        )
+        tools.extend(linear_tools)
+    
     return tools
 
 
-def create_agent_executor(tools: list[BaseTool]) -> AgentExecutor:
-    """Create a LangChain agent with the given tools using native tool calling."""
-    if not llm:
-        raise ValueError("LLM not configured. Please set GOOGLE_API_KEY.")
+def create_agent_executor(tools: list[BaseTool], api_key: str, smart_mode: bool = False) -> AgentExecutor:
+    """Create a LangChain agent with the given tools using native tool calling.
+    
+    Args:
+        tools: List of available tools
+        api_key: User's Gemini API key
+        smart_mode: Use higher intelligence model when True
+    """
+    # Create LLM with user's API key
+    selected_llm = get_llm(api_key, smart_mode)
     
     # Create a prompt that works with the tool calling agent
     prompt = ChatPromptTemplate.from_messages([
@@ -261,23 +298,31 @@ def create_agent_executor(tools: list[BaseTool]) -> AgentExecutor:
     ])
     
     # Use tool calling agent instead of ReAct for better structured output
-    agent = create_tool_calling_agent(llm, tools, prompt)
+    agent = create_tool_calling_agent(selected_llm, tools, prompt)
     
     return AgentExecutor(
         agent=agent,
         tools=tools,
         verbose=True,
         handle_parsing_errors=True,
-        max_iterations=15  # Increased for multi-tool requests
+        max_iterations=25  # Increased for multi-tool requests (up to 25 tools)
     )
 
 
 async def process_chat_message(
     message: str,
-    integration_configs: dict[str, dict]
+    integration_configs: dict[str, dict],
+    gemini_api_key: Optional[str] = None,
+    smart_mode: bool = False
 ) -> ChatResponse:
     """
     Process a natural language message through the LangChain agent.
+    
+    Args:
+        message: User's natural language command
+        integration_configs: Dict of service name to config
+        gemini_api_key: User's Gemini API key (required)
+        smart_mode: Use higher intelligence model when True
     """
     # Build tools based on available integrations
     tools = build_tools(integration_configs)
@@ -289,15 +334,18 @@ async def process_chat_message(
             raw_response=None
         )
     
-    if not llm:
+    # Check for API key - use user's key or fall back to server key
+    api_key = gemini_api_key or FALLBACK_GOOGLE_API_KEY
+    
+    if not api_key:
         return ChatResponse(
-            message="LLM not configured. Please set GOOGLE_API_KEY.",
+            message="No Gemini API key configured. Please add your Gemini API key in Settings.",
             actions_taken=[],
             raw_response=None
         )
     
     # Create and run agent SYNCHRONOUSLY to avoid coroutine issues
-    agent = create_agent_executor(tools)
+    agent = create_agent_executor(tools, api_key=api_key, smart_mode=smart_mode)
     
     try:
         # Use sync invoke instead of ainvoke to avoid StopIteration errors
@@ -370,6 +418,10 @@ def determine_service(tool_name: str) -> str:
         return "forms"
     elif "meet" in tool_lower or "meeting" in tool_lower:
         return "meet"
+    elif "github" in tool_lower:
+        return "github"
+    elif "linear" in tool_lower:
+        return "linear"
     return "unknown"
 
 
@@ -494,7 +546,8 @@ from app.services.task_planner import parse_tasks_from_message, TaskPlan, TaskSt
 
 async def process_chat_message_streaming(
     message: str,
-    integration_configs: dict[str, dict]
+    integration_configs: dict[str, dict],
+    gemini_api_key: Optional[str] = None
 ) -> AsyncGenerator[dict, None]:
     """
     Process a chat message with streaming task updates.
@@ -519,10 +572,13 @@ async def process_chat_message_streaming(
         }
         return
     
-    if not llm:
+    # Check for API key - use user's key or fall back to server key
+    api_key = gemini_api_key or FALLBACK_GOOGLE_API_KEY
+    
+    if not api_key:
         yield {
             "event_type": "error",
-            "data": {"message": "LLM not configured. Please set GOOGLE_API_KEY."}
+            "data": {"message": "No Gemini API key configured. Please add your Gemini API key in Settings."}
         }
         return
     
@@ -543,7 +599,7 @@ async def process_chat_message_streaming(
         
         # Use regular agent for single/unclear requests
         try:
-            result = await process_chat_message(message, integration_configs)
+            result = await process_chat_message(message, integration_configs, gemini_api_key=api_key)
             yield {
                 "event_type": "complete",
                 "data": {
@@ -564,8 +620,8 @@ async def process_chat_message_streaming(
         "data": task_plan.to_dict()
     }
     
-    # Step 3: Create agent for execution
-    agent = create_agent_executor(tools)
+    # Step 3: Create agent for execution with user's API key
+    agent = create_agent_executor(tools, api_key=api_key)
     
     # Step 4: Execute using the agent with enhanced prompt
     # Build a prompt that explicitly lists all tasks

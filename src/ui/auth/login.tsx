@@ -3,10 +3,10 @@ import { Button } from "@/ui/auth/button";
 import { Input } from "@/ui/auth/input";
 import { Label } from "@/ui/auth/label";
 import { Checkbox } from "@/ui/auth/checkbox";
-import { Eye, EyeOff, Mail, Sparkles } from "lucide-react";
+import { Eye, EyeOff } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
-
+import LogoImg from "@/assets/logo.png"; 
 interface PupilProps {
   size?: number;
   maxDistance?: number;
@@ -184,6 +184,7 @@ function LoginPage() {
   const [isSignupMode, setIsSignupMode] = useState(false);
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [rememberMe, setRememberMe] = useState(false);
   const navigate = useNavigate();
   const [mouseX, setMouseX] = useState<number>(0);
   const [mouseY, setMouseY] = useState<number>(0);
@@ -330,9 +331,9 @@ function LoginPage() {
         console.log("✅ Signup successful!");
         navigate("/chatbot");
       } else {
-        // Call real login API
-        await authLogin(email, password);
-        console.log("✅ Login successful!");
+        // Call real login API with rememberMe flag
+        await authLogin(email, password, rememberMe);
+        console.log("Login successful!");
         navigate("/chatbot");
       }
     } catch (err) {
@@ -350,8 +351,9 @@ function LoginPage() {
         <div className="relative z-20">
           <div className="flex items-center gap-2 text-lg font-semibold">
             <div className="size-8 rounded-lg bg-primary-foreground/10 backdrop-blur-sm flex items-center justify-center">
-              <Sparkles className="size-4" />
-            </div>
+  <img src={LogoImg} alt="Locus Logo" className="w-6 h-6 object-contain" />
+</div>
+
             <span>Locus</span>
           </div>
         </div>
@@ -676,8 +678,6 @@ function LoginPage() {
           </div>
         </div>
 
-        
-
         {/* Decorative elements */}
         <div className="absolute inset-0 bg-grid-white/[0.05] bg-[size:20px_20px]" />
         <div className="absolute top-1/4 right-1/4 size-64 bg-primary-foreground/10 rounded-full blur-3xl" />
@@ -690,8 +690,9 @@ function LoginPage() {
           {/* Mobile Logo */}
           <div className="lg:hidden flex items-center justify-center gap-2 text-lg font-semibold mb-12">
             <div className="size-8 rounded-lg bg-primary/10 flex items-center justify-center">
-              <Sparkles className="size-4 text-primary" />
-            </div>
+  <img src={LogoImg} alt="Locus Logo" className="w-6 h-6 object-contain" />
+</div>
+
             <span>Locus</span>
           </div>
 
@@ -802,7 +803,11 @@ function LoginPage() {
             {!isSignupMode && (
               <div className="flex items-center justify-between">
                 <div className="flex items-center space-x-2">
-                  <Checkbox id="remember" />
+                  <Checkbox 
+                    id="remember" 
+                    checked={rememberMe}
+                    onCheckedChange={(checked) => setRememberMe(!!checked)}
+                  />
                   <Label
                     htmlFor="remember"
                     className="text-sm font-normal cursor-pointer"
@@ -840,18 +845,6 @@ function LoginPage() {
                 : "Log in"}
             </Button>
           </form>
-
-          {/* Social Login */}
-          <div className="mt-6">
-            <Button
-              variant="outline"
-              className="w-full h-12 bg-background border-border/60 hover:bg-accent"
-              type="button"
-            >
-              <Mail className="mr-2 size-5" />
-              {isSignupMode ? "Sign up with Google" : "Log in with Google"}
-            </Button>
-          </div>
 
           {/* Toggle Login/Signup */}
           <div className="text-center text-sm text-muted-foreground mt-8">

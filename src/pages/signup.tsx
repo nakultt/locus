@@ -2,9 +2,9 @@ import { useState } from "react";
 import { Button } from "@/ui/auth/button";
 import { Input } from "@/ui/auth/input";
 import { Label } from "@/ui/auth/label";
-import { Eye, EyeOff, Sparkles } from "lucide-react";
+import { Eye, EyeOff } from "lucide-react";
 import { useNavigate, Link } from "react-router-dom";
-
+import LogoImg from "@/assets/logo.png";
 function SignupPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
@@ -49,8 +49,9 @@ function SignupPage() {
         <div className="relative z-20">
           <div className="flex items-center gap-2 text-lg font-semibold">
             <div className="size-8 rounded-lg bg-white/10 backdrop-blur-sm flex items-center justify-center">
-              <Sparkles className="size-4" />
-            </div>
+  <img src={LogoImg} alt="Locus Logo" className="w-6 h-6 object-contain" />
+</div>
+
             <span>Locus</span>
           </div>
         </div>
@@ -87,8 +88,8 @@ function SignupPage() {
           {/* Mobile Logo */}
           <div className="lg:hidden flex items-center justify-center gap-2 text-lg font-semibold mb-12">
             <div className="size-8 rounded-lg bg-primary/10 flex items-center justify-center">
-              <Sparkles className="size-4 text-primary" />
-            </div>
+  <img src={LogoImg} alt="Locus Logo" className="w-6 h-6 object-contain" />
+</div>
             <span>Locus</span>
           </div>
 

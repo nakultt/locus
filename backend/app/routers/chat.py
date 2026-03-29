@@ -48,12 +48,49 @@ async def chat(
             detail="User not found"
         )
     
+    # Get or create conversation
+    conversation_id = request.conversation_id
+    if conversation_id:
+        # Validate conversation exists and belongs to user
+        conversation = crud.get_conversation(db, conversation_id)
+        if not conversation:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Conversation not found"
+            )
+        if conversation.owner_id != request.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Conversation does not belong to user"
+            )
+    else:
+        # Create new conversation with first few words of message as title
+        title = request.message[:50] + "..." if len(request.message) > 50 else request.message
+        conversation = crud.create_conversation(db, request.user_id, title)
+        conversation_id = conversation.id
+    
+    # Save user message to database
+    crud.add_message(
+        db=db,
+        conversation_id=conversation_id,
+        role="user",
+        content=request.message
+    )
+    
     # Get user's connected integrations
     integrations = crud.get_user_integrations(db, request.user_id)
     if not integrations:
+        # Save error as assistant message
+        error_msg = "No integrations connected. Please connect at least one service first."
+        crud.add_message(
+            db=db,
+            conversation_id=conversation_id,
+            role="assistant",
+            content=error_msg
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No integrations connected. Please connect at least one service first."
+            detail=error_msg
         )
     
     # Build integration credentials map
@@ -74,13 +111,43 @@ async def chat(
         if config:
             integration_configs[integration.service_name] = config
     
+    # Get user's Gemini API key
+    gemini_api_key = crud.get_user_gemini_key(db, request.user_id)
+    if not gemini_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Gemini API Key is required. Please set it in Settings."
+        )
+    
     try:
         # Process message through LangChain agent
         result = await process_chat_message(
             message=request.message,
-            integration_configs=integration_configs
+            integration_configs=integration_configs,
+            gemini_api_key=gemini_api_key,
+            smart_mode=request.smart_mode
         )
-        return result
+        
+        # Save assistant response to database
+        actions_json = None
+        if result.actions_taken:
+            actions_json = json.dumps([action.model_dump() for action in result.actions_taken])
+        
+        crud.add_message(
+            db=db,
+            conversation_id=conversation_id,
+            role="assistant",
+            content=result.message,
+            actions_json=actions_json
+        )
+        
+        # Return response with conversation_id
+        return schemas.ChatResponse(
+            message=result.message,
+            actions_taken=result.actions_taken,
+            raw_response=result.raw_response,
+            conversation_id=conversation_id
+        )
     except ValueError as e:
         # Specific integration not connected
         raise HTTPException(
@@ -125,11 +192,52 @@ async def chat_stream(
             media_type="text/event-stream"
         )
     
+    # Get or create conversation
+    conversation_id = request.conversation_id
+    if conversation_id:
+        # Validate conversation exists and belongs to user
+        conversation = crud.get_conversation(db, conversation_id)
+        if not conversation:
+            async def error_generator():
+                yield f"data: {json.dumps({'event_type': 'error', 'data': {'message': 'Conversation not found'}})}\n\n"
+            return StreamingResponse(
+                error_generator(),
+                media_type="text/event-stream"
+            )
+        if conversation.owner_id != request.user_id:
+            async def error_generator():
+                yield f"data: {json.dumps({'event_type': 'error', 'data': {'message': 'Conversation does not belong to user'}})}\n\n"
+            return StreamingResponse(
+                error_generator(),
+                media_type="text/event-stream"
+            )
+    else:
+        # Create new conversation with first few words of message as title
+        title = request.message[:50] + "..." if len(request.message) > 50 else request.message
+        conversation = crud.create_conversation(db, request.user_id, title)
+        conversation_id = conversation.id
+    
+    # Save user message to database
+    crud.add_message(
+        db=db,
+        conversation_id=conversation_id,
+        role="user",
+        content=request.message
+    )
+    
     # Get user's connected integrations
     integrations = crud.get_user_integrations(db, request.user_id)
     if not integrations:
+        # Save error as assistant message
+        error_msg = "No integrations connected. Please connect at least one service first."
+        crud.add_message(
+            db=db,
+            conversation_id=conversation_id,
+            role="assistant",
+            content=error_msg
+        )
         async def error_generator():
-            yield f"data: {json.dumps({'event_type': 'error', 'data': {'message': 'No integrations connected. Please connect at least one service first.'}})}\n\n"
+            yield f"data: {json.dumps({'event_type': 'error', 'data': {'message': error_msg}})}\n\n"
         return StreamingResponse(
             error_generator(),
             media_type="text/event-stream"
@@ -153,16 +261,64 @@ async def chat_stream(
         if config:
             integration_configs[integration.service_name] = config
     
+    # Get user's Gemini API key
+    gemini_api_key = crud.get_user_gemini_key(db, request.user_id)
+    if not gemini_api_key:
+        error_msg = "Gemini API Key is required. Please set it in Settings."
+        async def error_generator():
+            yield f"data: {json.dumps({'event_type': 'error', 'data': {'message': error_msg}})}\n\n"
+        return StreamingResponse(
+            error_generator(),
+            media_type="text/event-stream"
+        )
+    
     async def event_generator():
         """Generate SSE events from the streaming chat processor."""
+        final_message = ""
+        actions_taken = []
+        
         try:
             async for event in process_chat_message_streaming(
                 message=request.message,
-                integration_configs=integration_configs
+                integration_configs=integration_configs,
+                gemini_api_key=gemini_api_key
             ):
+                # Capture final message and actions from complete event
+                if event.get("event_type") == "complete":
+                    data = event.get("data", {})
+                    final_message = data.get("message", "")
+                    actions_taken = data.get("actions_taken", [])
+                
+                # Include conversation_id in events
+                if "data" not in event:
+                    event["data"] = {}
+                event["data"]["conversation_id"] = conversation_id
+                
                 yield f"data: {json.dumps(event)}\n\n"
+            
+            # Save assistant response to database after streaming completes
+            actions_json = None
+            if actions_taken:
+                actions_json = json.dumps(actions_taken)
+            
+            crud.add_message(
+                db=db,
+                conversation_id=conversation_id,
+                role="assistant",
+                content=final_message or "Task completed.",
+                actions_json=actions_json
+            )
+            
         except Exception as e:
-            yield f"data: {json.dumps({'event_type': 'error', 'data': {'message': str(e)}})}\n\n"
+            # Save error as assistant message
+            error_msg = str(e)
+            crud.add_message(
+                db=db,
+                conversation_id=conversation_id,
+                role="assistant",
+                content=f"Error: {error_msg}"
+            )
+            yield f"data: {json.dumps({'event_type': 'error', 'data': {'message': error_msg, 'conversation_id': conversation_id}})}\n\n"
     
     return StreamingResponse(
         event_generator(),
