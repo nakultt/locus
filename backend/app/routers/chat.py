@@ -281,7 +281,8 @@ async def chat_stream(
             async for event in process_chat_message_streaming(
                 message=request.message,
                 integration_configs=integration_configs,
-                gemini_api_key=gemini_api_key
+                gemini_api_key=gemini_api_key,
+                smart_mode=request.smart_mode,
             ):
                 # Capture final message and actions from complete event
                 if event.get("event_type") == "complete":

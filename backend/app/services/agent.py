@@ -1,739 +1,1042 @@
-"""
-LangChain Agent Orchestrator
-Main agent that processes natural language and routes to appropriate tools
-"""
+"""MCP-backed LangGraph orchestration for chat and streaming execution."""
 
+import asyncio
+import base64
+import json
+import logging
 import os
-from typing import Any, Optional
+import shlex
+import time
+from dataclasses import dataclass
+from typing import Any, AsyncGenerator, Optional
+
 from dotenv import load_dotenv
-
-from langchain_ollama import ChatOllama
-from langchain.agents import AgentExecutor, create_tool_calling_agent
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_ollama import ChatOllama
+from langgraph.graph import START, MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode, tools_condition
+from pydantic import SecretStr
 
-from app.schemas import ChatResponse, ActionResult
-from app.services.jira import get_jira_tools
-from app.services.gmail import get_gmail_tools
-from app.services.calendar import get_calendar_tools
-from app.services.slack import get_slack_tools
-from app.services.notion import get_notion_tools
-from app.services.bugasura import get_bugasura_tools
-from app.services.google_docs import get_docs_tools
-from app.services.google_sheets import get_sheets_tools
-from app.services.google_slides import get_slides_tools
-from app.services.google_drive import get_drive_tools
-from app.services.google_forms import get_forms_tools
-from app.services.google_meet import get_meet_tools
-from app.services.github import get_github_tools
-from app.services.linear import get_linear_tools
+from app.schemas import ActionResult, ChatResponse
+from app.services.task_planner import TaskPlan, TaskStatus, parse_tasks_from_message
 
 load_dotenv()
 
-# Initialize Ollama with Qwen3 model (local LLM - no API calls)
+logger = logging.getLogger(__name__)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw_value = os.getenv(name, "").strip()
+    if not raw_value:
+        return default
+    try:
+        return float(raw_value)
+    except ValueError:
+        logger.warning("Invalid float value for %s=%s; using default=%s", name, raw_value, default)
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw_value = os.getenv(name, "").strip()
+    if not raw_value:
+        return default
+    try:
+        return int(raw_value)
+    except ValueError:
+        logger.warning("Invalid integer value for %s=%s; using default=%s", name, raw_value, default)
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw_value = os.getenv(name, "").strip()
+    if not raw_value:
+        return default
+
+    normalized = raw_value.lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+
+    logger.warning("Invalid boolean value for %s=%s; using default=%s", name, raw_value, default)
+    return default
+
+DEFAULT_LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
+if DEFAULT_LLM_PROVIDER not in {"gemini", "ollama"}:
+    logger.warning("Invalid LLM_PROVIDER=%s; defaulting to gemini", DEFAULT_LLM_PROVIDER)
+    DEFAULT_LLM_PROVIDER = "gemini"
+
+FALLBACK_GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+GEMINI_FAST_MODEL = os.getenv("GEMINI_FAST_MODEL", "gemini-2.5-flash")
+GEMINI_SMART_MODEL = os.getenv("GEMINI_SMART_MODEL", "gemini-2.5-pro")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:4b")
+OLLAMA_FAST_MODEL = os.getenv("OLLAMA_FAST_MODEL", os.getenv("OLLAMA_MODEL", "qwen3.5:4b"))
+OLLAMA_SMART_MODEL = os.getenv("OLLAMA_SMART_MODEL", OLLAMA_FAST_MODEL)
+OLLAMA_DISABLE_THINKING = _env_bool("OLLAMA_DISABLE_THINKING", True)
+MCP_TOOL_LOAD_TIMEOUT_SECONDS = _env_float("MCP_TOOL_LOAD_TIMEOUT_SECONDS", 20.0)
+MCP_GRAPH_TIMEOUT_SECONDS = _env_float("MCP_GRAPH_TIMEOUT_SECONDS", 120.0)
+MCP_STREAM_TIMEOUT_SECONDS = _env_float("MCP_STREAM_TIMEOUT_SECONDS", 180.0)
+MCP_MAX_ACTIONS = _env_int("MCP_MAX_ACTIONS", 80)
+MCP_MAX_TOOL_RESULT_CHARS = _env_int("MCP_MAX_TOOL_RESULT_CHARS", 6000)
+MCP_SSE_RESULT_PREVIEW_CHARS = _env_int("MCP_SSE_RESULT_PREVIEW_CHARS", 500)
 
-print(f"Using Ollama with model: {OLLAMA_MODEL} at {OLLAMA_BASE_URL}")
-
-llm = ChatOllama(
-    model=OLLAMA_MODEL,
-    base_url=OLLAMA_BASE_URL,
-    temperature=0.1,
-    reasoning=False
-)
-
-
-# System prompt for the agent
-SYSTEM_PROMPT = """You are Locus, an intelligent enterprise integration assistant.
-Your role is to help users interact with their connected workplace tools through natural language.
-
-## Your Capabilities:
-
-### Jira (Issue & Project Management)
-- Create, update, and search issues using JQL
-- Add comments and transition issues between statuses
-- Create and delete projects (deletion requires confirmation)
-- List and assign workflow schemes to projects
-- List and assign permission schemes to projects
-
-### Slack (Team Communication)
-- Send messages to channels
-- Post formatted updates with titles
-- List available channels
-
-### Notion (Documentation)
-- Search pages and content
-- Get page content by title
-- List recent pages
-- Create new pages with content
-- Append content to existing pages
-
-### Gmail (Email)
-- Send emails with subject and body
-- Read latest emails from inbox
-
-### Google Calendar (Scheduling)
-- Create, update, and delete calendar events
-- Add attendees to events
-
-### Google Docs (Documents)
-- Create new documents with content
-- Append content to existing documents
-
-### Google Sheets (Spreadsheets)
-- Create new spreadsheets
-- Add rows to existing spreadsheets
-
-### Google Slides (Presentations)
-- Create presentations with slides and bullet points
-
-### Google Drive (File Storage)
-- Upload files to Drive
-- Share files with users
-- List and search files
-
-### Google Forms (Surveys)
-- Create forms with text and choice questions
-
-### Google Meet (Video Meetings)
-- Create video meetings with Meet links
-- Schedule meetings with attendees
-
-### Bugasura (Bug Tracking)
-- Create and list bugs/issues
-- Add comments to issues
-- Get issue details
-
-### GitHub (Source Control & Issues)
-- List, view and create repositories
-- Create, update, and comment on issues
-- List, create, and merge pull requests
-- Get authenticated user info
-
-### Linear (Issue Tracking)
-- List teams and workflow states
-- Create, update, and list issues
-- Add comments to issues
-- Update issue status and priority
-
-## Guidelines:
-- When the user asks you to do something, use the appropriate tool with correct parameters.
-- For destructive actions like deleting projects, always confirm with the user first.
-- If a tool returns an error, explain what went wrong and suggest alternatives.
-- Be concise but informative in your responses.
-- When searching Jira, help users construct JQL queries if needed.
-
-## CRITICAL: Multi-Task Execution
-
-When a user requests MULTIPLE actions in a single message, you MUST:
-
-1. **Identify ALL tasks**: Parse the entire message and list every action the user wants.
-2. **Execute ALL tasks**: Do NOT stop after completing just one task. Continue calling tools until EVERY requested action is complete.
-3. **Execute in logical order**: If tasks depend on each other, execute them in the right sequence:
-   - Calendar/Meeting creation FIRST (to get event links/IDs)
-   - Jira ticket creation (to get ticket keys)
-   - Slack messages (can reference tickets/meetings)
-   - Gmail emails (include meeting links, ticket references)
-   - Notion summaries LAST (can summarize all actions taken)
-4. **Chain results**: Use output from previous tasks as input for subsequent tasks:
-   - If user wants to "email about the meeting", include the actual meeting link from the calendar event
-   - If user wants to "summarize in Notion", include details from all completed actions
-5. **Report everything**: After completing all tasks, provide a comprehensive summary of ALL actions taken.
-
-EXAMPLE: If user says "send a Slack message to #general, create a Jira ticket, and send an email to bob@example.com":
-- Call slack_send_message
-- Call jira_create_issue
-- Call gmail_send_email (mention the Jira ticket key)
-- Then respond with summary of all three actions
-
-NEVER stop after just 1-2 actions if the user requested more. ALWAYS complete ALL requested tasks.
-- DO NOT use any <thought> or <reasoning> tags in your response. 
-- Provide only the direct answer or tool calls requested.
-"""
+GOOGLE_SERVICES = {
+    "gmail",
+    "calendar",
+    "docs",
+    "sheets",
+    "slides",
+    "drive",
+    "forms",
+    "meet",
+}
 
 
-def build_tools(integration_configs: dict[str, dict]) -> list[BaseTool]:
-    """
-    Build list of available tools based on user's connected integrations.
-    """
-    tools: list[BaseTool] = []
-    
-    # Jira tools
-    if "jira" in integration_configs:
-        config = integration_configs["jira"]
-        jira_tools = get_jira_tools(
-            api_token=config.get("api_key", ""),
-            email=config.get("credentials", {}).get("email", ""),
-            url=config.get("credentials", {}).get("url", "")
+@dataclass(frozen=True)
+class ServiceMCPSpec:
+    """Metadata used to map a connected integration to an MCP server."""
+
+    server_name: str
+    env_prefix: str
+    default_url: str
+
+
+SERVICE_SPECS: dict[str, ServiceMCPSpec] = {
+    "github": ServiceMCPSpec(
+        server_name="github",
+        env_prefix="MCP_GITHUB",
+        default_url="https://api.githubcopilot.com/mcp",
+    ),
+    "slack": ServiceMCPSpec(
+        server_name="slack",
+        env_prefix="MCP_SLACK",
+        default_url="https://mcp.slack.com/mcp",
+    ),
+    "linear": ServiceMCPSpec(
+        server_name="linear",
+        env_prefix="MCP_LINEAR",
+        default_url="https://mcp.linear.app/mcp",
+    ),
+    "jira": ServiceMCPSpec(
+        server_name="atlassian",
+        env_prefix="MCP_ATLASSIAN",
+        default_url="https://mcp.atlassian.com/v1/mcp",
+    ),
+    "notion": ServiceMCPSpec(
+        server_name="notion",
+        env_prefix="MCP_NOTION",
+        default_url="https://mcp.notion.com/mcp",
+    ),
+    "bugasura": ServiceMCPSpec(
+        server_name="bugasura",
+        env_prefix="MCP_BUGASURA",
+        default_url="",
+    ),
+    "gmail": ServiceMCPSpec(
+        server_name="google_workspace",
+        env_prefix="MCP_GOOGLE_WORKSPACE",
+        default_url="",
+    ),
+    "calendar": ServiceMCPSpec(
+        server_name="google_workspace",
+        env_prefix="MCP_GOOGLE_WORKSPACE",
+        default_url="",
+    ),
+    "docs": ServiceMCPSpec(
+        server_name="google_workspace",
+        env_prefix="MCP_GOOGLE_WORKSPACE",
+        default_url="",
+    ),
+    "sheets": ServiceMCPSpec(
+        server_name="google_workspace",
+        env_prefix="MCP_GOOGLE_WORKSPACE",
+        default_url="",
+    ),
+    "slides": ServiceMCPSpec(
+        server_name="google_workspace",
+        env_prefix="MCP_GOOGLE_WORKSPACE",
+        default_url="",
+    ),
+    "drive": ServiceMCPSpec(
+        server_name="google_workspace",
+        env_prefix="MCP_GOOGLE_WORKSPACE",
+        default_url="",
+    ),
+    "forms": ServiceMCPSpec(
+        server_name="google_workspace",
+        env_prefix="MCP_GOOGLE_WORKSPACE",
+        default_url="",
+    ),
+    "meet": ServiceMCPSpec(
+        server_name="google_workspace",
+        env_prefix="MCP_GOOGLE_WORKSPACE",
+        default_url="",
+    ),
+}
+
+SYSTEM_PROMPT = """You are Locus, an enterprise assistant that executes tasks via MCP tools.
+Use only provided tools, call all required tools for multi-step requests, and summarize outcomes clearly.
+If a tool fails, explain the failure and what the user should do next.
+Never invent that an action succeeded without a tool result."""
+
+SERVICE_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "github": ("github", "repo", "pull_request", "pull", "octokit", "gh_"),
+    "slack": ("slack", "channel"),
+    "linear": ("linear",),
+    "jira": ("jira", "atlassian", "rovo", "confluence", "compass"),
+    "notion": ("notion",),
+    "gmail": ("gmail", "email", "mail"),
+    "calendar": ("calendar", "event", "schedule"),
+    "docs": ("docs", "document"),
+    "sheets": ("sheets", "spreadsheet", "sheet"),
+    "slides": ("slides", "presentation"),
+    "drive": ("drive", "file", "folder"),
+    "forms": ("forms", "form", "survey"),
+    "meet": ("meet", "conference", "video"),
+    "bugasura": ("bugasura",),
+}
+
+
+def _normalize_transport(raw_transport: str) -> str:
+    transport = raw_transport.strip().lower()
+    if transport == "streamable_http":
+        return "http"
+    if transport in {"http", "sse", "stdio"}:
+        return transport
+    return "http"
+
+
+def _parse_args(raw: str) -> list[str]:
+    if not raw.strip():
+        return []
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return [str(item) for item in parsed]
+    except json.JSONDecodeError:
+        pass
+    return shlex.split(raw)
+
+
+def _extract_token(config: dict[str, Any]) -> str:
+    api_key = str(config.get("api_key", "") or "").strip()
+    if api_key:
+        return api_key
+
+    credentials = config.get("credentials")
+    if isinstance(credentials, dict):
+        access_token = str(credentials.get("access_token", "") or "").strip()
+        if access_token:
+            return access_token
+
+    return ""
+
+
+def _parse_custom_headers(env_prefix: str) -> dict[str, str]:
+    raw_headers = os.getenv(f"{env_prefix}_HEADERS_JSON", "").strip()
+    if not raw_headers:
+        return {}
+
+    try:
+        parsed = json.loads(raw_headers)
+    except json.JSONDecodeError:
+        return {}
+
+    if not isinstance(parsed, dict):
+        return {}
+
+    return {str(key): str(value) for key, value in parsed.items()}
+
+
+def _build_auth_headers(service: str, config: dict[str, Any]) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    token = _extract_token(config)
+
+    if not token:
+        return headers
+
+    if service == "jira":
+        credentials = config.get("credentials")
+        email = ""
+        if isinstance(credentials, dict):
+            email = str(credentials.get("email", "") or "").strip()
+        if email and config.get("api_key"):
+            basic_secret = f"{email}:{str(config['api_key'])}".encode("utf-8")
+            headers["Authorization"] = f"Basic {base64.b64encode(basic_secret).decode('utf-8')}"
+            return headers
+
+    headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _build_server_config(
+    service: str,
+    spec: ServiceMCPSpec,
+    config: dict[str, Any],
+) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    transport = _normalize_transport(os.getenv(f"{spec.env_prefix}_TRANSPORT", "http"))
+
+    if transport == "stdio":
+        command = os.getenv(f"{spec.env_prefix}_COMMAND", "").strip()
+        if not command:
+            return None, (
+                f"{service}: set {spec.env_prefix}_COMMAND (or switch {spec.env_prefix}_TRANSPORT to http/sse)."
+            )
+
+        args = _parse_args(os.getenv(f"{spec.env_prefix}_ARGS", ""))
+        server_config: dict[str, Any] = {
+            "transport": "stdio",
+            "command": command,
+        }
+        if args:
+            server_config["args"] = args
+        return server_config, None
+
+    url = os.getenv(f"{spec.env_prefix}_URL", spec.default_url).strip()
+    if not url:
+        return None, f"{service}: configure {spec.env_prefix}_URL for this MCP server."
+
+    server_config = {
+        "transport": transport,
+        "url": url,
+    }
+
+    headers = _build_auth_headers(service, config)
+    headers.update(_parse_custom_headers(spec.env_prefix))
+    if headers and transport in {"http", "sse"}:
+        server_config["headers"] = headers
+
+    return server_config, None
+
+
+def _has_credentials(config: dict[str, Any]) -> bool:
+    return bool(_extract_token(config))
+
+
+def _group_services_by_server(
+    integration_configs: dict[str, dict[str, Any]],
+) -> dict[str, list[tuple[str, ServiceMCPSpec, dict[str, Any]]]]:
+    grouped: dict[str, list[tuple[str, ServiceMCPSpec, dict[str, Any]]]] = {}
+    for service, config in integration_configs.items():
+        spec = SERVICE_SPECS.get(service)
+        if not spec:
+            continue
+        grouped.setdefault(spec.server_name, []).append((service, spec, config))
+    return grouped
+
+
+def _build_mcp_server_configs(
+    integration_configs: dict[str, dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    server_configs: dict[str, dict[str, Any]] = {}
+    setup_notes: list[str] = []
+
+    unsupported = sorted(service for service in integration_configs if service not in SERVICE_SPECS)
+    if unsupported:
+        setup_notes.append(
+            "No MCP mapping is configured for: " + ", ".join(unsupported)
         )
-        tools.extend(jira_tools)
-    
-    # Gmail tools
-    if "gmail" in integration_configs:
-        config = integration_configs["gmail"]
-        gmail_tools = get_gmail_tools(
-            credentials=config.get("credentials", {}),
-            api_key=config.get("api_key", "")
-        )
-        tools.extend(gmail_tools)
-    
-    # Calendar tools
-    if "calendar" in integration_configs:
-        config = integration_configs["calendar"]
-        calendar_tools = get_calendar_tools(
-            credentials=config.get("credentials", {})
-        )
-        tools.extend(calendar_tools)
-    
-    # Slack tools
-    if "slack" in integration_configs:
-        config = integration_configs["slack"]
-        slack_tools = get_slack_tools(
-            bot_token=config.get("api_key", "")
-        )
-        tools.extend(slack_tools)
-    
-    # Notion tools
-    if "notion" in integration_configs:
-        config = integration_configs["notion"]
-        notion_tools = get_notion_tools(
-            integration_token=config.get("api_key", "")
-        )
-        tools.extend(notion_tools)
-    
-    # Bugasura tools
-    if "bugasura" in integration_configs:
-        config = integration_configs["bugasura"]
-        bugasura_tools = get_bugasura_tools(
-            api_key=config.get("api_key", ""),
-            team_id=config.get("credentials", {}).get("team_id", ""),
-            project_key=config.get("credentials", {}).get("project_key", "")
-        )
-        tools.extend(bugasura_tools)
-    
-    # Google Docs tools
-    if "docs" in integration_configs:
-        config = integration_configs["docs"]
-        docs_tools = get_docs_tools(
-            credentials=config.get("credentials", {})
-        )
-        tools.extend(docs_tools)
-    
-    # Google Sheets tools
-    if "sheets" in integration_configs:
-        config = integration_configs["sheets"]
-        sheets_tools = get_sheets_tools(
-            credentials=config.get("credentials", {})
-        )
-        tools.extend(sheets_tools)
-    
-    # Google Slides tools
-    if "slides" in integration_configs:
-        config = integration_configs["slides"]
-        slides_tools = get_slides_tools(
-            credentials=config.get("credentials", {})
-        )
-        tools.extend(slides_tools)
-    
-    # Google Drive tools
-    if "drive" in integration_configs:
-        config = integration_configs["drive"]
-        drive_tools = get_drive_tools(
-            credentials=config.get("credentials", {})
-        )
-        tools.extend(drive_tools)
-    
-    # Google Forms tools
-    if "forms" in integration_configs:
-        config = integration_configs["forms"]
-        forms_tools = get_forms_tools(
-            credentials=config.get("credentials", {})
-        )
-        tools.extend(forms_tools)
-    
-    # Google Meet tools
-    if "meet" in integration_configs:
-        config = integration_configs["meet"]
-        meet_tools = get_meet_tools(
-            credentials=config.get("credentials", {})
-        )
-        tools.extend(meet_tools)
-    
-    # GitHub tools
-    if "github" in integration_configs:
-        config = integration_configs["github"]
-        github_tools = get_github_tools(
-            token=config.get("api_key", "")
-        )
-        tools.extend(github_tools)
-    
-    # Linear tools
-    if "linear" in integration_configs:
-        config = integration_configs["linear"]
-        linear_tools = get_linear_tools(
-            api_key=config.get("api_key", "")
-        )
-        tools.extend(linear_tools)
-    
-    return tools
+
+    grouped = _group_services_by_server(integration_configs)
+
+    for server_name, entries in grouped.items():
+        sorted_entries = sorted(entries, key=lambda item: _has_credentials(item[2]), reverse=True)
+        selected_service, spec, selected_config = sorted_entries[0]
+
+        config, error = _build_server_config(selected_service, spec, selected_config)
+        if error:
+            affected_services = ", ".join(sorted(service for service, _, _ in entries))
+            setup_notes.append(f"{affected_services}: {error}")
+            continue
+
+        if config:
+            server_configs[server_name] = config
+
+    return server_configs, setup_notes
 
 
-def create_agent_executor(tools: list[BaseTool], api_key: str, smart_mode: bool = False) -> AgentExecutor:
-    """Create a LangChain agent with the given tools using native tool calling.
-    
-    Args:
-        tools: List of available tools
-        api_key: User's Gemini API key
-        smart_mode: Use higher intelligence model when True
-    """
-    # Create LLM with user's API key
-    selected_llm = get_llm(api_key, smart_mode)
-    
-    # Create a prompt that works with the tool calling agent
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", SYSTEM_PROMPT),
-        ("human", "{input}"),
-        MessagesPlaceholder(variable_name="agent_scratchpad"),
-    ])
-    
-    # Use tool calling agent instead of ReAct for better structured output
-    agent = create_tool_calling_agent(selected_llm, tools, prompt)
-    
-    return AgentExecutor(
-        agent=agent,
-        tools=tools,
-        verbose=True,
-        handle_parsing_errors=True,
-        max_iterations=25  # Increased for multi-tool requests (up to 25 tools)
+def _format_setup_notes(setup_notes: list[str]) -> str:
+    if not setup_notes:
+        return ""
+    notes = "\n".join(f"- {note}" for note in setup_notes)
+    return f"Some integrations were skipped during MCP setup:\n{notes}"
+
+
+async def _load_mcp_tools(
+    integration_configs: dict[str, dict[str, Any]],
+) -> tuple[list[BaseTool], list[str]]:
+    server_configs, setup_notes = _build_mcp_server_configs(integration_configs)
+    if not server_configs:
+        return [], setup_notes
+
+    try:
+        from langchain_mcp_adapters.client import MultiServerMCPClient  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise RuntimeError(
+            "langchain-mcp-adapters is not installed. Install backend dependencies before starting the API."
+        ) from exc
+
+    client = MultiServerMCPClient(server_configs)
+    tools = await client.get_tools()
+    return tools, setup_notes
+
+
+def _selected_llm_provider() -> str:
+    provider = os.getenv("LLM_PROVIDER", DEFAULT_LLM_PROVIDER).strip().lower()
+    if provider in {"gemini", "ollama"}:
+        return provider
+    logger.warning("Unsupported LLM_PROVIDER=%s; using gemini", provider)
+    return "gemini"
+
+
+def _build_ollama_llm(model_name: str) -> ChatOllama:
+    llm_kwargs: dict[str, Any] = {
+        "model": model_name,
+        "base_url": OLLAMA_BASE_URL,
+        "temperature": 0.1,
+    }
+
+    if OLLAMA_DISABLE_THINKING:
+        try:
+            return ChatOllama(reasoning=False, **llm_kwargs)
+        except TypeError:
+            logger.warning(
+                "Installed langchain-ollama does not support 'reasoning'; continuing without that flag"
+            )
+
+    return ChatOllama(**llm_kwargs)
+
+
+def _get_llm(api_key: Optional[str], smart_mode: bool = False, provider: str = "gemini") -> Any:
+    if provider == "ollama":
+        model_name = OLLAMA_SMART_MODEL if smart_mode else OLLAMA_FAST_MODEL
+        return _build_ollama_llm(model_name)
+
+    if not api_key:
+        raise ValueError(
+            "No Gemini API key configured. Set GOOGLE_API_KEY or switch LLM_PROVIDER=ollama for local testing."
+        )
+
+    model_name = GEMINI_SMART_MODEL if smart_mode else GEMINI_FAST_MODEL
+    return ChatGoogleGenerativeAI(
+        model=model_name,
+        api_key=SecretStr(api_key),
+        temperature=0.1,
     )
+
+
+def _build_graph(llm: Any, tools: list[BaseTool]):
+    llm_with_tools = llm.bind_tools(tools)
+
+    def call_model(state: MessagesState):
+        response = llm_with_tools.invoke(state["messages"])
+        return {"messages": [response]}
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("call_model", call_model)
+    builder.add_node("tools", ToolNode(tools))
+    builder.add_edge(START, "call_model")
+    builder.add_conditional_edges("call_model", tools_condition)
+    builder.add_edge("tools", "call_model")
+    return builder.compile()
+
+
+def _content_to_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        return json.dumps(content, ensure_ascii=True)
+    if isinstance(content, list):
+        chunks: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                chunks.append(item)
+                continue
+
+            if isinstance(item, dict):
+                text = item.get("text")
+                if text is not None:
+                    chunks.append(str(text))
+                else:
+                    chunks.append(json.dumps(item, ensure_ascii=True))
+                continue
+
+            chunks.append(str(item))
+
+        return "\n".join(chunk for chunk in chunks if chunk)
+
+    return str(content)
+
+
+def _truncate_text(value: str, limit: int) -> str:
+    if limit <= 0:
+        return ""
+    if len(value) <= limit:
+        return value
+    overflow = len(value) - limit
+    return f"{value[:limit]}... [truncated {overflow} chars]"
+
+
+def _is_tool_success(tool_message: ToolMessage, content_text: str) -> bool:
+    status = getattr(tool_message, "status", None)
+    if status == "error":
+        return False
+
+    lowered = content_text.strip().lower()
+    if lowered.startswith("error"):
+        return False
+    if "traceback" in lowered:
+        return False
+    return True
+
+
+def determine_service(tool_name: str, enabled_services: Optional[list[str]] = None) -> str:
+    """Best-effort service detection from MCP tool names."""
+    normalized = tool_name.lower()
+    enabled = set(enabled_services or [])
+
+    for service, keywords in SERVICE_KEYWORDS.items():
+        if any(keyword in normalized for keyword in keywords):
+            if not enabled:
+                return service
+            if service in enabled:
+                return service
+            if service in GOOGLE_SERVICES:
+                for google_service in GOOGLE_SERVICES:
+                    if google_service in enabled:
+                        return google_service
+
+    if len(enabled) == 1:
+        return next(iter(enabled))
+
+    return "unknown"
+
+
+def _extract_tool_call_names(messages: list[Any]) -> dict[str, str]:
+    names: dict[str, str] = {}
+    for message in messages:
+        if isinstance(message, AIMessage):
+            for tool_call in message.tool_calls or []:
+                call_id = str(tool_call.get("id", "") or "")
+                tool_name = str(tool_call.get("name", "tool") or "tool")
+                if call_id:
+                    names[call_id] = tool_name
+    return names
+
+
+def _extract_actions_from_messages(
+    messages: list[Any],
+    enabled_services: list[str],
+) -> list[ActionResult]:
+    call_name_map = _extract_tool_call_names(messages)
+    actions_taken: list[ActionResult] = []
+
+    for message in messages:
+        if not isinstance(message, ToolMessage):
+            continue
+
+        call_id = str(getattr(message, "tool_call_id", "") or "")
+        tool_name = call_name_map.get(call_id, str(getattr(message, "name", "tool") or "tool"))
+        content_text = _truncate_text(_content_to_text(message.content), MCP_MAX_TOOL_RESULT_CHARS)
+        success = _is_tool_success(message, content_text)
+
+        actions_taken.append(
+            ActionResult(
+                service=determine_service(tool_name, enabled_services),
+                action=tool_name,
+                success=success,
+                result=content_text if success else None,
+                error=None if success else content_text,
+            )
+        )
+
+    return actions_taken
+
+
+def _find_final_message(messages: list[Any]) -> str:
+    for message in reversed(messages):
+        if isinstance(message, AIMessage):
+            if message.tool_calls:
+                continue
+            text = _content_to_text(message.content).strip()
+            if text:
+                return text
+
+    for message in reversed(messages):
+        if isinstance(message, AIMessage):
+            text = _content_to_text(message.content).strip()
+            if text:
+                return text
+
+    return "Task execution completed."
+
+
+def _build_user_prompt(message: str, enabled_services: list[str]) -> str:
+    service_list = ", ".join(sorted(enabled_services)) if enabled_services else "none"
+    return (
+        f"Connected integrations: {service_list}.\n"
+        "Use the MCP tools to complete the request.\n\n"
+        f"User request: {message}"
+    )
+
+
+def _next_task_for_tool(task_plan: TaskPlan, service: str, used_task_ids: set[str]) -> Optional[str]:
+    for task in task_plan.tasks:
+        if task.id in used_task_ids:
+            continue
+        if task.status != TaskStatus.PENDING:
+            continue
+        if task.service == service:
+            return task.id
+
+    for task in task_plan.tasks:
+        if task.id in used_task_ids:
+            continue
+        if task.status == TaskStatus.PENDING:
+            return task.id
+
+    return None
+
+
+def _task_exists(task_plan: TaskPlan, task_id: str) -> bool:
+    return any(task.id == task_id for task in task_plan.tasks)
 
 
 async def process_chat_message(
     message: str,
     integration_configs: dict[str, dict],
     gemini_api_key: Optional[str] = None,
-    smart_mode: bool = False
+    smart_mode: bool = False,
 ) -> ChatResponse:
-    """
-    Process a natural language message through the LangChain agent.
-    
-    Args:
-        message: User's natural language command
-        integration_configs: Dict of service name to config
-        gemini_api_key: User's Gemini API key (required)
-        smart_mode: Use higher intelligence model when True
-    """
-    # Build tools based on available integrations
-    tools = build_tools(integration_configs)
-    
-    if not tools:
-        return ChatResponse(
-            message="No integration tools available. Please connect at least one service.",
-            actions_taken=[],
-            raw_response=None
-        )
-    
-    # Check for API key - use user's key or fall back to server key
+    """Process a chat request using MCP tools orchestrated by LangGraph."""
+    provider = _selected_llm_provider()
     api_key = gemini_api_key or FALLBACK_GOOGLE_API_KEY
-    
-    if not api_key:
+    if provider == "gemini" and not api_key:
         return ChatResponse(
-            message="No Gemini API key configured. Please add your Gemini API key in Settings.",
+            message=(
+                "No Gemini API key configured. Please add your Gemini API key in Settings "
+                "or set LLM_PROVIDER=ollama for local testing."
+            ),
             actions_taken=[],
-            raw_response=None
+            raw_response=None,
         )
-    
-    # Create and run agent SYNCHRONOUSLY to avoid coroutine issues
-    agent = create_agent_executor(tools, api_key=api_key, smart_mode=smart_mode)
-    
+
+    started_at = time.perf_counter()
+
+    available_services = sorted(
+        service for service in integration_configs if service in SERVICE_SPECS
+    )
+
     try:
-        # Use sync invoke instead of ainvoke to avoid StopIteration errors
-        result = agent.invoke({"input": message})
-        
-        output = result.get("output", "")
-        intermediate_steps = result.get("intermediate_steps", [])
-        
-        # Extract actions taken
-        actions_taken: list[ActionResult] = []
-        for step in intermediate_steps:
-            if len(step) >= 2:
-                action, observation = step[0], step[1]
-                tool_name = getattr(action, "tool", "unknown")
-                
-                service = determine_service(tool_name)
-                
-                actions_taken.append(ActionResult(
-                    service=service,
-                    action=tool_name,
-                    success=True,
-                    result=str(observation) if observation else None
-                ))
-        
-        return ChatResponse(
-            message=output,
-            actions_taken=actions_taken,
-            raw_response=output
+        tools, setup_notes = await asyncio.wait_for(
+            _load_mcp_tools(integration_configs),
+            timeout=MCP_TOOL_LOAD_TIMEOUT_SECONDS,
         )
-        
-    except Exception as e:
+    except TimeoutError:
+        logger.warning("Timed out loading MCP tools after %ss", MCP_TOOL_LOAD_TIMEOUT_SECONDS)
         return ChatResponse(
-            message=f"I encountered an error while processing your request: {str(e)}",
+            message=(
+                "Timed out while connecting to MCP servers. "
+                "Please retry or verify MCP endpoint availability."
+            ),
+            actions_taken=[
+                ActionResult(
+                    service="mcp",
+                    action="load_tools",
+                    success=False,
+                    error="MCP tool loading timeout",
+                )
+            ],
+            raw_response=None,
+        )
+    except Exception as exc:
+        logger.exception("Failed to load MCP tools")
+        return ChatResponse(
+            message=f"I encountered an error while loading MCP tools: {exc}",
+            actions_taken=[
+                ActionResult(
+                    service="mcp",
+                    action="load_tools",
+                    success=False,
+                    error=str(exc),
+                )
+            ],
+            raw_response=None,
+        )
+
+    if not tools:
+        details = _format_setup_notes(setup_notes)
+        suffix = f"\n\n{details}" if details else ""
+        return ChatResponse(
+            message=(
+                "No MCP tools are available for your connected integrations. "
+                "Please configure the required MCP server URLs/commands and reconnect if needed."
+                f"{suffix}"
+            ),
+            actions_taken=[],
+            raw_response=None,
+        )
+
+    try:
+        llm = _get_llm(api_key, smart_mode=smart_mode, provider=provider)
+    except Exception as exc:
+        logger.exception("Failed to initialize LLM provider=%s", provider)
+        return ChatResponse(
+            message=f"I couldn't initialize the configured LLM provider ({provider}): {exc}",
+            actions_taken=[
+                ActionResult(
+                    service="agent",
+                    action="init_llm",
+                    success=False,
+                    error=str(exc),
+                )
+            ],
+            raw_response=None,
+        )
+
+    graph = _build_graph(llm, tools)
+
+    initial_state = {
+        "messages": [
+            SystemMessage(content=SYSTEM_PROMPT),
+            HumanMessage(content=_build_user_prompt(message, available_services)),
+        ]
+    }
+
+    try:
+        result_state = await asyncio.wait_for(
+            graph.ainvoke(initial_state),
+            timeout=MCP_GRAPH_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        logger.warning("Timed out executing LangGraph run after %ss", MCP_GRAPH_TIMEOUT_SECONDS)
+        return ChatResponse(
+            message=(
+                "Timed out while executing MCP actions. "
+                "Please simplify the request or retry."
+            ),
             actions_taken=[
                 ActionResult(
                     service="agent",
                     action="process_message",
                     success=False,
-                    error=str(e)
+                    error="LangGraph execution timeout",
                 )
             ],
-            raw_response=None
+            raw_response=None,
+        )
+    except Exception as exc:
+        logger.exception("Failed during LangGraph execution")
+        return ChatResponse(
+            message=f"I encountered an error while processing your request: {exc}",
+            actions_taken=[
+                ActionResult(
+                    service="agent",
+                    action="process_message",
+                    success=False,
+                    error=str(exc),
+                )
+            ],
+            raw_response=None,
         )
 
+    messages = result_state.get("messages", []) if isinstance(result_state, dict) else []
+    if not isinstance(messages, list):
+        messages = []
 
-def determine_service(tool_name: str) -> str:
-    """Determine the service from tool name."""
-    tool_lower = tool_name.lower()
-    if "jira" in tool_lower:
-        return "jira"
-    elif "gmail" in tool_lower or "email" in tool_lower:
-        return "gmail"
-    elif "calendar" in tool_lower or "event" in tool_lower:
-        return "calendar"
-    elif "slack" in tool_lower:
-        return "slack"
-    elif "notion" in tool_lower:
-        return "notion"
-    elif "bugasura" in tool_lower:
-        return "bugasura"
-    elif "docs" in tool_lower or "document" in tool_lower:
-        return "docs"
-    elif "sheets" in tool_lower or "spreadsheet" in tool_lower:
-        return "sheets"
-    elif "slides" in tool_lower or "presentation" in tool_lower:
-        return "slides"
-    elif "drive" in tool_lower or "file" in tool_lower:
-        return "drive"
-    elif "forms" in tool_lower or "form" in tool_lower:
-        return "forms"
-    elif "meet" in tool_lower or "meeting" in tool_lower:
-        return "meet"
-    elif "github" in tool_lower:
-        return "github"
-    elif "linear" in tool_lower:
-        return "linear"
-    return "unknown"
+    final_text = _find_final_message(messages)
+    actions_taken = _extract_actions_from_messages(messages, available_services)
 
+    setup_summary = _format_setup_notes(setup_notes)
+    if setup_summary:
+        final_text = f"{final_text}\n\n{setup_summary}"
 
-async def process_without_llm(
-    message: str,
-    tools: list[BaseTool],
-    integration_configs: dict[str, dict]
-) -> ChatResponse:
-    """
-    Simple keyword-based processing when no LLM is available.
-    """
-    message_lower = message.lower()
-    actions_taken: list[ActionResult] = []
-    response_parts: list[str] = []
-    
-    # Jira commands
-    if "jira" in message_lower or "ticket" in message_lower or "issue" in message_lower:
-        if "create" in message_lower:
-            # Extract summary from message
-            summary = message.replace("create", "").replace("jira", "").replace("ticket", "").replace("issue", "").strip()
-            if not summary:
-                summary = "New issue from Conflux"
-            
-            for tool in tools:
-                if "create" in tool.name.lower() and "jira" in tool.name.lower():
-                    try:
-                        result = tool.invoke({"summary": summary, "description": "", "project_key": "CONFLUX", "issue_type": "Task"})
-                        response_parts.append(str(result))
-                        actions_taken.append(ActionResult(
-                            service="jira",
-                            action=tool.name,
-                            success=True,
-                            result=str(result)
-                        ))
-                    except Exception as e:
-                        response_parts.append(f"Error: {e}")
-                    break
-        elif "search" in message_lower or "find" in message_lower:
-            query = message.replace("search", "").replace("find", "").replace("jira", "").strip()
-            for tool in tools:
-                if "search" in tool.name.lower() and "jira" in tool.name.lower():
-                    try:
-                        result = tool.invoke({"query": query, "max_results": 5})
-                        response_parts.append(str(result))
-                        actions_taken.append(ActionResult(
-                            service="jira",
-                            action=tool.name,
-                            success=True,
-                            result=str(result)
-                        ))
-                    except Exception as e:
-                        response_parts.append(f"Error: {e}")
-                    break
-    
-    # Slack commands
-    if "slack" in message_lower or "post" in message_lower:
-        if "send" in message_lower or "post" in message_lower:
-            for tool in tools:
-                if "slack" in tool.name.lower() and "send" in tool.name.lower():
-                    try:
-                        result = tool.invoke({"channel": "general", "message": message})
-                        response_parts.append(str(result))
-                        actions_taken.append(ActionResult(
-                            service="slack",
-                            action=tool.name,
-                            success=True,
-                            result=str(result)
-                        ))
-                    except Exception as e:
-                        response_parts.append(f"Error: {e}")
-                    break
-    
-    # Calendar commands
-    if "calendar" in message_lower or "schedule" in message_lower or "meeting" in message_lower:
-        if "create" in message_lower or "schedule" in message_lower:
-            for tool in tools:
-                if "calendar" in tool.name.lower() and "create" in tool.name.lower():
-                    try:
-                        result = tool.invoke({
-                            "summary": message,
-                            "description": "",
-                            "start_time": "tomorrow at 2pm",
-                            "duration_minutes": 60,
-                            "attendees": ""
-                        })
-                        response_parts.append(str(result))
-                        actions_taken.append(ActionResult(
-                            service="calendar",
-                            action=tool.name,
-                            success=True,
-                            result=str(result)
-                        ))
-                    except Exception as e:
-                        response_parts.append(f"Error: {e}")
-                    break
-    
-    if not response_parts:
-        response_parts.append(
-            "I understood your request but couldn't find a matching action. "
-            "Try commands like:\n"
-            "- 'Create a Jira ticket for [issue]'\n"
-            "- 'Search Jira for [query]'\n"
-            "- 'Send [message] to Slack channel [name]'\n"
-            "- 'Schedule a meeting [when]'\n"
-            "\nNote: For full natural language support, please configure your GOOGLE_API_KEY."
-        )
-    
-    return ChatResponse(
-        message="\n\n".join(response_parts),
-        actions_taken=actions_taken,
-        raw_response=None
+    elapsed = time.perf_counter() - started_at
+    logger.info(
+        "Chat request completed in %.2fs with %d tool actions",
+        elapsed,
+        len(actions_taken),
     )
 
-
-# ============================================================================
-# STREAMING CHAT PROCESSING
-# ============================================================================
-
-from typing import AsyncGenerator
-from app.services.task_planner import parse_tasks_from_message, TaskPlan, TaskStatus
+    return ChatResponse(
+        message=final_text,
+        actions_taken=actions_taken,
+        raw_response=final_text,
+    )
 
 
 async def process_chat_message_streaming(
     message: str,
     integration_configs: dict[str, dict],
-    gemini_api_key: Optional[str] = None
+    gemini_api_key: Optional[str] = None,
+    smart_mode: bool = False,
 ) -> AsyncGenerator[dict, None]:
-    """
-    Process a chat message with streaming task updates.
-    
-    Yields SSE events for real-time frontend updates:
-    - planning: Initial message that we're analyzing
-    - plan: Task plan with all identified tasks
-    - task_started: When a task begins execution
-    - task_completed: When a task finishes successfully
-    - task_failed: When a task fails
-    - complete: Final response with all results
-    - error: If something goes wrong
-    """
-    # Build tools based on available integrations
-    tools = build_tools(integration_configs)
-    available_services = list(integration_configs.keys())
-    
-    if not tools:
-        yield {
-            "event_type": "error",
-            "data": {"message": "No integration tools available. Please connect at least one service."}
-        }
-        return
-    
-    # Check for API key - use user's key or fall back to server key
+    """Process a message and stream plan/task updates using LangGraph execution."""
+    provider = _selected_llm_provider()
     api_key = gemini_api_key or FALLBACK_GOOGLE_API_KEY
-    
-    if not api_key:
+    if provider == "gemini" and not api_key:
         yield {
             "event_type": "error",
-            "data": {"message": "No Gemini API key configured. Please add your Gemini API key in Settings."}
+            "data": {
+                "message": (
+                    "No Gemini API key configured. Please add your Gemini API key in Settings "
+                    "or set LLM_PROVIDER=ollama for local testing."
+                )
+            },
         }
         return
-    
-    # Step 1: Parse and plan tasks
+
+    available_services = sorted(
+        service for service in integration_configs if service in SERVICE_SPECS
+    )
+    started_at = time.perf_counter()
+
     yield {
         "event_type": "planning",
-        "data": {"status": "Analyzing your request..."}
+        "data": {"status": "Loading MCP tools..."},
     }
-    
-    task_plan = parse_tasks_from_message(message, available_services)
-    
-    if not task_plan.tasks:
-        # No specific tasks identified, fall back to regular processing
-        yield {
-            "event_type": "planning",
-            "data": {"status": "Processing with AI agent..."}
-        }
-        
-        # Use regular agent for single/unclear requests
-        try:
-            result = await process_chat_message(message, integration_configs, gemini_api_key=api_key)
-            yield {
-                "event_type": "complete",
-                "data": {
-                    "message": result.message,
-                    "actions_taken": [a.model_dump() for a in result.actions_taken],
-                }
-            }
-        except Exception as e:
-            yield {
-                "event_type": "error",
-                "data": {"message": str(e)}
-            }
-        return
-    
-    # Step 2: Emit the task plan
-    yield {
-        "event_type": "plan",
-        "data": task_plan.to_dict()
-    }
-    
-    # Step 3: Create agent for execution with user's API key
-    agent = create_agent_executor(tools, api_key=api_key)
-    
-    # Step 4: Execute using the agent with enhanced prompt
-    # Build a prompt that explicitly lists all tasks
-    task_list = "\n".join([
-        f"- Task {i+1}: {t.description} (use {t.tool_name})"
-        for i, t in enumerate(task_plan.tasks)
-    ])
-    
-    enhanced_message = f"""{message}
 
-IMPORTANT: You must complete ALL of the following tasks:
-{task_list}
-
-Execute each task in order and use the results from earlier tasks when needed (e.g., include meeting links in emails).
-Do NOT stop until all tasks are complete."""
-    
-    actions_taken: list[ActionResult] = []
-    completed_tasks: dict[str, str] = {}  # task_id -> result
-    
     try:
-        # Execute with the agent
-        result = agent.invoke({"input": enhanced_message})
-        
-        output = result.get("output", "")
-        intermediate_steps = result.get("intermediate_steps", [])
-        
-        # Process each step and emit updates
-        for i, step in enumerate(intermediate_steps):
-            if len(step) >= 2:
-                action, observation = step[0], step[1]
-                tool_name = getattr(action, "tool", "unknown")
-                
-                service = determine_service(tool_name)
-                
-                # Find matching task in plan
-                matching_task = None
-                for task in task_plan.tasks:
-                    if task.tool_name == tool_name and task.status == TaskStatus.PENDING:
-                        matching_task = task
-                        break
-                
-                task_id = matching_task.id if matching_task else f"task_{i+1}"
-                
-                # Emit task started
-                yield {
-                    "event_type": "task_started",
-                    "data": {
-                        "task_id": task_id,
-                        "service": service,
-                        "action": tool_name,
-                        "description": matching_task.description if matching_task else tool_name,
-                    }
-                }
-                
-                # Check if successful (basic heuristic)
-                is_success = observation and "error" not in str(observation).lower()[:50]
-                
-                if is_success:
-                    # Update plan
-                    if matching_task:
-                        task_plan.update_task_status(task_id, TaskStatus.COMPLETED, str(observation))
-                    completed_tasks[task_id] = str(observation)
-                    
-                    # Emit task completed
-                    yield {
-                        "event_type": "task_completed",
-                        "data": {
-                            "task_id": task_id,
-                            "service": service,
-                            "action": tool_name,
-                            "result": str(observation)[:500],  # Truncate for SSE
-                        }
-                    }
-                else:
-                    # Update plan
-                    if matching_task:
-                        task_plan.update_task_status(task_id, TaskStatus.FAILED, error=str(observation))
-                    
-                    # Emit task failed
-                    yield {
-                        "event_type": "task_failed",
-                        "data": {
-                            "task_id": task_id,
-                            "service": service,
-                            "action": tool_name,
-                            "error": str(observation)[:500],
-                        }
-                    }
-                
-                actions_taken.append(ActionResult(
-                    service=service,
-                    action=tool_name,
-                    success=is_success,
-                    result=str(observation) if is_success else None,
-                    error=str(observation) if not is_success else None
-                ))
-        
-        # Step 5: Emit completion
-        yield {
-            "event_type": "complete",
-            "data": {
-                "message": output,
-                "actions_taken": [a.model_dump() for a in actions_taken],
-                "total_tasks": task_plan.total,
-                "completed_tasks": task_plan.completed,
-                "failed_tasks": task_plan.failed,
-            }
-        }
-        
-    except Exception as e:
+        tools, setup_notes = await asyncio.wait_for(
+            _load_mcp_tools(integration_configs),
+            timeout=MCP_TOOL_LOAD_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
         yield {
             "event_type": "error",
-            "data": {"message": f"Error processing request: {str(e)}"}
+            "data": {
+                "message": (
+                    "Timed out while connecting to MCP servers. "
+                    "Please retry or verify endpoint availability."
+                )
+            },
         }
+        return
+    except Exception as exc:
+        logger.exception("Failed to initialize MCP tools for streaming")
+        yield {
+            "event_type": "error",
+            "data": {"message": f"Failed to initialize MCP tools: {exc}"},
+        }
+        return
+
+    if not tools:
+        details = _format_setup_notes(setup_notes)
+        message_text = (
+            "No MCP tools are available for your connected integrations. "
+            "Please configure the required MCP server URLs/commands and reconnect if needed."
+        )
+        if details:
+            message_text = f"{message_text}\n\n{details}"
+        yield {
+            "event_type": "error",
+            "data": {"message": message_text},
+        }
+        return
+
+    yield {
+        "event_type": "planning",
+        "data": {"status": "Analyzing your request..."},
+    }
+
+    task_plan = parse_tasks_from_message(message, available_services)
+    if task_plan.tasks:
+        yield {
+            "event_type": "plan",
+            "data": task_plan.to_dict(),
+        }
+
+    try:
+        llm = _get_llm(api_key, smart_mode=smart_mode, provider=provider)
+    except Exception as exc:
+        logger.exception("Failed to initialize streaming LLM provider=%s", provider)
+        yield {
+            "event_type": "error",
+            "data": {"message": f"Failed to initialize LLM provider ({provider}): {exc}"},
+        }
+        return
+
+    graph = _build_graph(llm, tools)
+
+    initial_state = {
+        "messages": [
+            SystemMessage(content=SYSTEM_PROMPT),
+            HumanMessage(content=_build_user_prompt(message, available_services)),
+        ]
+    }
+
+    tool_call_to_task: dict[str, str] = {}
+    tool_call_to_action: dict[str, str] = {}
+    used_task_ids: set[str] = set()
+    actions_taken: list[ActionResult] = []
+    latest_messages: list[Any] = []
+    processed_count = 0
+    final_message = ""
+    action_cap_reached = False
+
+    try:
+        async with asyncio.timeout(MCP_STREAM_TIMEOUT_SECONDS):
+            async for state in graph.astream(initial_state, stream_mode="values"):
+                messages = state.get("messages", []) if isinstance(state, dict) else []
+                if not isinstance(messages, list):
+                    continue
+
+                latest_messages = messages
+                new_messages = messages[processed_count:]
+
+                for msg in new_messages:
+                    if isinstance(msg, AIMessage):
+                        if not msg.tool_calls:
+                            candidate = _content_to_text(msg.content).strip()
+                            if candidate:
+                                final_message = candidate
+
+                        for tool_call in msg.tool_calls or []:
+                            tool_name = str(tool_call.get("name", "tool") or "tool")
+                            call_id = str(tool_call.get("id", "") or f"call_{len(tool_call_to_task) + 1}")
+                            service = determine_service(tool_name, available_services)
+
+                            assigned_task_id = _next_task_for_tool(task_plan, service, used_task_ids)
+                            if assigned_task_id:
+                                used_task_ids.add(assigned_task_id)
+                                task_plan.update_task_status(assigned_task_id, TaskStatus.IN_PROGRESS)
+                            else:
+                                assigned_task_id = f"task_{len(tool_call_to_task) + 1}"
+
+                            tool_call_to_task[call_id] = assigned_task_id
+                            tool_call_to_action[call_id] = tool_name
+
+                            yield {
+                                "event_type": "task_started",
+                                "data": {
+                                    "task_id": assigned_task_id,
+                                    "service": service,
+                                    "action": tool_name,
+                                    "description": tool_name,
+                                },
+                            }
+
+                    elif isinstance(msg, ToolMessage):
+                        call_id = str(getattr(msg, "tool_call_id", "") or "")
+                        tool_name = tool_call_to_action.get(
+                            call_id,
+                            str(getattr(msg, "name", "tool") or "tool"),
+                        )
+                        service = determine_service(tool_name, available_services)
+
+                        task_id = tool_call_to_task.get(call_id, f"task_{len(actions_taken) + 1}")
+                        result_text = _truncate_text(_content_to_text(msg.content), MCP_MAX_TOOL_RESULT_CHARS)
+                        success = _is_tool_success(msg, result_text)
+
+                        if _task_exists(task_plan, task_id):
+                            task_plan.update_task_status(
+                                task_id,
+                                TaskStatus.COMPLETED if success else TaskStatus.FAILED,
+                                result=result_text if success else None,
+                                error=result_text if not success else None,
+                            )
+
+                        actions_taken.append(
+                            ActionResult(
+                                service=service,
+                                action=tool_name,
+                                success=success,
+                                result=result_text if success else None,
+                                error=result_text if not success else None,
+                            )
+                        )
+
+                        yield {
+                            "event_type": "task_completed" if success else "task_failed",
+                            "data": {
+                                "task_id": task_id,
+                                "service": service,
+                                "action": tool_name,
+                                "result": (
+                                    _truncate_text(result_text, MCP_SSE_RESULT_PREVIEW_CHARS)
+                                    if success
+                                    else None
+                                ),
+                                "error": (
+                                    _truncate_text(result_text, MCP_SSE_RESULT_PREVIEW_CHARS)
+                                    if not success
+                                    else None
+                                ),
+                            },
+                        }
+
+                        if len(actions_taken) >= MCP_MAX_ACTIONS:
+                            action_cap_reached = True
+                            break
+
+                processed_count = len(messages)
+                if action_cap_reached:
+                    break
+
+    except TimeoutError:
+        yield {
+            "event_type": "error",
+            "data": {
+                "message": (
+                    "Streaming execution timed out before completion. "
+                    "Please retry with a smaller or more specific request."
+                )
+            },
+        }
+        return
+
+    except Exception as exc:
+        logger.exception("Unhandled streaming orchestration error")
+        yield {
+            "event_type": "error",
+            "data": {"message": f"Error processing request: {exc}"},
+        }
+        return
+
+    if action_cap_reached:
+        yield {
+            "event_type": "error",
+            "data": {
+                "message": (
+                    f"Execution stopped after {MCP_MAX_ACTIONS} tool calls for safety. "
+                    "Please split your request into smaller steps."
+                )
+            },
+        }
+        return
+
+    if not final_message:
+        final_message = _find_final_message(latest_messages)
+
+    setup_summary = _format_setup_notes(setup_notes)
+    if setup_summary:
+        final_message = f"{final_message}\n\n{setup_summary}"
+
+    total_tasks = task_plan.total if task_plan.tasks else len(actions_taken)
+    completed_tasks = task_plan.completed if task_plan.tasks else sum(1 for a in actions_taken if a.success)
+    failed_tasks = task_plan.failed if task_plan.tasks else sum(1 for a in actions_taken if not a.success)
+
+    elapsed = time.perf_counter() - started_at
+    logger.info(
+        "Streaming chat completed in %.2fs with %d tool actions (completed=%d failed=%d)",
+        elapsed,
+        len(actions_taken),
+        completed_tasks,
+        failed_tasks,
+    )
+
+    yield {
+        "event_type": "complete",
+        "data": {
+            "message": final_message,
+            "actions_taken": [action.model_dump() for action in actions_taken],
+            "total_tasks": total_tasks,
+            "completed_tasks": completed_tasks,
+            "failed_tasks": failed_tasks,
+        },
+    }
 
