@@ -38,6 +38,7 @@ llm = ChatOllama(
     model=OLLAMA_MODEL,
     base_url=OLLAMA_BASE_URL,
     temperature=0.1,
+    reasoning=False
 )
 
 # System prompt for the agent
