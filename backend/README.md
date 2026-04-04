@@ -67,6 +67,13 @@ ollama pull qwen3.5:4b
 - `gmail`, `calendar`, `docs`, `sheets`, `slides`, `drive`, `forms`, `meet` -> `MCP_GOOGLE_WORKSPACE_*`
 - `bugasura` -> `MCP_BUGASURA_*`
 
+### MCP Authorization
+
+- Integration secrets are loaded from the user integration rows in the database (decrypted at runtime).
+- For hosted HTTP/SSE MCP endpoints, authorization defaults to Bearer tokens from DB credentials.
+- Optional override per provider: `MCP_<PROVIDER>_AUTH_SCHEME=auto|bearer|basic|none`.
+- If a provider needs custom headers beyond Authorization, use `MCP_<PROVIDER>_HEADERS_JSON`.
+
 ## Reliability Controls
 
 The orchestration service supports runtime limits:

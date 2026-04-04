@@ -227,11 +227,35 @@ def _extract_token(config: dict[str, Any]) -> str:
 
     credentials = config.get("credentials")
     if isinstance(credentials, dict):
-        access_token = str(credentials.get("access_token", "") or "").strip()
-        if access_token:
-            return access_token
+        for key in ("access_token", "token", "bot_token", "user_token", "oauth_token"):
+            token_value = str(credentials.get(key, "") or "").strip()
+            if token_value:
+                return token_value
+
+        authed_user = credentials.get("authed_user")
+        if isinstance(authed_user, dict):
+            token_value = str(authed_user.get("access_token", "") or "").strip()
+            if token_value:
+                return token_value
 
     return ""
+
+
+def _resolve_auth_scheme(service: str) -> str:
+    spec = SERVICE_SPECS.get(service)
+    if not spec:
+        return "bearer"
+
+    raw_scheme = os.getenv(f"{spec.env_prefix}_AUTH_SCHEME", "").strip().lower()
+    if not raw_scheme or raw_scheme == "auto":
+        # Hosted MCP endpoints in this project expect OAuth-style bearer tokens by default.
+        return "bearer"
+
+    if raw_scheme in {"bearer", "basic", "none"}:
+        return raw_scheme
+
+    logger.warning("Invalid auth scheme for %s: %s. Falling back to bearer.", service, raw_scheme)
+    return "bearer"
 
 
 def _parse_custom_headers(env_prefix: str) -> dict[str, str]:
@@ -252,20 +276,30 @@ def _parse_custom_headers(env_prefix: str) -> dict[str, str]:
 
 def _build_auth_headers(service: str, config: dict[str, Any]) -> dict[str, str]:
     headers: dict[str, str] = {}
+    scheme = _resolve_auth_scheme(service)
+
+    if scheme == "none":
+        return headers
+
+    if scheme == "basic":
+        username = ""
+        credentials = config.get("credentials")
+        if isinstance(credentials, dict):
+            username = str(credentials.get("email", "") or credentials.get("username", "") or "").strip()
+
+        password = str(config.get("api_key", "") or "").strip()
+        if not username or not password:
+            logger.warning("Basic auth requested for %s but email/username or api_key is missing", service)
+            return headers
+
+        basic_secret = f"{username}:{password}".encode("utf-8")
+        headers["Authorization"] = f"Basic {base64.b64encode(basic_secret).decode('utf-8')}"
+        return headers
+
     token = _extract_token(config)
 
     if not token:
         return headers
-
-    if service == "jira":
-        credentials = config.get("credentials")
-        email = ""
-        if isinstance(credentials, dict):
-            email = str(credentials.get("email", "") or "").strip()
-        if email and config.get("api_key"):
-            basic_secret = f"{email}:{str(config['api_key'])}".encode("utf-8")
-            headers["Authorization"] = f"Basic {base64.b64encode(basic_secret).decode('utf-8')}"
-            return headers
 
     headers["Authorization"] = f"Bearer {token}"
     return headers
@@ -364,6 +398,53 @@ def _format_setup_notes(setup_notes: list[str]) -> str:
     return f"Some integrations were skipped during MCP setup:\n{notes}"
 
 
+def _unwrap_exception(exc: BaseException) -> BaseException:
+    current: BaseException = exc
+    while True:
+        nested = getattr(current, "exceptions", None)
+        if isinstance(nested, tuple) and nested:
+            first = nested[0]
+            if isinstance(first, BaseException):
+                current = first
+                continue
+
+        cause = getattr(current, "__cause__", None)
+        if isinstance(cause, BaseException):
+            current = cause
+            continue
+
+        context = getattr(current, "__context__", None)
+        suppress_context = bool(getattr(current, "__suppress_context__", False))
+        if not suppress_context and isinstance(context, BaseException):
+            current = context
+            continue
+
+        return current
+
+
+def _summarize_mcp_load_error(exc: BaseException) -> str:
+    root = _unwrap_exception(exc)
+    response = getattr(root, "response", None)
+    status_code = getattr(response, "status_code", None)
+    request = getattr(root, "request", None)
+    request_url = getattr(request, "url", None)
+
+    if isinstance(status_code, int):
+        if status_code == 401:
+            return "401 Unauthorized; reconnect this integration token/credentials"
+        if status_code == 403:
+            return "403 Forbidden; verify token scopes/permissions"
+
+        if request_url:
+            return f"HTTP {status_code} from {request_url}"
+        return f"HTTP {status_code}"
+
+    text = str(root).strip() or root.__class__.__name__
+    if len(text) > 220:
+        return text[:217] + "..."
+    return text
+
+
 async def _load_mcp_tools(
     integration_configs: dict[str, dict[str, Any]],
 ) -> tuple[list[BaseTool], list[str]]:
@@ -378,9 +459,25 @@ async def _load_mcp_tools(
             "langchain-mcp-adapters is not installed. Install backend dependencies before starting the API."
         ) from exc
 
-    client = MultiServerMCPClient(server_configs)
-    tools = await client.get_tools()
-    return tools, setup_notes
+    loaded_tools: list[BaseTool] = []
+
+    for server_name, server_config in server_configs.items():
+        client = MultiServerMCPClient({server_name: server_config})
+        try:
+            server_tools = await client.get_tools()
+        except Exception as exc:
+            error_summary = _summarize_mcp_load_error(exc)
+            logger.warning(
+                "Failed loading MCP tools for server=%s: %s",
+                server_name,
+                error_summary,
+            )
+            setup_notes.append(f"{server_name}: {error_summary}")
+            continue
+
+        loaded_tools.extend(server_tools)
+
+    return loaded_tools, setup_notes
 
 
 def _selected_llm_provider() -> str:
