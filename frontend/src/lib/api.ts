@@ -230,38 +230,42 @@ export async function createConversation(
   userId: number,
   title?: string
 ): Promise<Conversation> {
-  return apiRequest<Conversation>("/api/conversations", {
+  return apiRequest<Conversation>(`/api/users/${userId}/conversations`, {
     method: "POST",
-    body: JSON.stringify({ user_id: userId, title }),
+    body: JSON.stringify({ title: title || "New Conversation" }),
   });
 }
 
 export async function getUserConversations(
   userId: number
 ): Promise<ConversationList> {
-  return apiRequest<ConversationList>(`/api/conversations/${userId}`);
+  const conversations = await apiRequest<Conversation[]>(`/api/users/${userId}/conversations`);
+  return { conversations, total: conversations.length };
 }
 
 export async function getConversationMessages(
+  userId: number,
   conversationId: number
 ): Promise<Message[]> {
-  return apiRequest<Message[]>(`/api/conversations/${conversationId}/messages`);
+  return apiRequest<Message[]>(`/api/users/${userId}/conversations/${conversationId}/messages`);
 }
 
 export async function updateConversationTitle(
+  userId: number,
   conversationId: number,
   title: string
 ): Promise<Conversation> {
-  return apiRequest<Conversation>(`/api/conversations/${conversationId}`, {
+  return apiRequest<Conversation>(`/api/users/${userId}/conversations/${conversationId}`, {
     method: "PUT",
     body: JSON.stringify({ title }),
   });
 }
 
 export async function deleteConversation(
+  userId: number,
   conversationId: number
 ): Promise<void> {
-  return apiRequest<void>(`/api/conversations/${conversationId}`, {
+  return apiRequest<void>(`/api/users/${userId}/conversations/${conversationId}`, {
     method: "DELETE",
   });
 }
@@ -440,20 +444,20 @@ export async function setGeminiKey(
   userId: number,
   apiKey: string
 ): Promise<GeminiKeyStatus> {
-  return apiRequest<GeminiKeyStatus>("/api/settings/gemini-key", {
+  return apiRequest<GeminiKeyStatus>(`/api/users/${userId}/settings/gemini-key`, {
     method: "POST",
-    body: JSON.stringify({ user_id: userId, api_key: apiKey }),
+    body: JSON.stringify({ api_key: apiKey }),
   });
 }
 
 export async function checkGeminiKey(userId: number): Promise<GeminiKeyStatus> {
-  return apiRequest<GeminiKeyStatus>(`/api/settings/gemini-key/${userId}`);
+  return apiRequest<GeminiKeyStatus>(`/api/users/${userId}/settings`);
 }
 
 export async function deleteGeminiKey(
   userId: number
 ): Promise<GeminiKeyStatus> {
-  return apiRequest<GeminiKeyStatus>(`/api/settings/gemini-key/${userId}`, {
+  return apiRequest<GeminiKeyStatus>(`/api/users/${userId}/settings/gemini-key`, {
     method: "DELETE",
   });
 }

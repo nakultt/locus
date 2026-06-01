@@ -17,7 +17,7 @@ app = FastAPI(title="Locus AI Service")
 async def health_check():
     return {"status": "ok"}
 
-@app.post("/chat", response_model=ChatResponse)
+@app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     if not settings.google_api_key:
         raise HTTPException(status_code=500, detail="Google API key not configured")
@@ -43,7 +43,7 @@ async def chat(request: ChatRequest):
         actions_taken=final_state.get("actions_taken", [])
     )
 
-@app.post("/chat/stream")
+@app.post("/api/chat/stream")
 async def chat_stream(request: ChatRequest):
     if not settings.google_api_key:
         raise HTTPException(status_code=500, detail="Google API key not configured")

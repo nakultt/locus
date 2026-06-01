@@ -235,10 +235,10 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
   // Load existing messages when conversationId changes
   useEffect(() => {
     const loadMessages = async () => {
-      if (initialConversationId) {
+      if (initialConversationId && user?.id) {
         setIsLoadingHistory(true);
         try {
-          const apiMessages = await getConversationMessages(initialConversationId);
+          const apiMessages = await getConversationMessages(user.id, initialConversationId);
           const loadedMessages: Message[] = apiMessages.map((msg: ApiMessage) => ({
             id: msg.id.toString(),
             role: msg.role as "user" | "assistant",
@@ -259,7 +259,7 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
       }
     };
     loadMessages();
-  }, [initialConversationId]);
+  }, [initialConversationId, user?.id]);
 
   // Cleanup abort on unmount
   useEffect(() => {
