@@ -22,6 +22,8 @@ pub enum AppError {
     CryptoError,
     #[error("Internal server error: {0}")]
     Internal(String),
+    #[error("Bad request: {0}")]
+    BadRequest(String),
 }
 
 impl IntoResponse for AppError {
@@ -30,6 +32,7 @@ impl IntoResponse for AppError {
             AppError::UserNotFound => (StatusCode::NOT_FOUND, self.to_string()),
             AppError::InvalidCredentials => (StatusCode::UNAUTHORIZED, self.to_string()),
             AppError::CryptoError => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
+            AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
             AppError::Database(_) | AppError::Bson(_) | AppError::Config(_) | AppError::Internal(_) => {
                 error!("Internal error: {:?}", self);
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string())

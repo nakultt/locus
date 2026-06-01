@@ -46,25 +46,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/auth/login", post(handler::auth::login))
         
         // Integrations
-        .route("/api/users/:user_id/integrations", post(handler::integrations::create_integration))
-        .route("/api/users/:user_id/integrations", get(handler::integrations::list_integrations))
-        .route("/api/users/:user_id/integrations/:id", get(handler::integrations::get_integration))
-        .route("/api/users/:user_id/integrations/:id", axum::routing::delete(handler::integrations::delete_integration))
+        .route("/api/users/{user_id}/integrations", post(handler::integrations::create_integration))
+        .route("/api/users/{user_id}/integrations", get(handler::integrations::list_integrations))
+        .route("/api/users/{user_id}/integrations/{id}", get(handler::integrations::get_integration))
+        .route("/api/users/{user_id}/integrations/{id}", axum::routing::delete(handler::integrations::delete_integration))
         
         // Conversations
-        .route("/api/users/:user_id/conversations", post(handler::conversations::create_conversation))
-        .route("/api/users/:user_id/conversations", get(handler::conversations::list_conversations))
-        .route("/api/users/:user_id/conversations/:id", axum::routing::delete(handler::conversations::delete_conversation))
-        .route("/api/users/:user_id/conversations/:id/messages", post(handler::conversations::add_message))
-        .route("/api/users/:user_id/conversations/:id/messages", get(handler::conversations::list_conversations))
+        .route("/api/users/{user_id}/conversations", post(handler::conversations::create_conversation))
+        .route("/api/users/{user_id}/conversations", get(handler::conversations::list_conversations))
+        .route("/api/users/{user_id}/conversations/{id}", axum::routing::delete(handler::conversations::delete_conversation))
+        .route("/api/users/{user_id}/conversations/{id}/messages", post(handler::conversations::add_message))
+        .route("/api/users/{user_id}/conversations/{id}/messages", get(handler::conversations::list_conversations))
         
         // Settings
-        .route("/api/users/:user_id/settings", get(handler::settings::get_settings))
-        .route("/api/users/:user_id/settings/gemini-key", post(handler::settings::update_settings))
-        .route("/api/users/:user_id/settings/gemini-key", get(handler::settings::get_gemini_key))
+        .route("/api/users/{user_id}/settings", get(handler::settings::get_settings))
+        .route("/api/users/{user_id}/settings/gemini-key", post(handler::settings::update_settings))
+        .route("/api/users/{user_id}/settings/gemini-key", get(handler::settings::get_gemini_key))
 
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
         .layer(CompressionLayer::new())
         .layer(TimeoutLayer::new(std::time::Duration::from_secs(30)))
         .with_state(app_state);

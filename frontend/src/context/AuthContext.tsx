@@ -34,6 +34,22 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 const STORAGE_KEY = "locus_user";
 const REMEMBER_KEY = "locus_remember";
 
+function setCookie(name: string, value: string, days?: number) {
+  if (typeof window === "undefined") return;
+  let expires = "";
+  if (days) {
+    const date = new Date();
+    date.setTime(date.getTime() + (days * 24 * 60 * 60 * 1000));
+    expires = "; expires=" + date.toUTCString();
+  }
+  document.cookie = name + "=" + (value || "") + expires + "; path=/";
+}
+
+function deleteCookie(name: string) {
+  if (typeof window === "undefined") return;
+  document.cookie = name + "=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
+}
+
 // ============== Provider ==============
 
 function getStoredUser(): User | null {
@@ -74,6 +90,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Save user to appropriate storage whenever it changes
   useEffect(() => {
     if (user) {
+      if (user.token) {
+        setCookie("auth_token", user.token, rememberMe ? 30 : undefined);
+      }
       if (rememberMe) {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(user));
         localStorage.setItem(REMEMBER_KEY, "true");
@@ -84,6 +103,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         localStorage.removeItem(REMEMBER_KEY);
       }
     } else {
+      deleteCookie("auth_token");
       localStorage.removeItem(STORAGE_KEY);
       localStorage.removeItem(REMEMBER_KEY);
       sessionStorage.removeItem(STORAGE_KEY);

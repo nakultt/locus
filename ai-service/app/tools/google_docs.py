@@ -221,12 +221,12 @@ def docs_append_content(document_id: str, content: str) -> str:
         return f"❌ Error appending content: {str(e)}"
 
 
-def get_google_docs_tools(credentials_dict: dict[str, Any] = None) -> list[BaseTool]:
+def get_docs_tools(credentials: dict[str, Any] = None) -> list[BaseTool]:
     """
     Get LangChain tools for Google Docs integration.
     
     Args:
-        credentials_dict: OAuth credentials dict containing access_token, refresh_token, etc.
+        credentials: OAuth credentials dict containing access_token, refresh_token, etc.
         
     Returns:
         List of Google Docs tools
@@ -235,7 +235,7 @@ def get_google_docs_tools(credentials_dict: dict[str, Any] = None) -> list[BaseT
     
     import os
     _docs_config = {
-        "credentials": credentials_dict,
+        "credentials": credentials,
         "client_id": os.getenv("GOOGLE_CLIENT_ID", ""),
         "client_secret": os.getenv("GOOGLE_CLIENT_SECRET", ""),
     }

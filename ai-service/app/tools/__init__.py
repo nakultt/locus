@@ -14,12 +14,12 @@ from .notion import get_notion_tools
 from .github import get_github_tools
 from .linear import get_linear_tools
 from .bugasura import get_bugasura_tools
-from .google_docs import get_google_docs_tools
-from .google_sheets import get_google_sheets_tools
-from .google_slides import get_google_slides_tools
-from .google_drive import get_google_drive_tools
-from .google_forms import get_google_forms_tools
-from .google_meet import get_google_meet_tools
+from .google_docs import get_docs_tools as get_google_docs_tools
+from .google_sheets import get_sheets_tools as get_google_sheets_tools
+from .google_slides import get_slides_tools as get_google_slides_tools
+from .google_drive import get_drive_tools as get_google_drive_tools
+from .google_forms import get_forms_tools as get_google_forms_tools
+from .google_meet import get_meet_tools as get_google_meet_tools
 
 def get_all_tools(configs: Dict[str, Any]) -> List[BaseTool]:
     """
@@ -65,21 +65,21 @@ def get_all_tools(configs: Dict[str, Any]) -> List[BaseTool]:
             elif provider in ["gmail", "calendar", "google_docs", "google_sheets", "google_slides", "google_drive", "google_forms", "google_meet"]:
                 # Note: Assuming all google tools take the same OAuth token dictionary
                 if provider == "gmail":
-                    tools.extend(get_gmail_tools(credentials_dict=config))
+                    tools.extend(get_gmail_tools(credentials=config))
                 elif provider == "calendar":
-                    tools.extend(get_calendar_tools(credentials_dict=config))
+                    tools.extend(get_calendar_tools(credentials=config))
                 elif provider == "google_docs":
-                    tools.extend(get_google_docs_tools(credentials_dict=config))
+                    tools.extend(get_google_docs_tools(credentials=config))
                 elif provider == "google_sheets":
-                    tools.extend(get_google_sheets_tools(credentials_dict=config))
+                    tools.extend(get_google_sheets_tools(credentials=config))
                 elif provider == "google_slides":
-                    tools.extend(get_google_slides_tools(credentials_dict=config))
+                    tools.extend(get_google_slides_tools(credentials=config))
                 elif provider == "google_drive":
-                    tools.extend(get_google_drive_tools(credentials_dict=config))
+                    tools.extend(get_google_drive_tools(credentials=config))
                 elif provider == "google_forms":
-                    tools.extend(get_google_forms_tools(credentials_dict=config))
+                    tools.extend(get_google_forms_tools(credentials=config))
                 elif provider == "google_meet":
-                    tools.extend(get_google_meet_tools(credentials_dict=config))
+                    tools.extend(get_google_meet_tools(credentials=config))
                     
         except Exception as e:
             logger.error("failed_to_initialize_tools", provider=provider, error=str(e))

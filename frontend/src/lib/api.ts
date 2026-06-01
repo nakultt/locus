@@ -4,7 +4,7 @@
  */
 
 // API Base URL - change this when deploying
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
 
 // ============== Types ==============
 
@@ -141,7 +141,7 @@ export async function signup(
   password: string,
   name?: string
 ): Promise<User> {
-  return apiRequest<User>("/auth/signup", {
+  return apiRequest<User>("/auth/register", {
     method: "POST",
     body: JSON.stringify({ email, password, name }),
   });
@@ -174,33 +174,33 @@ export async function updateUser(userId: number, data: UserUpdate): Promise<User
 // ============== Integration API ==============
 
 export async function connectIntegration(
-  userId: number,
+  userId: string | number,
   serviceName: string,
   apiKey?: string,
   credentials?: Record<string, unknown>
 ): Promise<Integration> {
-  return apiRequest<Integration>("/auth/connect", {
+  return apiRequest<Integration>(`/api/users/${userId}/integrations`, {
     method: "POST",
     body: JSON.stringify({
-      user_id: userId,
-      service_name: serviceName,
-      api_key: apiKey,
-      credentials,
+      user_id: String(userId),
+      provider: serviceName,
+      credentials_json: JSON.stringify(credentials || { api_key: apiKey }),
     }),
   });
 }
 
 export async function listIntegrations(
-  userId: number
+  userId: string | number
 ): Promise<IntegrationList> {
-  return apiRequest<IntegrationList>(`/auth/integrations/${userId}`);
+  const integrations = await apiRequest<Integration[]>(`/api/users/${userId}/integrations`);
+  return { integrations, total: integrations.length };
 }
 
 export async function disconnectIntegration(
-  userId: number,
-  serviceName: string
+  userId: string | number,
+  integrationId: string
 ): Promise<void> {
-  return apiRequest<void>(`/auth/disconnect/${userId}/${serviceName}`, {
+  return apiRequest<void>(`/api/users/${userId}/integrations/${integrationId}`, {
     method: "DELETE",
   });
 }
