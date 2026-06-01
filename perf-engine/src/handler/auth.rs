@@ -32,7 +32,7 @@ pub async fn register(
     Json(payload): Json<RegisterRequest>,
 ) -> Result<Json<AuthResponse>, AppError> {
     if state.db.get_user_by_email(&payload.email).await?.is_some() {
-        return Err(AppError::Internal("User already exists".to_string()));
+        return Err(AppError::BadRequest("User already exists".to_string()));
     }
 
     let password_hash = state.crypto.hash_password(&payload.password)?;

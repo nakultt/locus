@@ -401,7 +401,7 @@ export default function IntegrationsSection() {
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   // API Base URL
-  const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
 
   // Handle OAuth callback URL parameters
   useEffect(() => {
