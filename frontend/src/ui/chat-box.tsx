@@ -202,7 +202,7 @@ const ChatMessage = ({ message }: { message: Message }) => {
 
 // Main Chat Interface component
 interface ChatInterfaceProps {
-  conversationId?: number;
+  conversationId?: string;
 }
 
 const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceProps) => {
@@ -219,7 +219,7 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
   // Live streaming state
   const [currentStatus, setCurrentStatus] = useState<string>("");
   const [liveTasks, setLiveTasks] = useState<LiveTask[]>([]);
-  const [currentConversationId, setCurrentConversationId] = useState<number | undefined>(initialConversationId);
+  const [currentConversationId, setCurrentConversationId] = useState<string | undefined>(initialConversationId);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -360,7 +360,7 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
       (event: StreamEvent) => {
         // Capture conversation_id from any event
         if (event.data?.conversation_id && !currentConversationId) {
-          setCurrentConversationId(event.data.conversation_id as number);
+          setCurrentConversationId(event.data.conversation_id as string);
         }
         
         switch (event.event_type) {

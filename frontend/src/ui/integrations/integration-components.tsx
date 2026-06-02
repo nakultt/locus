@@ -389,8 +389,8 @@ const OAuthConnectModal = ({
 // Main Component
 export default function IntegrationsSection() {
   const { user } = useAuth();
-  const [connectedServices, setConnectedServices] = useState<Set<string>>(
-    new Set()
+  const [connectedServices, setConnectedServices] = useState<Map<string, string>>(
+    new Map()
   );
   const [loadingService, setLoadingService] = useState<string | null>(null);
   const [modalIntegration, setModalIntegration] = useState<
@@ -417,8 +417,8 @@ export default function IntegrationsSection() {
       // Refresh integrations list
       if (user?.id) {
         listIntegrations(user.id).then((result) => {
-          const connected = new Set(
-            result.integrations.map((i: Integration) => i.service_name)
+          const connected = new Map(
+            result.integrations.map((i: Integration) => [i.provider, i.id])
           );
           setConnectedServices(connected);
         });
@@ -441,8 +441,8 @@ export default function IntegrationsSection() {
 
       try {
         const result = await listIntegrations(user.id);
-        const connected = new Set(
-          result.integrations.map((i: Integration) => i.service_name)
+        const connected = new Map(
+          result.integrations.map((i: Integration) => [i.provider, i.id])
         );
         setConnectedServices(connected);
       } catch (err) {
@@ -490,7 +490,18 @@ export default function IntegrationsSection() {
         apiKey,
         credentials
       );
-      setConnectedServices((prev) => new Set([...prev, modalIntegration.id]));
+      setConnectedServices((prev) => {
+        const next = new Map(prev);
+        // Since we don't have the new ID here, we just need to refresh the list afterwards or temporarily set a dummy ID
+        // Better to just refetch the list
+        listIntegrations(user.id).then((result) => {
+          const connected = new Map(
+            result.integrations.map((i: Integration) => [i.provider, i.id])
+          );
+          setConnectedServices(connected);
+        });
+        return next;
+      });
       setModalIntegration(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to connect");
@@ -499,15 +510,18 @@ export default function IntegrationsSection() {
     }
   };
 
-  const handleDisconnect = async (serviceId: string) => {
+  const handleDisconnect = async (provider: string) => {
     if (!user?.id) return;
+    
+    const integrationId = connectedServices.get(provider);
+    if (!integrationId) return;
 
-    setLoadingService(serviceId);
+    setLoadingService(provider);
     try {
-      await disconnectIntegration(user.id, serviceId);
+      await disconnectIntegration(user.id, integrationId);
       setConnectedServices((prev) => {
-        const next = new Set(prev);
-        next.delete(serviceId);
+        const next = new Map(prev);
+        next.delete(provider);
         return next;
       });
     } catch (err) {

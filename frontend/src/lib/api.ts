@@ -9,7 +9,7 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
 // ============== Types ==============
 
 export interface User {
-  id: number;
+  id: string;
   email: string;
   name?: string;
   token?: string;
@@ -32,11 +32,8 @@ export interface ChatResponse {
 }
 
 export interface Integration {
-  id: number;
-  service_name: string;
-  owner_id: number;
-  created_at?: string;
-  is_connected: boolean;
+  id: string;
+  provider: string;
 }
 
 export interface IntegrationList {
@@ -50,9 +47,9 @@ export interface ApiError {
 }
 
 export interface Conversation {
-  id: number;
+  id: string;
   title: string;
-  owner_id: number;
+  owner_id: string;
   created_at: string;
   updated_at?: string;
 }
@@ -63,8 +60,8 @@ export interface ConversationList {
 }
 
 export interface Message {
-  id: number;
-  conversation_id: number;
+  id: string;
+  conversation_id: string;
   role: "user" | "assistant";
   content: string;
   actions_taken?: ActionResult[];
@@ -164,7 +161,7 @@ export interface UserUpdate {
   name?: string;
 }
 
-export async function updateUser(userId: number, data: UserUpdate): Promise<User> {
+export async function updateUser(userId: string, data: UserUpdate): Promise<User> {
   return apiRequest<User>(`/auth/user/${userId}`, {
     method: "PUT",
     body: JSON.stringify(data),
@@ -174,7 +171,7 @@ export async function updateUser(userId: number, data: UserUpdate): Promise<User
 // ============== Integration API ==============
 
 export async function connectIntegration(
-  userId: string | number,
+  userId: string,
   serviceName: string,
   apiKey?: string,
   credentials?: Record<string, unknown>
@@ -190,14 +187,14 @@ export async function connectIntegration(
 }
 
 export async function listIntegrations(
-  userId: string | number
+  userId: string
 ): Promise<IntegrationList> {
   const integrations = await apiRequest<Integration[]>(`/api/users/${userId}/integrations`);
   return { integrations, total: integrations.length };
 }
 
 export async function disconnectIntegration(
-  userId: string | number,
+  userId: string,
   integrationId: string
 ): Promise<void> {
   return apiRequest<void>(`/api/users/${userId}/integrations/${integrationId}`, {
@@ -208,10 +205,10 @@ export async function disconnectIntegration(
 // ============== Chat API ==============
 
 export async function sendChatMessage(
-  userId: number,
+  userId: string,
   message: string,
   smartMode: boolean = false,
-  conversationId?: number
+  conversationId?: string
 ): Promise<ChatResponse> {
   return apiRequest<ChatResponse>("/api/chat", {
     method: "POST",
@@ -227,7 +224,7 @@ export async function sendChatMessage(
 // ============== Conversations API ==============
 
 export async function createConversation(
-  userId: number,
+  userId: string,
   title?: string
 ): Promise<Conversation> {
   return apiRequest<Conversation>(`/api/users/${userId}/conversations`, {
@@ -237,22 +234,22 @@ export async function createConversation(
 }
 
 export async function getUserConversations(
-  userId: number
+  userId: string
 ): Promise<ConversationList> {
   const conversations = await apiRequest<Conversation[]>(`/api/users/${userId}/conversations`);
   return { conversations, total: conversations.length };
 }
 
 export async function getConversationMessages(
-  userId: number,
-  conversationId: number
+  userId: string,
+  conversationId: string
 ): Promise<Message[]> {
   return apiRequest<Message[]>(`/api/users/${userId}/conversations/${conversationId}/messages`);
 }
 
 export async function updateConversationTitle(
-  userId: number,
-  conversationId: number,
+  userId: string,
+  conversationId: string,
   title: string
 ): Promise<Conversation> {
   return apiRequest<Conversation>(`/api/users/${userId}/conversations/${conversationId}`, {
@@ -262,8 +259,8 @@ export async function updateConversationTitle(
 }
 
 export async function deleteConversation(
-  userId: number,
-  conversationId: number
+  userId: string,
+  conversationId: string
 ): Promise<void> {
   return apiRequest<void>(`/api/users/${userId}/conversations/${conversationId}`, {
     method: "DELETE",
@@ -320,7 +317,7 @@ export interface StreamEvent {
     total_tasks?: number;
     completed_tasks?: number;
     failed_tasks?: number;
-    conversation_id?: number;
+    conversation_id?: string;
   };
 }
 
@@ -337,12 +334,12 @@ export interface StreamEvent {
  * @returns Abort function to cancel the stream
  */
 export function streamChatMessage(
-  userId: number,
+  userId: string,
   message: string,
   onEvent: (event: StreamEvent) => void,
   onError: (error: Error) => void,
   onComplete: () => void,
-  conversationId?: number
+  conversationId?: string
 ): () => void {
   const abortController = new AbortController();
 
@@ -441,7 +438,7 @@ export interface GeminiKeyStatus {
 }
 
 export async function setGeminiKey(
-  userId: number,
+  userId: string,
   apiKey: string
 ): Promise<GeminiKeyStatus> {
   return apiRequest<GeminiKeyStatus>(`/api/users/${userId}/settings/gemini-key`, {
@@ -450,12 +447,12 @@ export async function setGeminiKey(
   });
 }
 
-export async function checkGeminiKey(userId: number): Promise<GeminiKeyStatus> {
+export async function checkGeminiKey(userId: string): Promise<GeminiKeyStatus> {
   return apiRequest<GeminiKeyStatus>(`/api/users/${userId}/settings`);
 }
 
 export async function deleteGeminiKey(
-  userId: number
+  userId: string
 ): Promise<GeminiKeyStatus> {
   return apiRequest<GeminiKeyStatus>(`/api/users/${userId}/settings/gemini-key`, {
     method: "DELETE",
