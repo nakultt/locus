@@ -1,4 +1,6 @@
-use axum::{extract::State, Json};
+use axum::{extract::{Path, State}, Json};
+use bson::oid::ObjectId;
+use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
@@ -77,6 +79,39 @@ pub async fn login(
     let id_str = user.id.unwrap().to_hex();
     let token = state.crypto.create_jwt(&id_str, &user.email)?;
 
+    Ok(Json(AuthResponse {
+        id: id_str,
+        email: user.email,
+        name: user.name,
+        token,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateUserRequest {
+    pub email: Option<String>,
+    pub password: Option<String>,
+    pub name: Option<String>,
+}
+
+#[tracing::instrument(skip(state, payload))]
+pub async fn update_user(
+    State(state): State<SharedState>,
+    Path(id_str): Path<String>,
+    Json(payload): Json<UpdateUserRequest>,
+) -> Result<Json<AuthResponse>, AppError> {
+    let user_id = ObjectId::from_str(&id_str).map_err(|_| AppError::Internal("Invalid user_id".into()))?;
+    
+    let mut password_hash = None;
+    if let Some(ref pwd) = payload.password {
+        password_hash = Some(state.crypto.hash_password(pwd)?);
+    }
+    
+    state.db.update_user(user_id, payload.email, payload.name, password_hash).await?;
+    
+    let user = state.db.get_user_by_id(user_id).await?.ok_or_else(|| AppError::Internal("User not found".into()))?;
+    let token = state.crypto.create_jwt(&id_str, &user.email)?;
+    
     Ok(Json(AuthResponse {
         id: id_str,
         email: user.email,

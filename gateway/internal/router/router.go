@@ -31,8 +31,12 @@ func New(cfg *config.Config, rustClient *client.RustClient, pythonClient *client
 
 	// Proxy to Rust for Auth
 	rustProxy := handler.NewProxy(cfg.RustServiceURL)
-	r.Mount("/auth/register", rustProxy)
-	r.Mount("/auth/login", rustProxy)
+	r.Handle("/auth/register", rustProxy)
+	r.Handle("/auth/register/*", rustProxy)
+	r.Handle("/auth/login", rustProxy)
+	r.Handle("/auth/login/*", rustProxy)
+	r.Handle("/auth/user", rustProxy)
+	r.Handle("/auth/user/*", rustProxy)
 
 	// Protected routes
 	r.Group(func(r chi.Router) {
@@ -46,11 +50,15 @@ func New(cfg *config.Config, rustClient *client.RustClient, pythonClient *client
 		r.Get("/auth/linear/callback", oauthHandler.LinearCallback())
 
 		// API routes to Rust
-		r.Mount("/api/users", rustProxy)
+		r.Handle("/api/users", rustProxy)
+		r.Handle("/api/users/*", rustProxy)
 		
 		// API routes to Python (chat)
 		pythonProxy := handler.NewProxy(cfg.PythonServiceURL)
-		r.Mount("/api/chat", pythonProxy)
+		r.Handle("/api/chat", pythonProxy)
+		r.Handle("/api/chat/*", pythonProxy)
+		r.Handle("/api/supported-commands", pythonProxy)
+		r.Handle("/api/supported-commands/*", pythonProxy)
 	})
 
 	return r

@@ -5,6 +5,8 @@ class ChatRequest(BaseModel):
     user_id: str
     message: str
     integration_configs: Dict[str, Any] = Field(default_factory=dict)
+    conversation_id: Optional[str] = None
+    smart_mode: Optional[bool] = False
     
 class ActionTaken(BaseModel):
     tool_name: str

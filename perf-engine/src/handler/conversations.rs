@@ -102,6 +102,29 @@ pub async fn delete_conversation(
     Ok(Json(()))
 }
 
+#[derive(Deserialize)]
+pub struct UpdateConversationRequest {
+    pub title: String,
+}
+
+pub async fn update_conversation(
+    State(state): State<SharedState>,
+    Path((user_id_str, id_str)): Path<(String, String)>,
+    Json(payload): Json<UpdateConversationRequest>,
+) -> Result<Json<ConversationResponse>, AppError> {
+    let user_id = ObjectId::from_str(&user_id_str).map_err(|_| AppError::Internal("Invalid user_id".into()))?;
+    let id = ObjectId::from_str(&id_str).map_err(|_| AppError::Internal("Invalid id".into()))?;
+
+    state.db.update_conversation_title(id, user_id, payload.title).await?;
+    let doc = state.db.get_conversation(id, user_id).await?.ok_or_else(|| AppError::Internal("Conversation not found".into()))?;
+
+    Ok(Json(ConversationResponse {
+        id: doc.id.unwrap().to_hex(),
+        title: doc.title,
+        created_at: doc.created_at.to_rfc3339(),
+    }))
+}
+
 pub async fn add_message(
     State(state): State<SharedState>,
     Path((user_id_str, id_str)): Path<(String, String)>,

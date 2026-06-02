@@ -78,6 +78,25 @@ pub async fn list_integrations(
     Ok(Json(res))
 }
 
+pub async fn get_all_integration_credentials(
+    State(state): State<SharedState>,
+    Path(user_id_str): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let user_id = ObjectId::from_str(&user_id_str).map_err(|_| AppError::Internal("Invalid user_id".into()))?;
+    let docs = state.db.get_integrations_by_user(user_id).await?;
+    
+    let mut configs = serde_json::Map::new();
+    for doc in docs {
+        if let Ok(decrypted) = state.crypto.decrypt(&doc.credentials_encrypted) {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&decrypted) {
+                configs.insert(doc.provider, parsed);
+            }
+        }
+    }
+
+    Ok(Json(serde_json::Value::Object(configs)))
+}
+
 pub async fn get_integration(
     State(state): State<SharedState>,
     Path((user_id_str, id_str)): Path<(String, String)>,

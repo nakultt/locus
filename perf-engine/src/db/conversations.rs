@@ -30,6 +30,13 @@ impl Database {
         Ok(self.conversations.find_one(doc! { "_id": id, "user_id": user_id }).await?)
     }
 
+    pub async fn update_conversation_title(&self, id: ObjectId, user_id: ObjectId, title: String) -> Result<mongodb::results::UpdateResult, AppError> {
+        Ok(self.conversations.update_one(
+            doc! { "_id": id, "user_id": user_id },
+            doc! { "$set": { "title": title, "updated_at": bson::DateTime::now() } }
+        ).await?)
+    }
+
     pub async fn delete_conversation(&self, id: ObjectId, user_id: ObjectId) -> Result<DeleteResult, AppError> {
         // also delete messages
         self.messages.delete_many(doc! { "conversation_id": id }).await?;
