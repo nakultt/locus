@@ -23,6 +23,7 @@ async def create_agent_graph(
             model=settings.ollama_model,
             base_url=settings.ollama_base_url,
             temperature=0.1,
+            think=False,
         ).bind_tools(tools)
     else:
         model_name = "gemini-2.5-pro" if smart_mode else "gemini-2.5-flash"
