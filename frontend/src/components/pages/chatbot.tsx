@@ -8,7 +8,7 @@ export default function Chatbot() {
   
   return (
     <ChatInterface
-      conversationId={conversationId ? parseInt(conversationId, 10) : undefined}
+      conversationId={conversationId || undefined}
     />
   );
 }

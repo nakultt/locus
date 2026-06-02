@@ -31,14 +31,7 @@ impl Database {
         let update = doc! {
             "$set": {
                 "credentials_encrypted": encrypted_creds,
-                "updated_at": chrono::Utc::now().to_rfc3339() // In BSON we can just pass Date or strings, chrono handles it mostly but usually needs DateTime
-            }
-        };
-        // using bson::DateTime
-        let update = doc! {
-            "$set": {
-                "credentials_encrypted": encrypted_creds,
-                "updated_at": bson::DateTime::now()
+                "updated_at": chrono::Utc::now().to_rfc3339()
             }
         };
         Ok(self.integrations.update_one(doc! { "_id": id, "user_id": user_id }, update).await?)
