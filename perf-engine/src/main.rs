@@ -44,14 +44,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/health", get(handler::health::health_check))
         .route("/auth/register", post(handler::auth::register))
         .route("/auth/login", post(handler::auth::login))
+        .route("/auth/user/{id}", axum::routing::put(handler::auth::update_user))
         
         // Integrations
         .route("/api/users/{user_id}/integrations", post(handler::integrations::create_integration).get(handler::integrations::list_integrations))
+        .route("/api/users/{user_id}/integrations/credentials", get(handler::integrations::get_all_integration_credentials))
         .route("/api/users/{user_id}/integrations/{id}", get(handler::integrations::get_integration).delete(handler::integrations::delete_integration))
         
         // Conversations
         .route("/api/users/{user_id}/conversations", post(handler::conversations::create_conversation).get(handler::conversations::list_conversations))
-        .route("/api/users/{user_id}/conversations/{id}", axum::routing::delete(handler::conversations::delete_conversation))
+        .route("/api/users/{user_id}/conversations/{id}", axum::routing::put(handler::conversations::update_conversation).delete(handler::conversations::delete_conversation))
         .route("/api/users/{user_id}/conversations/{id}/messages", post(handler::conversations::add_message).get(handler::conversations::list_messages))
         
         // Settings

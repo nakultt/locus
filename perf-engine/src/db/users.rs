@@ -16,4 +16,22 @@ impl Database {
     pub async fn get_user_by_id(&self, id: ObjectId) -> Result<Option<UserDoc>, AppError> {
         Ok(self.users.find_one(doc! { "_id": id }).await?)
     }
+
+    pub async fn update_user(&self, id: ObjectId, email: Option<String>, name: Option<String>, password_hash: Option<String>) -> Result<mongodb::results::UpdateResult, AppError> {
+        let mut update_doc = bson::Document::new();
+        if let Some(e) = email {
+            update_doc.insert("email", e);
+        }
+        if let Some(n) = name {
+            update_doc.insert("name", n);
+        }
+        if let Some(p) = password_hash {
+            update_doc.insert("password_hash", p);
+        }
+        
+        Ok(self.users.update_one(
+            doc! { "_id": id },
+            doc! { "$set": update_doc }
+        ).await?)
+    }
 }
