@@ -4,6 +4,8 @@ import structlog
 from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_ollama import ChatOllama
+from app.config import settings
 
 from app.graph.state import AgentState
 
@@ -16,12 +18,19 @@ async def create_agent_graph(
 ):
     """Build a LangGraph StateGraph for multi-tool agent execution."""
     
-    model_name = "gemini-2.5-pro" if smart_mode else "gemini-2.5-flash"
-    llm = ChatGoogleGenerativeAI(
-        model=model_name,
-        google_api_key=api_key,
-        temperature=0.1,
-    ).bind_tools(tools)
+    if settings.llm_provider == "ollama":
+        llm = ChatOllama(
+            model=settings.ollama_model,
+            base_url=settings.ollama_base_url,
+            temperature=0.1,
+        ).bind_tools(tools)
+    else:
+        model_name = "gemini-2.5-pro" if smart_mode else "gemini-2.5-flash"
+        llm = ChatGoogleGenerativeAI(
+            model=model_name,
+            google_api_key=api_key,
+            temperature=0.1,
+        ).bind_tools(tools)
 
     async def call_model(state: AgentState) -> dict:
         """LLM decides which tool to call next."""

@@ -39,8 +39,12 @@ services:
       - "8082:8082"
     environment:
       GOOGLE_API_KEY: ${GOOGLE_API_KEY}
+      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3.5:4b}
       LOG_LEVEL: info
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
       interval: 10s

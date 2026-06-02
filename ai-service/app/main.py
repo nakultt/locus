@@ -82,7 +82,7 @@ async def chat(request: ChatRequest):
     user_api_key = await fetch_gemini_key(request.user_id)
     api_key = user_api_key or settings.google_api_key
     
-    if not api_key:
+    if settings.llm_provider != "ollama" and not api_key:
         raise HTTPException(status_code=400, detail="Google API key not configured. Please add it in settings.")
 
     if not request.integration_configs:
@@ -125,7 +125,7 @@ async def chat_stream(request: ChatRequest):
     user_api_key = await fetch_gemini_key(request.user_id)
     api_key = user_api_key or settings.google_api_key
     
-    if not api_key:
+    if settings.llm_provider != "ollama" and not api_key:
         raise HTTPException(status_code=400, detail="Google API key not configured. Please add it in settings.")
 
     if not request.integration_configs:
