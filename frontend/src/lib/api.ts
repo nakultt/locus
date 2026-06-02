@@ -176,12 +176,13 @@ export async function connectIntegration(
   apiKey?: string,
   credentials?: Record<string, unknown>
 ): Promise<Integration> {
+  const mergedCredentials = { ...(credentials || {}), api_key: apiKey };
   return apiRequest<Integration>(`/api/users/${userId}/integrations`, {
     method: "POST",
     body: JSON.stringify({
       user_id: String(userId),
       provider: serviceName,
-      credentials_json: JSON.stringify(credentials || { api_key: apiKey }),
+      credentials_json: JSON.stringify(mergedCredentials),
     }),
   });
 }

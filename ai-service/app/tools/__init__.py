@@ -37,17 +37,17 @@ def get_all_tools(configs: Dict[str, Any]) -> List[BaseTool]:
                 
             if provider == "jira":
                 tools.extend(get_jira_tools(
-                    api_token=config.get("api_token", ""),
+                    api_token=config.get("api_token", config.get("api_key", "")),
                     email=config.get("email", ""),
                     url=config.get("url", "")
                 ))
             elif provider == "github":
                 tools.extend(get_github_tools(
-                    access_token=config.get("access_token", "")
+                    access_token=config.get("access_token", config.get("api_key", ""))
                 ))
             elif provider == "linear":
                 tools.extend(get_linear_tools(
-                    api_key=config.get("api_key", "")
+                    api_key=config.get("api_key", config.get("access_token", ""))
                 ))
             elif provider == "notion":
                 tools.extend(get_notion_tools(
@@ -55,7 +55,7 @@ def get_all_tools(configs: Dict[str, Any]) -> List[BaseTool]:
                 ))
             elif provider == "slack":
                 tools.extend(get_slack_tools(
-                    bot_token=config.get("bot_token", "")
+                    bot_token=config.get("bot_token", config.get("api_key", ""))
                 ))
             elif provider == "bugasura":
                 tools.extend(get_bugasura_tools(
