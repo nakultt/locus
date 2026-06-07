@@ -25,7 +25,7 @@ function LinearCallbackContent() {
     
     const token = localStorage.getItem("locus_auth_token");
     
-    fetch(`http://localhost:8080/auth/linear/callback?code=${code}`, {
+    fetch(`/api/auth/linear/callback?code=${code}`, {
       headers: {
         Authorization: `Bearer ${token}`
       }
