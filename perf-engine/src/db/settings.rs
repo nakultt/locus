@@ -14,7 +14,7 @@ impl Database {
         let update = doc! {
             "$set": {
                 "gemini_key_encrypted": encrypted_key,
-                "updated_at": chrono::Utc::now().to_rfc3339()
+                "updated_at": bson::DateTime::from(chrono::Utc::now())
             }
         };
         let options = UpdateOptions::builder().upsert(true).build();

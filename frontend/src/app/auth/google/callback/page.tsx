@@ -25,7 +25,7 @@ function GoogleCallbackContent() {
     
     const token = localStorage.getItem("locus_auth_token");
     
-    fetch(`http://localhost:8080/auth/google/callback?code=${code}`, {
+    fetch(`/api/auth/google/callback?code=${code}`, {
       headers: {
         Authorization: `Bearer ${token}`
       }

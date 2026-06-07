@@ -16,8 +16,6 @@ services:
 
   perf-engine:
     build: ./perf-engine
-    ports:
-      - "8081:8081"
     environment:
       MONGODB_URI: mongodb://${MONGO_USER:-locus}:${MONGO_PASS:-changeme}@mongodb:27017
       MONGODB_DB: locus
@@ -35,8 +33,6 @@ services:
 
   ai-service:
     build: ./ai-service
-    ports:
-      - "8082:8082"
     environment:
       GOOGLE_API_KEY: ${GOOGLE_API_KEY}
       LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
@@ -65,7 +61,7 @@ services:
       LINEAR_CLIENT_ID: ${LINEAR_CLIENT_ID}
       LINEAR_CLIENT_SECRET: ${LINEAR_CLIENT_SECRET}
       LINEAR_REDIRECT_URI: ${LINEAR_REDIRECT_URI:-http://localhost:8080/auth/linear/callback}
-      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      FRONTEND_URL: ${FRONTEND_URL:-http://frontend:3000}
       LOG_LEVEL: info
     depends_on:
       perf-engine:
@@ -75,8 +71,6 @@ services:
 
   frontend:
     build: ./frontend
-    ports:
-      - "3000:3000"
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
     depends_on:

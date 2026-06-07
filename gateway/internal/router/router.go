@@ -19,7 +19,7 @@ func New(cfg *config.Config, rustClient *client.RustClient, pythonClient *client
 	r.Use(middleware.Logger)
 	r.Use(chimiddleware.Recoverer)
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{cfg.FrontendURL},
+		AllowedOrigins:   []string{"http://localhost:3000", "http://localhost:8080", cfg.FrontendURL},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
 		ExposedHeaders:   []string{"Link"},
@@ -29,25 +29,29 @@ func New(cfg *config.Config, rustClient *client.RustClient, pythonClient *client
 
 	r.Get("/health", handler.HealthCheck())
 
-	// Proxy to Rust for Auth
+	// Proxy to Rust for Auth API
 	rustProxy := handler.NewProxy(cfg.RustServiceURL)
-	r.Handle("/auth/register", rustProxy)
-	r.Handle("/auth/register/*", rustProxy)
-	r.Handle("/auth/login", rustProxy)
-	r.Handle("/auth/login/*", rustProxy)
+	r.Post("/auth/register", rustProxy.ServeHTTP)
+	r.Post("/auth/register/*", rustProxy.ServeHTTP)
+	r.Post("/auth/login", rustProxy.ServeHTTP)
+	r.Post("/auth/login/*", rustProxy.ServeHTTP)
 	r.Handle("/auth/user", rustProxy)
 	r.Handle("/auth/user/*", rustProxy)
+
+	// OAuth flows (Requires auth to associate with user)
+	oauthHandler := handler.NewOAuthHandler(cfg, rustClient)
+	
+	// Public OAuth login initiators
+	r.Get("/auth/google", oauthHandler.GoogleLogin())
+	r.Get("/auth/linear", oauthHandler.LinearLogin())
 
 	// Protected routes
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.JWTAuth(cfg.JWTSecret))
 
-		// OAuth flows (Requires auth to associate with user)
-		oauthHandler := handler.NewOAuthHandler(cfg, rustClient)
-		r.Get("/auth/google/login", oauthHandler.GoogleLogin())
-		r.Get("/auth/google/callback", oauthHandler.GoogleCallback())
-		r.Get("/auth/linear/login", oauthHandler.LinearLogin())
-		r.Get("/auth/linear/callback", oauthHandler.LinearCallback())
+		// OAuth callback APIs
+		r.Get("/api/auth/google/callback", oauthHandler.GoogleCallback())
+		r.Get("/api/auth/linear/callback", oauthHandler.LinearCallback())
 
 		// API routes to Rust
 		r.Handle("/api/users", rustProxy)
@@ -60,6 +64,10 @@ func New(cfg *config.Config, rustClient *client.RustClient, pythonClient *client
 		r.Handle("/api/supported-commands", pythonProxy)
 		r.Handle("/api/supported-commands/*", pythonProxy)
 	})
+
+	// Proxy all unhandled routes to the frontend
+	frontendProxy := handler.NewProxy(cfg.FrontendURL)
+	r.NotFound(frontendProxy.ServeHTTP)
 
 	return r
 }
