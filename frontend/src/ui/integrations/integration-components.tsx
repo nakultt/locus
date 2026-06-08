@@ -470,9 +470,9 @@ export default function IntegrationsSection() {
     }
     // Redirect to appropriate OAuth endpoint based on provider
     if (config.oauthProvider === "linear") {
-      window.location.href = `${apiBaseUrl}/auth/linear?user_id=${user.id}`;
+      window.location.href = `/auth/linear?user_id=${user.id}`;
     } else {
-      window.location.href = `${apiBaseUrl}/auth/google?user_id=${user.id}&service=${config.id}`;
+      window.location.href = `/auth/google?user_id=${user.id}&service=${config.id}`;
     }
   };
 
