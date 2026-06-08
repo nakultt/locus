@@ -28,7 +28,7 @@ impl Database {
         if let Some(p) = password_hash {
             update_doc.insert("password_hash", p);
         }
-        update_doc.insert("updated_at", bson::DateTime::from(chrono::Utc::now()));
+        update_doc.insert("updated_at", chrono::Utc::now().to_rfc3339());
         
         Ok(self.users.update_one(
             doc! { "_id": id },

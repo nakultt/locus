@@ -1,6 +1,5 @@
-use bson::oid::ObjectId;
+use bson::{oid::ObjectId, DateTime};
 use serde::{Deserialize, Serialize};
-use chrono::{DateTime, Utc};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SettingDoc {
@@ -8,5 +7,5 @@ pub struct SettingDoc {
     pub id: Option<ObjectId>,
     pub user_id: ObjectId,
     pub gemini_key_encrypted: Option<String>,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: DateTime,
 }
