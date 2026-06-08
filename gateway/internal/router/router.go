@@ -68,6 +68,7 @@ func New(cfg *config.Config, rustClient *client.RustClient, pythonClient *client
 	// Proxy all unhandled routes to the frontend
 	frontendProxy := handler.NewProxy(cfg.FrontendURL)
 	r.NotFound(frontendProxy.ServeHTTP)
+	r.MethodNotAllowed(frontendProxy.ServeHTTP)
 
 	return r
 }
