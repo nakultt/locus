@@ -14,7 +14,9 @@ func NewProxy(targetURL string) http.Handler {
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		originalDirector(req)
-		req.Host = target.Host // Some servers need the host header to match
+		// We deliberately DO NOT override req.Host so that Next.js knows the correct public URL
+		req.Header.Set("X-Forwarded-Host", req.Host)
+		req.Header.Set("X-Forwarded-Proto", "http")
 	}
 
 	return proxy
