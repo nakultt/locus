@@ -33,7 +33,7 @@ impl Database {
     pub async fn update_conversation_title(&self, id: ObjectId, user_id: ObjectId, title: String) -> Result<mongodb::results::UpdateResult, AppError> {
         Ok(self.conversations.update_one(
             doc! { "_id": id, "user_id": user_id },
-            doc! { "$set": { "title": title, "updated_at": bson::DateTime::from(chrono::Utc::now()) } }
+            doc! { "$set": { "title": title, "updated_at": chrono::Utc::now().to_rfc3339() } }
         ).await?)
     }
 
@@ -50,7 +50,7 @@ impl Database {
         // update conversation updated_at
         self.conversations.update_one(
             doc! { "_id": conv_id },
-            doc! { "$set": { "updated_at": bson::DateTime::from(chrono::Utc::now()) } }
+            doc! { "$set": { "updated_at": chrono::Utc::now().to_rfc3339() } }
         ).await?;
         
         Ok(res)
