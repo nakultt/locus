@@ -469,10 +469,29 @@ export default function IntegrationsSection() {
       return;
     }
     // Redirect to appropriate OAuth endpoint based on provider
+    const localUser = localStorage.getItem("locus_user");
+    let token = "";
+    if (localUser) {
+      try {
+        const parsed = JSON.parse(localUser);
+        token = parsed.token || "";
+      } catch (e) {}
+    }
+    
+    if (!token) {
+      const sessionUser = sessionStorage.getItem("locus_user");
+      if (sessionUser) {
+        try {
+          const parsed = JSON.parse(sessionUser);
+          token = parsed.token || "";
+        } catch (e) {}
+      }
+    }
+
     if (config.oauthProvider === "linear") {
-      window.location.href = `/auth/linear?user_id=${user.id}`;
+      window.location.href = `/auth/linear?token=${token}`;
     } else {
-      window.location.href = `/auth/google?user_id=${user.id}&service=${config.id}`;
+      window.location.href = `/auth/google?token=${token}&service=${config.id}`;
     }
   };
 

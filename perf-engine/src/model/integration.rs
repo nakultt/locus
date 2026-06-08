@@ -9,6 +9,8 @@ pub struct IntegrationDoc {
     pub user_id: ObjectId,
     pub provider: String,
     pub credentials_encrypted: String,
+    #[serde(with = "crate::model::flexible_datetime")]
     pub created_at: DateTime<Utc>,
+    #[serde(with = "crate::model::flexible_datetime")]
     pub updated_at: DateTime<Utc>,
 }

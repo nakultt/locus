@@ -25,8 +25,9 @@ func NewOAuthHandler(cfg *config.Config, rustClient *client.RustClient) *OAuthHa
 
 func (h *OAuthHandler) GoogleLogin() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Mock implementation for Google OAuth redirect
-		url := fmt.Sprintf("https://accounts.google.com/o/oauth2/v2/auth?client_id=%s&redirect_uri=%s&response_type=code&scope=email", h.cfg.GoogleClientID, h.cfg.GoogleRedirectURI)
+		token := r.URL.Query().Get("token")
+		// Pass token in state to associate the callback with the user
+		url := fmt.Sprintf("https://accounts.google.com/o/oauth2/v2/auth?client_id=%s&redirect_uri=%s&response_type=code&scope=email&state=%s", h.cfg.GoogleClientID, h.cfg.GoogleRedirectURI, token)
 		http.Redirect(w, r, url, http.StatusTemporaryRedirect)
 	}
 }
@@ -67,8 +68,9 @@ func (h *OAuthHandler) GoogleCallback() http.HandlerFunc {
 
 func (h *OAuthHandler) LinearLogin() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		token := r.URL.Query().Get("token")
 		// Mock implementation for Linear OAuth redirect
-		url := fmt.Sprintf("https://linear.app/oauth/authorize?client_id=%s&redirect_uri=%s&response_type=code&scope=read", h.cfg.LinearClientID, h.cfg.LinearRedirectURI)
+		url := fmt.Sprintf("https://linear.app/oauth/authorize?client_id=%s&redirect_uri=%s&response_type=code&scope=read&state=%s", h.cfg.LinearClientID, h.cfg.LinearRedirectURI, token)
 		http.Redirect(w, r, url, http.StatusTemporaryRedirect)
 	}
 }

@@ -8,7 +8,9 @@ pub struct ConversationDoc {
     pub id: Option<ObjectId>,
     pub user_id: ObjectId,
     pub title: String,
+    #[serde(with = "crate::model::flexible_datetime")]
     pub created_at: DateTime<Utc>,
+    #[serde(with = "crate::model::flexible_datetime")]
     pub updated_at: DateTime<Utc>,
 }
 
@@ -20,5 +22,6 @@ pub struct MessageDoc {
     pub role: String,
     pub content: String,
     pub tools_used: Option<Vec<String>>,
+    #[serde(with = "crate::model::flexible_datetime")]
     pub created_at: DateTime<Utc>,
 }

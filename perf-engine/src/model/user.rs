@@ -9,7 +9,9 @@ pub struct UserDoc {
     pub email: String,
     pub name: String,
     pub password_hash: String,
+    #[serde(with = "crate::model::flexible_datetime")]
     pub created_at: DateTime<Utc>,
+    #[serde(with = "crate::model::flexible_datetime")]
     pub updated_at: DateTime<Utc>,
 }
 

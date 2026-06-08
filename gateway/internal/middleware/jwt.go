@@ -15,19 +15,34 @@ const UserIDKey contextKey = "user_id"
 func JWTAuth(secret string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var tokenStr string
+			
 			authHeader := r.Header.Get("Authorization")
-			if authHeader == "" {
-				http.Error(w, "missing authorization header", http.StatusUnauthorized)
-				return
+			if authHeader != "" {
+				parts := strings.Split(authHeader, " ")
+				if len(parts) == 2 && parts[0] == "Bearer" {
+					tokenStr = parts[1]
+				}
 			}
 
-			parts := strings.Split(authHeader, " ")
-			if len(parts) != 2 || parts[0] != "Bearer" {
-				http.Error(w, "invalid authorization header format", http.StatusUnauthorized)
-				return
+			if tokenStr == "" {
+				tokenStr = r.URL.Query().Get("token")
 			}
 
-			tokenStr := parts[1]
+			if tokenStr == "" {
+				tokenStr = r.URL.Query().Get("state")
+			}
+
+			if tokenStr == "" {
+				if cookie, err := r.Cookie("auth_token"); err == nil {
+					tokenStr = cookie.Value
+				}
+			}
+
+			if tokenStr == "" {
+				http.Error(w, "missing or invalid authorization token", http.StatusUnauthorized)
+				return
+			}
 			token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) {
 				return []byte(secret), nil
 			})
