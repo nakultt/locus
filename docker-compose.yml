@@ -1,0 +1,80 @@
+services:
+  mongodb:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-locus}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASS:-changeme}
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  perf-engine:
+    build: ./perf-engine
+    environment:
+      MONGODB_URI: mongodb://${MONGO_USER:-locus}:${MONGO_PASS:-changeme}@mongodb:27017
+      MONGODB_DB: locus
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      JWT_SECRET: ${JWT_SECRET}
+      RUST_LOG: info
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  ai-service:
+    build: ./ai-service
+    environment:
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY}
+      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3.5:4b}
+      LOG_LEVEL: info
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  gateway:
+    build: ./gateway
+    ports:
+      - "8080:8080"
+    environment:
+      RUST_SERVICE_URL: http://perf-engine:8081
+      PYTHON_SERVICE_URL: http://ai-service:8082
+      JWT_SECRET: ${JWT_SECRET}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:8080/auth/google/callback}
+      LINEAR_CLIENT_ID: ${LINEAR_CLIENT_ID}
+      LINEAR_CLIENT_SECRET: ${LINEAR_CLIENT_SECRET}
+      LINEAR_REDIRECT_URI: ${LINEAR_REDIRECT_URI:-http://localhost:8080/auth/linear/callback}
+      FRONTEND_URL: ${FRONTEND_URL:-http://frontend:3000}
+      LOG_LEVEL: info
+    depends_on:
+      perf-engine:
+        condition: service_healthy
+      ai-service:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
+    depends_on:
+      - gateway
+
+volumes:
+  mongo_data:
