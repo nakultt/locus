@@ -59,7 +59,9 @@ def get_all_tools(configs: Dict[str, Any]) -> List[BaseTool]:
                 ))
             elif provider == "bugasura":
                 tools.extend(get_bugasura_tools(
-                    api_key=config.get("api_key", "")
+                    api_key=config.get("api_key", ""),
+                    team_id=config.get("team_id", ""),
+                    project_id=config.get("project_id", "")
                 ))
             # Google Workspace tools
             elif provider in ["gmail", "calendar", "google_docs", "google_sheets", "google_slides", "google_drive", "google_forms", "google_meet"]:

@@ -164,6 +164,33 @@ const INTEGRATIONS = [
     oauthProvider: "linear",
     fields: [],
   },
+  {
+    id: "bugasura",
+    title: "Bugasura",
+    description: "Simple, fast & contextual bug tracker.",
+    color: "text-red-500",
+    logo: "/file.svg",
+    authType: "api_key" as const,
+    fields: [
+      {
+        name: "api_key",
+        label: "API Key",
+        placeholder: "Your Bugasura API Key",
+      },
+      {
+        name: "team_id",
+        label: "Team ID",
+        placeholder: "Your Team ID",
+        isCredential: true,
+      },
+      {
+        name: "project_id",
+        label: "Project ID",
+        placeholder: "Your Project ID",
+        isCredential: true,
+      },
+    ],
+  },
 ];
 
 // Connect Modal Component
