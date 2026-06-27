@@ -21,7 +21,7 @@ pub struct MessageDoc {
     pub conversation_id: ObjectId,
     pub role: String,
     pub content: String,
-    pub tools_used: Option<Vec<String>>,
+    pub actions_taken: Option<Vec<serde_json::Value>>,
     #[serde(with = "crate::model::flexible_datetime")]
     pub created_at: DateTime<Utc>,
 }

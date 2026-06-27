@@ -32,7 +32,7 @@ pub struct ConversationResponse {
 pub struct AddMessageRequest {
     pub role: String,
     pub content: String,
-    pub tools_used: Option<Vec<String>>,
+    pub actions_taken: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Serialize)]
@@ -40,7 +40,7 @@ pub struct MessageResponse {
     pub id: String,
     pub role: String,
     pub content: String,
-    pub tools_used: Option<Vec<String>>,
+    pub actions_taken: Option<Vec<serde_json::Value>>,
     pub created_at: String,
 }
 
@@ -141,7 +141,7 @@ pub async fn add_message(
         conversation_id: id,
         role: payload.role.clone(),
         content: payload.content.clone(),
-        tools_used: payload.tools_used.clone(),
+        actions_taken: payload.actions_taken.clone(),
         created_at: chrono::Utc::now(),
     };
 
@@ -152,7 +152,7 @@ pub async fn add_message(
         id: msg_id,
         role: doc.role,
         content: doc.content,
-        tools_used: doc.tools_used,
+        actions_taken: doc.actions_taken,
         created_at: doc.created_at.to_rfc3339(),
     }))
 }
@@ -177,7 +177,7 @@ pub async fn list_messages(
         id: d.id.unwrap().to_hex(),
         role: d.role,
         content: d.content,
-        tools_used: d.tools_used,
+        actions_taken: d.actions_taken,
         created_at: d.created_at.to_rfc3339(),
     }).collect();
 

@@ -50,13 +50,13 @@ async def create_conversation(user_id: str, title: str = "New Conversation") -> 
         logger.error(f"Failed to create conversation for user {user_id}: {e}")
         return None
 
-async def save_message(user_id: str, conversation_id: str, role: str, content: str, tools_used: list = None):
+async def save_message(user_id: str, conversation_id: str, role: str, content: str, actions_taken: list = None):
     try:
         async with httpx.AsyncClient() as client:
             payload = {
                 "role": role,
                 "content": content,
-                "tools_used": tools_used or []
+                "actions_taken": actions_taken or []
             }
             resp = await client.post(
                 f"{settings.rust_service_url}/api/users/{user_id}/conversations/{conversation_id}/messages",
@@ -112,7 +112,7 @@ async def chat(request: ChatRequest):
     actions = final_state.get("actions_taken", [])
     
     if request.conversation_id and response_text:
-        await save_message(request.user_id, request.conversation_id, "assistant", response_text, [a.get("tool_name") for a in actions if "tool_name" in a])
+        await save_message(request.user_id, request.conversation_id, "assistant", response_text, actions)
     
     return ChatResponse(
         response=response_text,
@@ -197,7 +197,7 @@ async def chat_stream(request: ChatRequest):
                         yield f"data: {json.dumps({'event_type': 'task_failed', 'data': {'task_id': task_id, 'error': result_str, 'conversation_id': request.conversation_id}})}\n\n"
             
             if request.conversation_id and final_message:
-                await save_message(request.user_id, request.conversation_id, "assistant", final_message, [a.get("action") or "tool" for a in final_actions])
+                await save_message(request.user_id, request.conversation_id, "assistant", final_message, final_actions)
                 
             yield f"data: {json.dumps({'event_type': 'complete', 'data': {'message': final_message, 'actions_taken': final_actions, 'conversation_id': request.conversation_id}})}\n\n"
         except Exception as e:
