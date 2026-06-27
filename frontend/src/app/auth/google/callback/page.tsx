@@ -7,41 +7,53 @@ import { useAuth } from "@/context/AuthContext";
 function GoogleCallbackContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { user } = useAuth();
+  const { user, googleLogin } = useAuth();
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const code = searchParams.get("code");
+    const state = searchParams.get("state");
     
     if (!code) {
       setError("No authorization code received.");
       return;
     }
     
-    if (!user) {
-      setError("You must be logged in to connect Google.");
-      return;
-    }
-    
-    const token = localStorage.getItem("locus_auth_token");
-    
-    fetch(`/api/auth/google/callback?code=${code}`, {
-      headers: {
-        Authorization: `Bearer ${token}`
+    if (state === "login") {
+      // Login flow
+      googleLogin(code)
+        .then(() => {
+          router.push("/chatbot");
+        })
+        .catch(err => {
+          setError(err instanceof Error ? err.message : "Failed to log in with Google");
+        });
+    } else {
+      // Integration connection flow
+      if (!user) {
+        setError("You must be logged in to connect Google.");
+        return;
       }
-    })
-      .then(res => res.json())
-      .then(data => {
-        if (data.status === "success") {
-          router.push("/settings");
-        } else {
-          setError(data.error || "Failed to connect Google account");
+      
+      fetch(`/api/auth/google/callback?code=${code}&state=${state || ""}`, {
+        headers: {
+          Authorization: `Bearer ${user.token}`
         }
       })
-      .catch(err => {
-        setError("Network error while connecting Google account");
-      });
-  }, [searchParams, user, router]);
+        .then(res => res.json())
+        .then(data => {
+          if (data.status === "success") {
+            const connectedService = state && state !== "login" ? state : "google";
+            router.push(`/integrations/integrations-page?success=${connectedService}_connected`);
+          } else {
+            setError(data.error || "Failed to connect Google account");
+          }
+        })
+        .catch(err => {
+          setError("Network error while connecting Google account");
+        });
+    }
+  }, [searchParams, user, router, googleLogin]);
 
   if (error) {
     return (

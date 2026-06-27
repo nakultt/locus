@@ -44,6 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/health", get(handler::health::health_check))
         .route("/auth/register", post(handler::auth::register))
         .route("/auth/login", post(handler::auth::login))
+        .route("/auth/google", post(handler::auth::google_login))
         .route("/auth/user/{id}", axum::routing::put(handler::auth::update_user))
         
         // Integrations

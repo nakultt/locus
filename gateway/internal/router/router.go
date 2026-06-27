@@ -41,9 +41,10 @@ func New(cfg *config.Config, rustClient *client.RustClient, pythonClient *client
 	// OAuth flows (Requires auth to associate with user)
 	oauthHandler := handler.NewOAuthHandler(cfg, rustClient)
 	
-	// Public OAuth login initiators
+	// Public OAuth login initiators and callbacks
 	r.Get("/auth/google", oauthHandler.GoogleLogin())
 	r.Get("/auth/linear", oauthHandler.LinearLogin())
+	r.Get("/api/auth/google/login", oauthHandler.GoogleLoginCallback())
 
 	// Protected routes
 	r.Group(func(r chi.Router) {

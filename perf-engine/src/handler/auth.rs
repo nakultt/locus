@@ -58,6 +58,47 @@ pub async fn register(
     }))
 }
 
+#[derive(Deserialize)]
+pub struct GoogleLoginRequest {
+    pub email: String,
+    pub name: String,
+}
+
+#[tracing::instrument(skip(state, payload))]
+pub async fn google_login(
+    State(state): State<SharedState>,
+    Json(payload): Json<GoogleLoginRequest>,
+) -> Result<Json<AuthResponse>, AppError> {
+    let user_opt = state.db.get_user_by_email(&payload.email).await?;
+    
+    let user = match user_opt {
+        Some(u) => u,
+        None => {
+            let user_doc = UserDoc {
+                email: payload.email.clone(),
+                name: payload.name.clone(),
+                password_hash: String::new(), // Google users don't have a password
+                ..Default::default()
+            };
+            let result = state.db.create_user(user_doc.clone()).await?;
+            let id = result.inserted_id.as_object_id().unwrap();
+            let mut u = user_doc;
+            u.id = Some(id);
+            u
+        }
+    };
+    
+    let id_str = user.id.unwrap().to_hex();
+    let token = state.crypto.create_jwt(&id_str, &user.email)?;
+
+    Ok(Json(AuthResponse {
+        id: id_str,
+        email: user.email,
+        name: user.name,
+        token,
+    }))
+}
+
 #[tracing::instrument(skip(state, payload))]
 pub async fn login(
     State(state): State<SharedState>,

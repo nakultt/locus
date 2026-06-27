@@ -410,10 +410,24 @@ export default function IntegrationsSection() {
     const errorParam = urlParams.get("error");
     const service = urlParams.get("service");
 
-    if (success === "google_connected" || success === "linear_connected") {
-      setSuccessMessage(
-        `Successfully connected ${service || (success === "linear_connected" ? "Linear" : "Google services")}!`
-      );
+    if (success && success.endsWith("_connected")) {
+      const connectedService = success.replace("_connected", "");
+      
+      let serviceTitle = connectedService;
+      // Capitalize first letter or map known services
+      if (connectedService === "linear") serviceTitle = "Linear";
+      else if (connectedService === "gmail") serviceTitle = "Gmail";
+      else if (connectedService === "calendar") serviceTitle = "Google Calendar";
+      else if (connectedService === "docs") serviceTitle = "Google Docs";
+      else if (connectedService === "sheets") serviceTitle = "Google Sheets";
+      else if (connectedService === "slides") serviceTitle = "Google Slides";
+      else if (connectedService === "drive") serviceTitle = "Google Drive";
+      else if (connectedService === "forms") serviceTitle = "Google Forms";
+      else if (connectedService === "meet") serviceTitle = "Google Meet";
+      else serviceTitle = connectedService.charAt(0).toUpperCase() + connectedService.slice(1);
+
+      setSuccessMessage(`Successfully connected ${serviceTitle}!`);
+      
       // Refresh integrations list
       if (user?.id) {
         listIntegrations(user.id).then((result) => {

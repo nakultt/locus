@@ -23,6 +23,7 @@ interface AuthContextType {
   isAuthenticated: boolean;
   login: (email: string, password: string, rememberMe?: boolean) => Promise<User>;
   signup: (email: string, password: string, name?: string) => Promise<User>;
+  googleLogin: (code: string) => Promise<User>;
   updateProfile: (data: UserUpdate) => Promise<User>;
   logout: () => void;
 }
@@ -117,6 +118,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   ): Promise<User> => {
     const userData = await apiLogin(email, password, remember);
     setRememberMe(remember);
+    if (userData.token) {
+      setCookie("auth_token", userData.token, remember ? 30 : undefined);
+    }
     setUser(userData);
     return userData;
   };
@@ -129,6 +133,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const userData = await apiSignup(email, password, name);
     // Default to session-only for signup
     setRememberMe(false);
+    if (userData.token) {
+      setCookie("auth_token", userData.token, undefined);
+    }
     setUser(userData);
     return userData;
   };
@@ -138,6 +145,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const updatedUser = await apiUpdateUser(user.id, data);
     setUser(updatedUser);
     return updatedUser;
+  };
+
+  const googleLogin = async (code: string): Promise<User> => {
+    const res = await fetch(`/api/auth/google/login?code=${code}`);
+    if (!res.ok) {
+      const errorData = await res.text();
+      throw new Error(`Google login failed: ${errorData}`);
+    }
+    const userData = await res.json();
+    setRememberMe(true);
+    if (userData.token) {
+      setCookie("auth_token", userData.token, 30);
+    }
+    setUser(userData);
+    return userData;
   };
 
   const logout = () => {
@@ -154,6 +176,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     isAuthenticated: !!user,
     login,
     signup,
+    googleLogin,
     updateProfile,
     logout,
   };

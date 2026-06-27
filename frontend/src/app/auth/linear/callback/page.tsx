@@ -23,17 +23,15 @@ function LinearCallbackContent() {
       return;
     }
     
-    const token = localStorage.getItem("locus_auth_token");
-    
     fetch(`/api/auth/linear/callback?code=${code}`, {
       headers: {
-        Authorization: `Bearer ${token}`
+        Authorization: `Bearer ${user.token}`
       }
     })
       .then(res => res.json())
       .then(data => {
         if (data.status === "success") {
-          router.push("/settings");
+          router.push("/integrations/integrations-page?success=linear_connected");
         } else {
           setError(data.error || "Failed to connect Linear account");
         }
