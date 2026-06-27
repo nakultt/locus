@@ -114,6 +114,15 @@ func (h *OAuthHandler) GoogleCallback() http.HandlerFunc {
 			provider = state
 		}
 
+		// Inject obtained_at into the token
+		var tokenMap map[string]interface{}
+		if err := json.Unmarshal(tokenBytes, &tokenMap); err == nil {
+			tokenMap["obtained_at"] = time.Now().UTC().Format(time.RFC3339)
+			if updatedBytes, err := json.Marshal(tokenMap); err == nil {
+				tokenBytes = updatedBytes
+			}
+		}
+
 		err = h.rustClient.StoreOAuthCredentials(context.Background(), client.StoreCredentialsRequest{
 			UserID:          userID,
 			Provider:        provider,
