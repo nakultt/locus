@@ -43,7 +43,7 @@ def get_all_tools(configs: Dict[str, Any]) -> List[BaseTool]:
                 ))
             elif provider == "github":
                 tools.extend(get_github_tools(
-                    access_token=config.get("access_token", config.get("api_key", ""))
+                    token=config.get("access_token", config.get("api_key", ""))
                 ))
             elif provider == "linear":
                 tools.extend(get_linear_tools(
@@ -51,7 +51,7 @@ def get_all_tools(configs: Dict[str, Any]) -> List[BaseTool]:
                 ))
             elif provider == "notion":
                 tools.extend(get_notion_tools(
-                    api_key=config.get("api_key", "")
+                    integration_token=config.get("api_key", "")
                 ))
             elif provider == "slack":
                 tools.extend(get_slack_tools(
