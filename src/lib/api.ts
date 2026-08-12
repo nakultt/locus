@@ -448,6 +448,249 @@ export async function checkLLMStatus(): Promise<LLMStatus> {
   return apiRequest<LLMStatus>("/api/settings/llm");
 }
 
+// ============== PR Context Agent ==============
+
+export type PRJobStatus = "queued" | "running" | "completed" | "failed";
+export type SecuritySeverity = "critical" | "high" | "medium" | "low" | "info";
+export type FindingSource = "semgrep" | "gitleaks" | "llm";
+
+export interface SecurityFinding {
+  source: FindingSource;
+  severity: SecuritySeverity;
+  title: string;
+  file_path: string;
+  line?: number;
+  description: string;
+  rule_id?: string;
+}
+
+export interface RelatedTicket {
+  key: string;
+  summary?: string;
+  status?: string;
+  assignee?: string;
+  url?: string;
+  source: string;
+}
+
+export interface RelatedSlackThread {
+  channel: string;
+  permalink?: string;
+  message_count: number;
+  summary?: string;
+  participants: string[];
+}
+
+export interface LinkedIssue {
+  number: number;
+  title: string;
+  state: string;
+  url: string;
+  author?: string;
+  body?: string;
+  /** "closes" for a real GitHub link, "mentions" for a bare #N reference. */
+  relation: string;
+}
+
+export interface RelatedDocument {
+  title: string;
+  url: string;
+  modified_at?: string;
+  excerpt: string;
+  truncated: boolean;
+}
+
+export interface PRContext {
+  repo: string;
+  pr_number: number;
+  title: string;
+  author: string;
+  url: string;
+  branch?: string;
+  ticket_keys: string[];
+  tickets: RelatedTicket[];
+  linked_issues: LinkedIssue[];
+  slack_threads: RelatedSlackThread[];
+  documents: RelatedDocument[];
+  files_changed: number;
+  additions: number;
+  deletions: number;
+}
+
+export interface PRAnalysisResult {
+  context: PRContext;
+  /** Scanner-matched. Reported as fact. */
+  confirmed_findings: SecurityFinding[];
+  /** Model-generated. Must never be presented as confirmed. */
+  unverified_findings: SecurityFinding[];
+  summary: string;
+  pr_comment_posted: boolean;
+  slack_posted: boolean;
+  doc_url?: string;
+  tool_calls: ToolInvocation[];
+  stages: PipelineStage[];
+  merge_actions?: MergeActionResult;
+  errors: string[];
+}
+
+export interface PRJob {
+  id: number;
+  status: PRJobStatus;
+  repo: string;
+  pr_number: number;
+  action?: string;
+  created_at: string;
+  completed_at?: string;
+  error?: string;
+  /** Present on the list response so rows show progress without expanding. */
+  stages: PipelineStage[];
+}
+
+export interface PRJobDetail extends PRJob {
+  result?: PRAnalysisResult;
+}
+
+export interface RepoRegistration {
+  id: number;
+  repo: string;
+  slack_channel?: string;
+  export_to_docs?: boolean;
+  context_docs?: string[];
+  qa_emails?: string[];
+  jira_done_status?: string;
+  close_issues_on_merge?: boolean;
+  enabled: boolean;
+  /** Returned only when registering. */
+  webhook_url?: string;
+  /** Shown once at creation; never retrievable afterwards. */
+  webhook_secret?: string;
+}
+
+export interface CapabilityStatus {
+  key: string;
+  label: string;
+  available: boolean;
+  required: boolean;
+  hint: string;
+}
+
+export interface ServiceStatus {
+  key: string;
+  label: string;
+  connected: boolean;
+  required: boolean;
+  capabilities: CapabilityStatus[];
+}
+
+export interface ToolInvocation {
+  service: string;
+  tool: string;
+  query?: string;
+  result_count: number;
+  succeeded: boolean;
+  detail?: string;
+  duration_ms?: number;
+}
+
+export type StageState = "pending" | "running" | "done" | "skipped" | "failed";
+
+export interface PipelineStage {
+  key: string;
+  label: string;
+  /** "read" gathers context; "write" changes something outside Locus. */
+  kind: string;
+  state: StageState;
+  detail?: string;
+}
+
+export interface MergeActionResult {
+  jira_transitioned: string[];
+  issues_closed: string[];
+  qa_notified: boolean;
+  qa_brief?: string;
+  errors: string[];
+}
+
+export interface PRAgentSummary {
+  total_jobs: number;
+  completed: number;
+  failed: number;
+  running: number;
+  queued: number;
+  repos_registered: number;
+  confirmed_findings: number;
+  unverified_findings: number;
+  github_connected: boolean;
+  jira_connected: boolean;
+  slack_connected: boolean;
+  slack_search_enabled: boolean;
+  semgrep_available: boolean;
+  gitleaks_available: boolean;
+  docs_connected?: boolean;
+  services?: ServiceStatus[];
+  public_base_url?: string;
+}
+
+export async function getPRAgentSummary(userId: number): Promise<PRAgentSummary> {
+  return apiRequest<PRAgentSummary>(`/webhooks/summary/${userId}`);
+}
+
+export async function listPRJobs(userId: number, limit = 20): Promise<PRJob[]> {
+  return apiRequest<PRJob[]>(`/webhooks/jobs/${userId}?limit=${limit}`);
+}
+
+export async function getPRJob(userId: number, jobId: number): Promise<PRJobDetail> {
+  return apiRequest<PRJobDetail>(`/webhooks/jobs/${userId}/${jobId}`);
+}
+
+export async function listRepos(userId: number): Promise<{
+  repos: RepoRegistration[];
+  total: number;
+}> {
+  return apiRequest(`/webhooks/repos/${userId}`);
+}
+
+export async function registerRepo(
+  userId: number,
+  repo: string,
+  slackChannel?: string,
+  exportToDocs = false,
+  contextDocs: string[] = [],
+  qaEmails: string[] = [],
+  jiraDoneStatus = "Done",
+  closeIssuesOnMerge = true
+): Promise<RepoRegistration> {
+  return apiRequest<RepoRegistration>("/webhooks/repos", {
+    method: "POST",
+    body: JSON.stringify({
+      user_id: userId,
+      repo,
+      slack_channel: slackChannel || null,
+      export_to_docs: exportToDocs,
+      context_docs: contextDocs,
+      qa_emails: qaEmails,
+      jira_done_status: jiraDoneStatus,
+      close_issues_on_merge: closeIssuesOnMerge,
+    }),
+  });
+}
+
+export async function unregisterRepo(userId: number, repo: string): Promise<void> {
+  return apiRequest<void>(`/webhooks/repos/${userId}/${repo}`, {
+    method: "DELETE",
+  });
+}
+
+export async function analyzePR(
+  userId: number,
+  repo: string,
+  prNumber: number
+): Promise<PRJob> {
+  return apiRequest<PRJob>(`/webhooks/analyze/${userId}/${repo}/${prNumber}`, {
+    method: "POST",
+  });
+}
+
 // ============== Health Check ==============
 
 export async function healthCheck(): Promise<{

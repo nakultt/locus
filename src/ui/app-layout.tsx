@@ -9,6 +9,7 @@ import {
   Menu,
   X,
   Grid,
+  GitPullRequest,
   PanelLeftClose,
   PanelLeft,
   Loader2,
@@ -64,6 +65,7 @@ const AppLayout = ({ children }: AppLayoutProps) => {
   const navItems = [
     { icon: Home, label: "Home", path: "/" },
     { icon: MessageSquare, label: "Chat", path: "/chatbot" },
+    { icon: GitPullRequest, label: "PR Agent", path: "/pr-agent" },
     {
       icon: Grid,
       label: "Integrations",

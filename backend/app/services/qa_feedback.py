@@ -1,0 +1,299 @@
+"""
+QA feedback handling.
+
+After a PR merges Locus notifies the test team. When a tester replies, this
+decides whether the reply reports a failure -- and if so reopens the ticket and
+the linked issues.
+
+The classifier runs on a bare LLM with no tools bound. Reply text is written by
+whoever can post in the channel, and the outcome drives real state changes, so
+the model returns a verdict and nothing more; acting on that verdict is the
+caller's job.
+
+Ambiguity is a first-class outcome. "The retry works but the timeout is 30s
+now?" is neither pass nor fail, and guessing either way is worse than asking:
+a wrong reopen reverses a merge decision, a wrong dismissal buries a real bug.
+The PR author is notified instead.
+"""
+
+import json
+import logging
+from enum import Enum
+
+import httpx
+
+from app.services.llm import get_llm
+
+logger = logging.getLogger(__name__)
+
+
+class Verdict(str, Enum):
+    """What a QA reply says about the change."""
+
+    WORKS = "works"
+    BROKEN = "broken"
+    UNCLEAR = "unclear"
+    # Chatter that is not feedback at all ("thanks!", "looking now").
+    NOT_FEEDBACK = "not_feedback"
+
+
+CLASSIFIER_PROMPT = """A tester replied to a notification about a merged code change.
+Decide what their reply says about whether the change works.
+
+Reply to classify:
+---
+{reply}
+---
+
+Answer with one verdict:
+- "broken": the tester reports something not working, a regression, or a failure
+- "works": the tester confirms it works or passes testing
+- "unclear": mixed, partial, a question, or a new concern that is not clearly \
+a failure of this change
+- "not_feedback": acknowledgement or chatter with no test result \
+("thanks", "looking at it now", "on it")
+
+Choose "unclear" whenever you are unsure. A wrong "broken" reverses a merge \
+decision and a wrong "works" buries a real bug, so ambiguity must be surfaced \
+to a human rather than guessed.
+
+Return ONLY JSON:
+{{"verdict": "broken|works|unclear|not_feedback", "reason": "one short sentence"}}"""
+
+
+async def classify_reply(reply_text: str) -> tuple[Verdict, str]:
+    """
+    Decide what a QA reply reports.
+
+    Returns:
+        (verdict, one-line reason). Unparseable output yields UNCLEAR, so a
+        model failure surfaces to a human rather than triggering an action.
+    """
+    if not reply_text or not reply_text.strip():
+        return Verdict.NOT_FEEDBACK, "Empty reply"
+
+    try:
+        llm = get_llm(temperature=0)
+        response = await llm.ainvoke(CLASSIFIER_PROMPT.format(reply=reply_text[:2000]))
+        content = response.content
+        text = (content if isinstance(content, str) else str(content)).strip()
+
+        # Local models frequently wrap JSON in a markdown fence.
+        if text.startswith("```"):
+            lines = text.split("\n")
+            text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+            text = text.strip()
+
+        payload = json.loads(text)
+        verdict = Verdict(str(payload.get("verdict", "unclear")).lower())
+        return verdict, str(payload.get("reason", ""))[:200]
+
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.debug("QA classifier returned unusable output: %s", e)
+        return Verdict.UNCLEAR, "Could not interpret the reply"
+    except Exception as e:
+        logger.warning("QA classifier failed: %s", e)
+        return Verdict.UNCLEAR, f"Classifier unavailable: {e}"
+
+
+async def reopen_jira_ticket(
+    jira_config: dict,
+    ticket_key: str,
+    reason: str,
+    reopen_status: str = "In Progress",
+) -> tuple[bool, str]:
+    """
+    Move a ticket back into work after a failed test, and record why.
+
+    This is the one place a backwards transition is correct, so it deliberately
+    bypasses the forward-only guard in merge_actions.
+    """
+    api_token = jira_config.get("api_key", "")
+    credentials = jira_config.get("credentials", {}) or {}
+    email = credentials.get("email", "")
+    base_url = (credentials.get("url", "") or "").rstrip("/")
+
+    if not (api_token and email and base_url):
+        return False, "Jira is not fully configured"
+
+    async with httpx.AsyncClient(timeout=30.0, auth=(email, api_token)) as client:
+        transitions = await client.get(
+            f"{base_url}/rest/api/3/issue/{ticket_key}/transitions",
+            headers={"Accept": "application/json"},
+        )
+        if transitions.status_code != 200:
+            return False, f"Could not list transitions for {ticket_key}"
+
+        transition_id = None
+        for transition in transitions.json().get("transitions", []):
+            name = transition.get("name", "").lower()
+            to_name = (transition.get("to") or {}).get("name", "").lower()
+            if reopen_status.lower() in (name, to_name):
+                transition_id = transition.get("id")
+                break
+
+        if not transition_id:
+            return False, f"No transition to '{reopen_status}' available"
+
+        applied = await client.post(
+            f"{base_url}/rest/api/3/issue/{ticket_key}/transitions",
+            json={"transition": {"id": transition_id}},
+            headers={"Content-Type": "application/json"},
+        )
+        if applied.status_code not in (200, 204):
+            return False, f"Transition rejected ({applied.status_code})"
+
+        # Leave the tester's words on the ticket; a bare status flip loses why.
+        await client.post(
+            f"{base_url}/rest/api/3/issue/{ticket_key}/comment",
+            json={
+                "body": {
+                    "type": "doc",
+                    "version": 1,
+                    "content": [{
+                        "type": "paragraph",
+                        "content": [{
+                            "type": "text",
+                            "text": f"Reopened after QA feedback: {reason}",
+                        }],
+                    }],
+                }
+            },
+            headers={"Content-Type": "application/json"},
+        )
+
+    return True, f"{ticket_key} reopened ({reopen_status})"
+
+
+async def reopen_github_issue(
+    token: str, repo: str, issue_number: int, reason: str
+) -> tuple[bool, str]:
+    """Reopen a closed issue and record the QA feedback that caused it."""
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        reopened = await client.patch(
+            f"https://api.github.com/repos/{repo}/issues/{issue_number}",
+            headers=headers,
+            json={"state": "open", "state_reason": "reopened"},
+        )
+        if reopened.status_code != 200:
+            return False, f"Could not reopen #{issue_number}"
+
+        await client.post(
+            f"https://api.github.com/repos/{repo}/issues/{issue_number}/comments",
+            headers=headers,
+            json={"body": f"Reopened after QA feedback: {reason}"},
+        )
+
+    return True, f"Reopened #{issue_number}"
+
+
+async def notify_pr_author(
+    slack_config: dict,
+    channel: str,
+    thread_ts: str | None,
+    pr_url: str,
+    reply_text: str,
+    reason: str,
+) -> bool:
+    """
+    Ask a human to judge an ambiguous reply.
+
+    Posted into the same thread so the question sits with the reply it is about.
+    """
+    credentials = slack_config.get("credentials", {}) or {}
+    bot_token = credentials.get("bot_token") or slack_config.get("api_key", "")
+    if not bot_token:
+        return False
+
+    text = (
+        f":grey_question: Unclear QA feedback on <{pr_url}|this PR> — "
+        f"someone should take a look.\n"
+        f"> {reply_text[:300]}\n"
+        f"_{reason}_\n"
+        f"No ticket was changed."
+    )
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            "https://slack.com/api/chat.postMessage",
+            headers={"Authorization": f"Bearer {bot_token}"},
+            json={
+                "channel": channel,
+                "text": text,
+                **({"thread_ts": thread_ts} if thread_ts else {}),
+            },
+        )
+        return bool(response.json().get("ok"))
+
+
+async def handle_qa_reply(
+    reply_text: str,
+    integration_configs: dict[str, dict],
+    repo: str,
+    pr_url: str,
+    ticket_keys: list[str],
+    issue_numbers: list[int],
+    slack_channel: str | None = None,
+    thread_ts: str | None = None,
+    reopen_status: str = "In Progress",
+) -> dict:
+    """
+    Act on a QA reply.
+
+    Returns:
+        A summary of the verdict and anything that changed.
+    """
+    verdict, reason = await classify_reply(reply_text)
+
+    outcome: dict = {
+        "verdict": verdict.value,
+        "reason": reason,
+        "reopened_tickets": [],
+        "reopened_issues": [],
+        "author_notified": False,
+        "errors": [],
+    }
+
+    if verdict in (Verdict.WORKS, Verdict.NOT_FEEDBACK):
+        return outcome
+
+    if verdict == Verdict.UNCLEAR:
+        if slack_channel and "slack" in integration_configs:
+            outcome["author_notified"] = await notify_pr_author(
+                integration_configs["slack"], slack_channel, thread_ts,
+                pr_url, reply_text, reason,
+            )
+        return outcome
+
+    # Verdict.BROKEN -- undo the merge-time state changes.
+    jira_config = integration_configs.get("jira")
+    if jira_config:
+        for key in ticket_keys:
+            try:
+                ok, detail = await reopen_jira_ticket(
+                    jira_config, key, reason, reopen_status
+                )
+                target = "reopened_tickets" if ok else "errors"
+                outcome[target].append(detail)
+            except Exception as e:
+                outcome["errors"].append(f"{key}: {e}")
+
+    github_token = (integration_configs.get("github") or {}).get("api_key")
+    if github_token:
+        for number in issue_numbers:
+            try:
+                ok, detail = await reopen_github_issue(
+                    github_token, repo, number, reason
+                )
+                target = "reopened_issues" if ok else "errors"
+                outcome[target].append(detail)
+            except Exception as e:
+                outcome["errors"].append(f"#{number}: {e}")
+
+    return outcome

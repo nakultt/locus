@@ -16,17 +16,66 @@ import logging
 import httpx
 
 from app.schemas import (
+    LinkedIssue,
+    PipelineStage,
     PRAnalysisResult,
     PRContext,
+    RelatedDocument,
     RelatedSlackThread,
     RelatedTicket,
     SecurityFinding,
     SecuritySeverity,
+    StageState,
+    ToolInvocation,
 )
-from app.services import github_pr, linking
+from app.services import github_pr, google_docs_context, linking, search_terms
 from app.services.security_scan import scan_changes
 
 logger = logging.getLogger(__name__)
+
+
+def _stage(
+    stages: list[PipelineStage],
+    key: str,
+    label: str,
+    kind: str,
+    state: StageState,
+    detail: str | None = None,
+) -> None:
+    """Record how one pipeline step went, for the dashboard timeline."""
+    stages.append(PipelineStage(
+        key=key, label=label, kind=kind, state=state, detail=detail
+    ))
+
+
+def _record(
+    calls: list[ToolInvocation],
+    service: str,
+    tool: str,
+    query: str | None = None,
+    result_count: int = 0,
+    succeeded: bool = True,
+    detail: str | None = None,
+) -> None:
+    """
+    Log one external lookup.
+
+    The run detail view uses this to distinguish "searched and found nothing"
+    from "never searched" -- indistinguishable in the output otherwise.
+    """
+    calls.append(ToolInvocation(
+        service=service,
+        tool=tool,
+        query=query,
+        result_count=result_count,
+        succeeded=succeeded,
+        detail=detail,
+    ))
+
+# Slack search is Tier 2 (~20 req/min) and queries run precise -> broad, so
+# stop once enough distinct threads are found.
+MAX_SLACK_THREADS = 8
+MAX_JIRA_SEARCH_RESULTS = 5
 
 # Severity ordering for display.
 _SEVERITY_RANK = {
@@ -92,17 +141,85 @@ async def fetch_jira_tickets(
     return tickets
 
 
+async def search_jira_tickets(
+    jira_config: dict,
+    title: str | None,
+    branch: str | None,
+    exclude_keys: list[str],
+) -> list[RelatedTicket]:
+    """
+    Find Jira tickets by topic when the PR references none directly.
+
+    A PR whose branch and title never mention a key still usually has a ticket;
+    this finds it by searching summary, description and comments for the
+    distinctive words in the title.
+    """
+    jql = search_terms.jira_jql(exclude_keys, title, branch)
+    if not jql:
+        return []
+
+    api_token = jira_config.get("api_key", "")
+    credentials = jira_config.get("credentials", {}) or {}
+    email = credentials.get("email", "")
+    base_url = (credentials.get("url", "") or "").rstrip("/")
+
+    if not (api_token and email and base_url):
+        return []
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0, auth=(email, api_token)) as client:
+            response = await client.get(
+                f"{base_url}/rest/api/3/search",
+                params={
+                    "jql": jql,
+                    "maxResults": MAX_JIRA_SEARCH_RESULTS,
+                    "fields": "summary,status,assignee",
+                },
+                headers={"Accept": "application/json"},
+            )
+            if response.status_code != 200:
+                logger.debug("Jira search returned %s", response.status_code)
+                return []
+
+            issues = response.json().get("issues", [])
+    except Exception as e:
+        logger.debug("Jira search failed: %s", e)
+        return []
+
+    tickets: list[RelatedTicket] = []
+    for issue in issues:
+        fields = issue.get("fields", {})
+        assignee = fields.get("assignee") or {}
+        status = fields.get("status") or {}
+        key = issue.get("key", "")
+
+        tickets.append(RelatedTicket(
+            key=key,
+            summary=fields.get("summary"),
+            status=status.get("name"),
+            assignee=assignee.get("displayName"),
+            url=f"{base_url}/browse/{key}",
+            source="jira",
+        ))
+
+    return tickets
+
+
 async def search_slack_threads(
     ticket_keys: list[str],
     repo: str,
     pr_number: int,
     slack_config: dict,
+    title: str | None = None,
+    branch: str | None = None,
+    issue_numbers: list[int] | None = None,
 ) -> list[RelatedSlackThread]:
     """
     Find Slack discussion about this work.
 
-    Searches for each ticket key and for the PR URL. Requires a user token
-    (xoxp-); search.messages is not available to bot tokens.
+    Queries run precise -> broad: quoted ticket keys and PR/issue references
+    first, then a topic search built from the distinctive words in the title.
+    Requires a user token (xoxp-); search.messages rejects bot tokens.
     """
     credentials = slack_config.get("credentials", {}) or {}
     user_token = credentials.get("user_token", "")
@@ -117,27 +234,47 @@ async def search_slack_threads(
         )
         return []
 
-    queries = list(ticket_keys)
-    queries.append(f"github.com/{repo}/pull/{pr_number}")
+    queries = search_terms.slack_queries(
+        ticket_keys=ticket_keys,
+        repo=repo,
+        pr_number=pr_number,
+        title=title,
+        branch=branch,
+        issue_numbers=issue_numbers,
+    )
 
     threads: list[RelatedSlackThread] = []
     seen_permalinks: set[str] = set()
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         for query in queries:
+            # Queries are ordered precise -> broad. Once enough distinct
+            # threads are found, stop: later queries only add noise and burn
+            # rate limit (Slack search is Tier 2, ~20/min).
+            if len(threads) >= MAX_SLACK_THREADS:
+                break
+
             try:
                 response = await client.get(
                     "https://slack.com/api/search.messages",
                     headers={"Authorization": f"Bearer {user_token}"},
-                    params={"query": query, "count": 5},
+                    params={"query": query, "count": 5, "sort": "timestamp"},
                 )
                 payload = response.json()
+
                 if not payload.get("ok"):
+                    error = payload.get("error", "unknown")
+                    if error in ("missing_scope", "not_allowed_token_type"):
+                        logger.warning(
+                            "Slack search rejected (%s). The user token needs "
+                            "the search:read scope.", error,
+                        )
+                        break
                     continue
 
                 for match in payload.get("messages", {}).get("matches", []):
                     permalink = match.get("permalink", "")
-                    if permalink in seen_permalinks:
+                    if not permalink or permalink in seen_permalinks:
                         continue
                     seen_permalinks.add(permalink)
 
@@ -146,12 +283,73 @@ async def search_slack_threads(
                         permalink=permalink,
                         message_count=1,
                         summary=(match.get("text", "") or "")[:280],
-                        participants=[match.get("username", "")] if match.get("username") else [],
+                        participants=(
+                            [match["username"]] if match.get("username") else []
+                        ),
                     ))
-            except Exception:
+            except Exception as e:
+                logger.debug("Slack query %r failed: %s", query, e)
                 continue
 
-    return threads
+    return threads[:MAX_SLACK_THREADS]
+
+
+async def export_to_google_doc(
+    result: PRAnalysisResult,
+    docs_config: dict,
+) -> str | None:
+    """
+    Write the analysis to a Google Doc.
+
+    A PR comment disappears into a closed PR; a Doc is a durable record that
+    can be linked from a ticket or a postmortem.
+
+    Returns:
+        The document URL, or None if the export failed.
+    """
+    credentials = docs_config.get("credentials", {}) or {}
+    access_token = credentials.get("access_token")
+    if not access_token:
+        return None
+
+    ctx = result.context
+    title = f"PR Review — {ctx.repo}#{ctx.pr_number}: {ctx.title}"[:200]
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        create = await client.post(
+            "https://docs.googleapis.com/v1/documents",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+            json={"title": title},
+        )
+        if create.status_code != 200:
+            logger.warning("Google Docs create failed: %s", create.status_code)
+            return None
+
+        document_id = create.json().get("documentId")
+        if not document_id:
+            return None
+
+        # Reuse the Markdown the PR comment uses; Docs stores it as plain text
+        # but the structure stays readable.
+        body = render_pr_comment(result)
+
+        await client.post(
+            f"https://docs.googleapis.com/v1/documents/{document_id}:batchUpdate",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "requests": [
+                    {"insertText": {"location": {"index": 1}, "text": body}}
+                ]
+            },
+        )
+
+    return f"https://docs.google.com/document/d/{document_id}/edit"
 
 
 # ============== Rendering ==============
@@ -200,6 +398,33 @@ def render_pr_comment(result: PRAnalysisResult) -> str:
             f"### Related tickets\n\nReferenced but not found: "
             f"{', '.join(f'`{k}`' for k in ctx.ticket_keys)}\n"
         )
+
+    # Linked GitHub issues
+    if ctx.linked_issues:
+        closes = [i for i in ctx.linked_issues if i.relation == "closes"]
+        mentions = [i for i in ctx.linked_issues if i.relation != "closes"]
+
+        parts.append("### Linked issues")
+        parts.append("")
+        for issue in closes:
+            parts.append(
+                f"- Closes [#{issue.number}]({issue.url}) — {issue.title} "
+                f"_({issue.state})_"
+            )
+        for issue in mentions:
+            parts.append(
+                f"- Mentions [#{issue.number}]({issue.url}) — {issue.title} "
+                f"_({issue.state})_"
+            )
+        parts.append("")
+
+    # Related internal docs
+    if ctx.documents:
+        parts.append("### Related documents")
+        parts.append("")
+        for doc in ctx.documents:
+            parts.append(f"- [{doc.title}]({doc.url})")
+        parts.append("")
 
     # Slack discussion
     if ctx.slack_threads:
@@ -285,6 +510,8 @@ async def analyze_pull_request(
     post_comment: bool = True,
     slack_channel: str | None = None,
     enable_llm_review: bool = True,
+    export_to_docs: bool = False,
+    context_doc_ids: list[str] | None = None,
 ) -> PRAnalysisResult:
     """
     Run the full PR analysis pipeline.
@@ -301,6 +528,8 @@ async def analyze_pull_request(
         The analysis result, including anything that went wrong.
     """
     errors: list[str] = []
+    tool_calls: list[ToolInvocation] = []
+    stages: list[PipelineStage] = []
 
     github_config = integration_configs.get("github", {})
     github_token = github_config.get("api_key", "")
@@ -317,6 +546,9 @@ async def analyze_pull_request(
     except Exception as e:
         commit_messages = []
         errors.append(f"Could not read commits: {e}")
+
+    _stage(stages, "read_pr", "Read pull request", "read", StageState.done,
+           f"{pr.get('changed_files', 0)} files, +{pr.get('additions', 0)}/-{pr.get('deletions', 0)}")
 
     # 2. Ticket keys
     ticket_keys = linking.extract_from_pr(
@@ -339,25 +571,160 @@ async def analyze_pull_request(
         deletions=pr.get("deletions", 0),
     )
 
-    # 3. Jira context
-    if ticket_keys and "jira" in integration_configs:
+    # 3. Linked GitHub issues. "Closes #12" is a real edge in GitHub's graph,
+    # only exposed via GraphQL; bare "#12" mentions are fetched separately and
+    # labelled differently so the comment does not overstate the relationship.
+    try:
+        linked = await github_pr.get_linked_issues(github_token, repo, pr_number)
+        mentioned = await github_pr.get_referenced_issues(
+            github_token, repo, pr.get("body"), {i["number"] for i in linked}
+        )
+        context.linked_issues = [LinkedIssue(**i) for i in linked + mentioned]
+        _record(tool_calls, "github", "get_linked_issues",
+                query=f"PR #{pr_number}", result_count=len(linked))
+        if mentioned:
+            _record(tool_calls, "github", "get_referenced_issues",
+                    query="#N in PR body", result_count=len(mentioned))
+    except Exception as e:
+        errors.append(f"Could not resolve linked issues: {e}")
+        _record(tool_calls, "github", "get_linked_issues",
+                succeeded=False, detail=str(e))
+        _stage(stages, "github_issues", "Read GitHub issues", "read",
+               StageState.failed, str(e))
+    else:
+        _stage(stages, "github_issues", "Read GitHub issues", "read",
+               StageState.done,
+               f"{len(context.linked_issues)} linked" if context.linked_issues
+               else "none referenced")
+
+    # 4. Jira context: direct key lookup first, then a topic search if the PR
+    # referenced no key at all.
+    if "jira" in integration_configs:
         try:
-            context.tickets = await fetch_jira_tickets(
-                ticket_keys, integration_configs["jira"]
-            )
+            if ticket_keys:
+                context.tickets = await fetch_jira_tickets(
+                    ticket_keys, integration_configs["jira"]
+                )
+                _record(tool_calls, "jira", "issue_lookup",
+                        query=", ".join(ticket_keys),
+                        result_count=len(context.tickets))
+            if not context.tickets:
+                jql = search_terms.jira_jql(ticket_keys, context.title, branch)
+                context.tickets = await search_jira_tickets(
+                    integration_configs["jira"],
+                    title=context.title,
+                    branch=branch,
+                    exclude_keys=ticket_keys,
+                )
+                _record(tool_calls, "jira", "search",
+                        query=jql or "(no searchable terms in title)",
+                        result_count=len(context.tickets))
         except Exception as e:
             errors.append(f"Jira lookup failed: {e}")
+            _record(tool_calls, "jira", "lookup", succeeded=False, detail=str(e))
+            _stage(stages, "jira", "Read Jira tickets", "read",
+                   StageState.failed, str(e))
+        else:
+            _stage(stages, "jira", "Read Jira tickets", "read", StageState.done,
+                   f"{len(context.tickets)} ticket(s)" if context.tickets
+                   else "no matching tickets")
+    else:
+        _stage(stages, "jira", "Read Jira tickets", "read", StageState.skipped,
+               "Jira not connected")
 
-    # 4. Slack context
+    # 5. Slack context
     if "slack" in integration_configs:
         try:
+            queries = search_terms.slack_queries(
+                ticket_keys, repo, pr_number, context.title, branch,
+                [i.number for i in context.linked_issues],
+            )
             context.slack_threads = await search_slack_threads(
-                ticket_keys, repo, pr_number, integration_configs["slack"]
+                ticket_keys,
+                repo,
+                pr_number,
+                integration_configs["slack"],
+                title=context.title,
+                branch=branch,
+                issue_numbers=[i.number for i in context.linked_issues],
+            )
+            has_user_token = bool(
+                (integration_configs["slack"].get("credentials") or {}).get("user_token")
+            )
+            _record(
+                tool_calls, "slack", "search_messages",
+                query=" | ".join(queries) if has_user_token else None,
+                result_count=len(context.slack_threads),
+                succeeded=has_user_token,
+                detail=None if has_user_token else "No user token (xoxp-); search skipped",
             )
         except Exception as e:
             errors.append(f"Slack search failed: {e}")
+            _record(tool_calls, "slack", "search_messages",
+                    succeeded=False, detail=str(e))
+            _stage(stages, "slack_search", "Search Slack history", "read",
+                   StageState.failed, str(e))
+        else:
+            has_token = bool(
+                (integration_configs["slack"].get("credentials") or {}).get("user_token")
+            )
+            _stage(
+                stages, "slack_search", "Search Slack history", "read",
+                StageState.done if has_token else StageState.skipped,
+                f"{len(context.slack_threads)} thread(s)" if has_token
+                else "no user token (xoxp-)",
+            )
+    else:
+        _stage(stages, "slack_search", "Search Slack history", "read",
+               StageState.skipped, "Slack not connected")
 
-    # 5. Security scan.
+    # 5b. Google Docs: design docs and RFCs describing intended behaviour, so
+    # the reviewer can flag a diff that contradicts the spec rather than
+    # judging it in isolation.
+    document_context = ""
+    docs_config = integration_configs.get("docs") or integration_configs.get("drive")
+    if docs_config:
+        try:
+            documents: list[RelatedDocument] = []
+
+            # Docs pinned to the repo always apply -- a team that names its
+            # governing spec should not depend on keyword search finding it.
+            if context_doc_ids:
+                documents.extend(
+                    await google_docs_context.fetch_documents_by_id(
+                        docs_config, context_doc_ids
+                    )
+                )
+
+            # Then keyword search, skipping anything already pinned.
+            if len(documents) < google_docs_context.MAX_DOCS:
+                pinned_urls = {d.url for d in documents}
+                found = await google_docs_context.find_related_documents(
+                    docs_config,
+                    title=context.title,
+                    branch=branch,
+                    ticket_keys=ticket_keys,
+                )
+                documents.extend(d for d in found if d.url not in pinned_urls)
+
+            context.documents = documents[: google_docs_context.MAX_DOCS]
+            document_context = google_docs_context.format_for_prompt(context.documents)
+            _record(tool_calls, "docs", "find_related_documents",
+                    query=", ".join(ticket_keys) or context.title,
+                    result_count=len(context.documents))
+        except Exception as e:
+            errors.append(f"Google Docs context lookup failed: {e}")
+            _stage(stages, "docs_read", "Read Google Docs", "read",
+                   StageState.failed, str(e))
+        else:
+            _stage(stages, "docs_read", "Read Google Docs", "read", StageState.done,
+                   f"{len(context.documents)} doc(s) given to reviewer"
+                   if context.documents else "no matching docs")
+    else:
+        _stage(stages, "docs_read", "Read Google Docs", "read", StageState.skipped,
+               "Google Docs not connected")
+
+    # 6. Security scan.
     # Semgrep needs real source files; the diff is used for secret scanning and
     # the LLM review, where what changed matters more than whole-file context.
     confirmed: list[SecurityFinding] = []
@@ -379,15 +746,35 @@ async def analyze_pull_request(
             files=changed_files,
             diff_text=diff,
             enable_llm_review=enable_llm_review,
+            document_context=document_context,
         )
         errors.extend(scan_errors)
+        _record(tool_calls, "scanners", "semgrep",
+                query=f"{len(changed_files)} files",
+                result_count=len([f for f in confirmed if f.source.value == "semgrep"]))
+        _record(tool_calls, "scanners", "gitleaks",
+                query="diff",
+                result_count=len([f for f in confirmed if f.source.value == "gitleaks"]))
+        if enable_llm_review:
+            _record(tool_calls, "scanners", "llm_review",
+                    query="diff + document context" if document_context else "diff",
+                    result_count=len(unverified))
     except Exception as e:
         errors.append(f"Security scan failed: {e}")
+        _record(tool_calls, "scanners", "scan", succeeded=False, detail=str(e))
+        _stage(stages, "scan", "Scan diff for vulnerabilities", "read",
+               StageState.failed, str(e))
+    else:
+        _stage(stages, "scan", "Scan diff for vulnerabilities", "read",
+               StageState.done,
+               f"{len(confirmed)} confirmed, {len(unverified)} unverified")
 
     result = PRAnalysisResult(
         context=context,
         confirmed_findings=confirmed,
         unverified_findings=unverified,
+        tool_calls=tool_calls,
+        stages=stages,
         errors=errors,
     )
     result.summary = render_slack_summary(result)
@@ -399,10 +786,45 @@ async def analyze_pull_request(
                 github_token, repo, pr_number, render_pr_comment(result)
             )
             result.pr_comment_posted = True
+            _stage(stages, "pr_comment", "Comment on the PR", "write",
+                   StageState.done, "posted or updated in place")
         except Exception as e:
             result.errors.append(f"Could not post PR comment: {e}")
+            _stage(stages, "pr_comment", "Comment on the PR", "write",
+                   StageState.failed, str(e))
+    else:
+        _stage(stages, "pr_comment", "Comment on the PR", "write",
+               StageState.skipped, "merged PR — outcome goes to Slack and QA instead")
 
-    # 7. Slack summary
+    # 7. Google Doc record
+    if export_to_docs:
+        docs_config = integration_configs.get("docs") or integration_configs.get("drive")
+        if docs_config:
+            try:
+                url = await export_to_google_doc(result, docs_config)
+                if url:
+                    result.doc_url = url
+                    _stage(stages, "docs_export", "Write report to Google Docs",
+                           "write", StageState.done, url)
+                else:
+                    result.errors.append("Google Docs export returned no document")
+                    _stage(stages, "docs_export", "Write report to Google Docs",
+                           "write", StageState.failed, "no document returned")
+            except Exception as e:
+                result.errors.append(f"Google Docs export failed: {e}")
+                _stage(stages, "docs_export", "Write report to Google Docs",
+                       "write", StageState.failed, str(e))
+        else:
+            result.errors.append(
+                "Google Docs export requested but Google Docs is not connected"
+            )
+            _stage(stages, "docs_export", "Write report to Google Docs", "write",
+                   StageState.failed, "Google Docs not connected")
+    else:
+        _stage(stages, "docs_export", "Write report to Google Docs", "write",
+               StageState.skipped, "not enabled for this repo")
+
+    # 8. Slack summary
     if slack_channel and "slack" in integration_configs:
         try:
             bot_token = (
@@ -418,11 +840,23 @@ async def analyze_pull_request(
                     )
                     if response.json().get("ok"):
                         result.slack_posted = True
+                        _stage(stages, "slack_post", "Post summary to Slack",
+                               "write", StageState.done, slack_channel)
                     else:
-                        result.errors.append(
-                            f"Slack post rejected: {response.json().get('error')}"
-                        )
+                        error = response.json().get("error")
+                        result.errors.append(f"Slack post rejected: {error}")
+                        _stage(stages, "slack_post", "Post summary to Slack",
+                               "write", StageState.failed, str(error))
         except Exception as e:
             result.errors.append(f"Could not post to Slack: {e}")
+            _stage(stages, "slack_post", "Post summary to Slack", "write",
+                   StageState.failed, str(e))
+    else:
+        _stage(stages, "slack_post", "Post summary to Slack", "write",
+               StageState.skipped, "no channel configured")
+
+    # Rebind: the result was constructed before the write stages ran, and
+    # Pydantic copied the list at that point rather than aliasing it.
+    result.stages = stages
 
     return result

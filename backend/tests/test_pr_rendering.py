@@ -150,3 +150,85 @@ class TestSlackSummary:
         assert "No security findings" in render_slack_summary(
             PRAnalysisResult(context=make_context())
         )
+
+
+class TestPipelineStages:
+    """
+    The run detail lists every step so it is visible what was read, what was
+    written, and what was skipped -- not only the end result.
+    """
+
+    def test_write_stages_survive_result_construction(self):
+        """
+        Regression: the result was built before the write stages ran, and
+        Pydantic copies list fields on assignment. Without rebinding, every
+        write stage was silently dropped from the response.
+        """
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        from app.services import pr_agent
+
+        pr = {
+            "title": "Fix timeouts", "user": {"login": "x"},
+            "html_url": "u", "head": {"ref": "b", "sha": "s"},
+            "body": "", "changed_files": 1, "additions": 1, "deletions": 0,
+        }
+
+        with (
+            patch.object(pr_agent.github_pr, "get_pull_request", AsyncMock(return_value=pr)),
+            patch.object(pr_agent.github_pr, "get_pr_commits", AsyncMock(return_value=[])),
+            patch.object(pr_agent.github_pr, "get_linked_issues", AsyncMock(return_value=[])),
+            patch.object(pr_agent.github_pr, "get_referenced_issues", AsyncMock(return_value=[])),
+            patch.object(pr_agent.github_pr, "get_pr_diff", AsyncMock(return_value="d")),
+            patch.object(
+                pr_agent.github_pr, "get_changed_file_contents",
+                AsyncMock(return_value=({}, [])),
+            ),
+            patch.object(pr_agent, "scan_changes", AsyncMock(return_value=([], [], []))),
+            patch.object(pr_agent.github_pr, "upsert_pr_comment", AsyncMock(return_value={})),
+        ):
+            result = asyncio.run(pr_agent.analyze_pull_request(
+                "acme/api", 1, {"github": {"api_key": "x"}}, post_comment=True,
+            ))
+
+        kinds = {s.kind for s in result.stages}
+        assert "read" in kinds
+        assert "write" in kinds
+
+        by_key = {s.key: s for s in result.stages}
+        assert by_key["pr_comment"].state.value == "done"
+
+    def test_disconnected_services_are_skipped_with_a_reason(self):
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        from app.services import pr_agent
+
+        pr = {
+            "title": "t", "user": {"login": "x"}, "html_url": "u",
+            "head": {"ref": "b", "sha": "s"}, "body": "",
+            "changed_files": 1, "additions": 1, "deletions": 0,
+        }
+
+        with (
+            patch.object(pr_agent.github_pr, "get_pull_request", AsyncMock(return_value=pr)),
+            patch.object(pr_agent.github_pr, "get_pr_commits", AsyncMock(return_value=[])),
+            patch.object(pr_agent.github_pr, "get_linked_issues", AsyncMock(return_value=[])),
+            patch.object(pr_agent.github_pr, "get_referenced_issues", AsyncMock(return_value=[])),
+            patch.object(pr_agent.github_pr, "get_pr_diff", AsyncMock(return_value="d")),
+            patch.object(
+                pr_agent.github_pr, "get_changed_file_contents",
+                AsyncMock(return_value=({}, [])),
+            ),
+            patch.object(pr_agent, "scan_changes", AsyncMock(return_value=([], [], []))),
+        ):
+            result = asyncio.run(pr_agent.analyze_pull_request(
+                "acme/api", 1, {"github": {"api_key": "x"}}, post_comment=False,
+            ))
+
+        by_key = {s.key: s for s in result.stages}
+        # A skip must say why, or a thin result looks like a silent failure.
+        assert by_key["jira"].state.value == "skipped"
+        assert "not connected" in by_key["jira"].detail
+        assert by_key["slack_search"].state.value == "skipped"

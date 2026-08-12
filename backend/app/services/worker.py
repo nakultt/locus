@@ -57,3 +57,30 @@ async def worker_loop() -> None:
             # Never let one bad job kill the loop.
             logger.exception("Worker iteration failed")
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
+
+
+async def qa_email_loop() -> None:
+    """
+    Poll Gmail for QA replies.
+
+    Kept separate from the job worker: that loop spins every few seconds
+    looking for queued work, while this one should touch the Gmail API only
+    every few minutes.
+    """
+    from app.services.qa_email_poller import POLL_INTERVAL_SECONDS as EMAIL_INTERVAL
+    from app.services.qa_email_poller import poll_once
+
+    logger.info("QA email poller started")
+
+    while True:
+        try:
+            await asyncio.sleep(EMAIL_INTERVAL)
+            processed = await poll_once()
+            if processed:
+                logger.info("Processed %s QA email reply(ies)", processed)
+
+        except asyncio.CancelledError:
+            logger.info("QA email poller stopping")
+            raise
+        except Exception:
+            logger.exception("QA email poll failed")

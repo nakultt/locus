@@ -4,6 +4,7 @@ FastAPI Backend Entry Point
 """
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -17,9 +18,10 @@ from app.routers import (
     google_oauth,
     linear_oauth,
     settings,
+    slack_events,
     webhooks,
 )
-from app.services.worker import worker_loop
+from app.services.worker import qa_email_loop, worker_loop
 
 
 @asynccontextmanager
@@ -27,15 +29,20 @@ async def lifespan(app: FastAPI):
     """Create tables and start the background PR worker."""
     Base.metadata.create_all(bind=engine)
 
-    worker_task = asyncio.create_task(worker_loop())
+    tasks = [
+        asyncio.create_task(worker_loop()),
+        asyncio.create_task(qa_email_loop()),
+    ]
     try:
         yield
     finally:
-        worker_task.cancel()
-        try:
-            await worker_task
-        except asyncio.CancelledError:
-            pass
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(
@@ -49,15 +56,28 @@ app = FastAPI(
 # NOTE:
 # - When allow_credentials=True, we CANNOT use allow_origins=["*"].
 # - Browsers will reject such responses and FastAPI/Starlette will raise at startup.
+#
+# Production origins are listed explicitly; extra ones can be added via
+# CORS_ORIGINS (comma-separated).
 allowed_origins = [
-    "http://localhost:3000",
-    "http://localhost:5173",
     "https://locus-gamma.vercel.app",
 ]
+
+_extra_origins = os.getenv("CORS_ORIGINS", "")
+allowed_origins.extend(
+    origin.strip() for origin in _extra_origins.split(",") if origin.strip()
+)
+
+# Any localhost port, for development. Vite picks the next free port when its
+# default is taken, so a fixed list means CORS silently breaks whenever that
+# happens. A regex covers every dev port without loosening production, which
+# still only matches the explicit origins above.
+LOCALHOST_ORIGIN_PATTERN = r"http://(localhost|127\.0\.0\.1):\d+"
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
+    allow_origin_regex=LOCALHOST_ORIGIN_PATTERN,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -71,6 +91,7 @@ app.include_router(chat.router, prefix="/api", tags=["Chat"])
 app.include_router(conversations.router, prefix="/api", tags=["Conversations"])
 app.include_router(settings.router, prefix="/api/settings", tags=["Settings"])
 app.include_router(webhooks.router, prefix="/webhooks", tags=["Webhooks"])
+app.include_router(slack_events.router, prefix="/webhooks", tags=["Webhooks"])
 
 
 @app.get("/", tags=["Health"])

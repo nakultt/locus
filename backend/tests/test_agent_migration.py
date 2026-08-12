@@ -185,3 +185,45 @@ class TestStreaming:
             e async for e in agent_module.process_chat_message_streaming("hi", {})
         ]
         assert events[0]["event_type"] == "error"
+
+
+class TestConversationHistory:
+    """
+    Prior turns must reach the agent. Without them a reply like "#web" that
+    answers a question the assistant just asked arrives with no referent, and
+    the model treats it as a fresh unrelated request.
+    """
+
+    def test_prior_turns_precede_current_message(self):
+        from app.services.agent import build_message_history
+
+        messages = build_message_history(
+            [("user", "read latest messages in slack"),
+             ("assistant", "Which channel?")],
+            "#web",
+        )
+        assert [type(m).__name__ for m in messages] == [
+            "HumanMessage", "AIMessage", "HumanMessage"
+        ]
+        assert messages[-1].content == "#web"
+
+    def test_history_is_capped(self):
+        from app.services.agent import MAX_HISTORY_MESSAGES, build_message_history
+
+        long_history = [
+            ("user" if i % 2 == 0 else "assistant", f"m{i}") for i in range(60)
+        ]
+        messages = build_message_history(long_history, "now")
+        # Capped turns plus the current message.
+        assert len(messages) == MAX_HISTORY_MESSAGES + 1
+
+    def test_no_history_yields_single_message(self):
+        from app.services.agent import build_message_history
+
+        assert len(build_message_history(None, "hi")) == 1
+
+    def test_blank_turns_are_skipped(self):
+        from app.services.agent import build_message_history
+
+        messages = build_message_history([("user", ""), ("user", "real")], "now")
+        assert len(messages) == 2

@@ -155,13 +155,54 @@ Do not add any `admin.*` scope; those are Enterprise Grid only and will block in
 
 ### Setup
 
-1. Connect GitHub, Jira, and Slack in Locus
-2. Register the repo, which returns a webhook secret
-3. In GitHub: **Settings → Webhooks → Add webhook**
-   - Payload URL: `https://<your-backend>/webhooks/github`
-   - Content type: `application/json`
-   - Secret: the value from step 2
-   - Events: **Pull requests** only
+**1. Connect GitHub** in Integrations, with a personal access token carrying `repo` scope. This is what reads PRs and posts comments — without it the pipeline fails immediately. Jira and Slack are optional; each simply contributes less context if absent.
+
+**2. Expose the backend.** GitHub cannot reach `localhost`, so for local development open a tunnel:
+
+```bash
+cloudflared tunnel --url http://localhost:8000
+```
+
+Put the URL it prints in `backend/.env` as `PUBLIC_BASE_URL` and restart the backend.
+
+**3. Register the repo.** This mints the webhook secret:
+
+```bash
+curl -X POST http://localhost:8000/webhooks/repos -H "Content-Type: application/json" -d '{"user_id":1,"repo":"owner/name","slack_channel":"#dev-updates"}'
+```
+
+The response carries `webhook_url` and `webhook_secret`. **The secret is shown once** — it is stored encrypted and no endpoint reads it back. Re-registering the same repo rotates it and invalidates the old one.
+
+**4. Add the webhook in GitHub** — repo **Settings → Webhooks → Add webhook**:
+
+| Field | Value |
+|---|---|
+| Payload URL | the `webhook_url` from step 3 |
+| Content type | `application/json` |
+| Secret | the `webhook_secret` from step 3 |
+| Events | **Let me select individual events → Pull requests** only |
+
+**5. Open a PR.** Analysis runs on `opened`, `reopened`, `synchronize`, and `ready_for_review`. Drafts are skipped.
+
+**6. Merge it.** On merge Locus transitions the Jira ticket, closes linked GitHub issues, and emails the test team a brief of what to verify. Configure the target status, QA addresses, and pinned context docs when registering the repo.
+
+### Triggering without a webhook
+
+To test the pipeline, re-run after fixing a credential, or demo against an already-open PR:
+
+```bash
+curl -X POST http://localhost:8000/webhooks/analyze/1/owner/name/42
+```
+
+This needs neither a tunnel nor a registration — only a connected GitHub token. A registered repo additionally supplies the Slack channel for the summary.
+
+Check results:
+
+```bash
+curl http://localhost:8000/webhooks/jobs/1
+```
+
+A `failed` job carries the reason in its `error` field; that is the first place to look.
 
 ### How it works
 
@@ -187,6 +228,57 @@ worker picks up job
     ├─▶ upsert PR comment  (edits its own prior comment)
     └─▶ post Slack summary
 ```
+
+### Post-merge actions
+
+| Action | Behaviour |
+|---|---|
+| Jira transition | Moves the ticket to the configured status (default `Done`) |
+| GitHub issues | Closes issues the PR formally *closes*; a bare `#N` mention is left alone |
+| QA email | Emails the test team a model-written brief of what to verify |
+
+**Transitions are forward-only.** A target status that would move a ticket backwards — `Done` → `In Progress` — is refused rather than applied, so a misconfigured status cannot drag a team's board backwards. Unrecognized statuses pass through, since custom workflows are common and refusing everything unknown would make the feature unusable.
+
+### QA feedback loop
+
+The merge notification is posted to Slack **as a thread**. A tester replying in
+that thread triggers a classifier, and Locus reopens what the merge closed:
+
+| Verdict | Action |
+|---|---|
+| `broken` | Reopens the Jira ticket and linked GitHub issues, recording the tester's words |
+| `works` | Marks the thread resolved |
+| `unclear` | Pings the PR author in-thread. **Nothing is changed.** |
+| `not_feedback` | Ignored ("thanks", "looking now") |
+
+**Ambiguity escalates rather than guesses.** "The retry works but the timeout is
+30s now?" is neither pass nor fail — a wrong reopen reverses a merge decision, a
+wrong dismissal buries a real bug. The classifier returns `unclear` whenever it
+is not confident, including when the model is unavailable.
+
+Both channels feed the same classifier:
+
+| Channel | Mechanism | Correlation |
+|---|---|---|
+| Slack | Events API webhook, sub-second | `thread_ts` of the notification |
+| Email | Gmail polled every 3 minutes | `In-Reply-To` vs the stored `Message-ID` |
+
+**Slack setup:** create an event subscription pointing at
+`https://<your-backend>/webhooks/slack`, subscribe to `message.channels`, and set
+`SLACK_SIGNING_SECRET` in `backend/.env`. The bot must be in the channel.
+
+**Email setup:** none beyond connecting Gmail — `gmail.readonly` is already in the
+OAuth scopes. Gmail is polled rather than pushed because its Pub/Sub watch expires
+every 7 days and needs a renewal job regardless, at which point polling is simpler.
+Replies are matched by `In-Reply-To` against a Message-ID set when sending;
+subject matching would break the moment a client rewrites the subject. Quoted
+text is stripped before classification, or the model reads our own "reply if
+broken" boilerplate instead of the tester's answer.
+
+Threads stop being watched after 14 days.
+
+The reply text reaches a model whose verdict drives state changes, so the
+classifier has no tools bound — it returns a verdict and nothing else.
 
 ### Design decisions worth knowing
 
@@ -218,6 +310,14 @@ worker picks up job
 | `GET` | `/api/conversations/{user_id}` | Conversation list |
 | `GET` | `/api/settings/llm` | Local model readiness |
 | `POST` | `/webhooks/github` | GitHub events (HMAC-authenticated) |
+| `POST` | `/webhooks/slack` | Slack events — QA replies (HMAC-authenticated) |
+| `POST` | `/webhooks/repos` | Register a repo; returns the webhook secret once |
+| `GET` | `/webhooks/repos/{user_id}` | List registered repos |
+| `DELETE` | `/webhooks/repos/{user_id}/{owner}/{name}` | Unregister |
+| `POST` | `/webhooks/analyze/{user_id}/{owner}/{name}/{pr}` | Analyze a PR now, no webhook needed |
+| `GET` | `/webhooks/jobs/{user_id}` | Recent analysis jobs and their errors |
+| `GET` | `/webhooks/jobs/{user_id}/{job_id}` | One run with findings, context, and tools used |
+| `GET` | `/webhooks/summary/{user_id}` | Per-capability pipeline readiness |
 
 ### Checking model readiness
 
@@ -251,10 +351,11 @@ These are tracked in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) and are wo
 - **Authentication is not enforced.** `verify_token()` exists but no endpoint calls it; routes trust a client-supplied `user_id`. **Do not expose this to untrusted users.** — Plan §0.1
 - **Most service credentials use module-level globals.** Concurrent requests can cross-contaminate tokens between users, and it prevents safe multi-instance deployment. `slack.py` has been converted to closures; the other 13 have not. — Plan §0.2
 - **Calendar date parsing is minimal.** Only "2pm", "3pm", and "10am" are recognized; everything else silently becomes 9am, and events are written as UTC regardless of the user's timezone. `User.timezone` exists but is not yet used. — Plan §0.4
-- **No repo-registration endpoint.** `repo_webhooks` rows must be inserted manually, so the PR agent cannot yet be set up through the UI.
+- **Repo registration is API-only.** There is no UI for it yet; use `POST /webhooks/repos` as described above.
 - The PR agent has not been run end to end against a live GitHub webhook. Component logic is unit-tested; the Jira and Slack response-shape handling is written against the documented APIs but unverified with real credentials.
 - The worker is single-instance; multi-instance needs row locking or a real queue.
-- Gitleaks is optional and not bundled — without it, committed-secret detection is skipped.
+- Gitleaks is optional and not bundled. Install with `go install github.com/zricethezav/gitleaks/v8@latest`; without it, committed-secret detection is skipped.
+- The Gmail poller runs in-process on a single instance. Multi-instance deployment would double-process replies without a lock.
 
 ---
 

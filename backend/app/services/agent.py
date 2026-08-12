@@ -359,6 +359,44 @@ def extract_actions(messages: list[BaseMessage]) -> list[ActionResult]:
     return actions
 
 
+# How many prior turns to replay into the agent. Local models run an 8K context
+# and the system prompt plus tool schemas already consume a large share of it,
+# so history is capped rather than unbounded.
+MAX_HISTORY_MESSAGES = 20
+
+
+def build_message_history(
+    history: list[tuple[str, str]] | None,
+    message: str,
+) -> list[BaseMessage]:
+    """
+    Turn stored conversation rows into the message list the agent expects.
+
+    Without this the agent sees only the current turn, so a reply like "#web"
+    that answers a question the assistant just asked arrives with no idea what
+    it refers to.
+
+    Args:
+        history: (role, content) pairs oldest-first, excluding the current turn
+        message: The current user message
+
+    Returns:
+        Messages ready to pass as {"messages": ...}
+    """
+    messages: list[BaseMessage] = []
+
+    for role, content in (history or [])[-MAX_HISTORY_MESSAGES:]:
+        if not content:
+            continue
+        if role == "user":
+            messages.append(HumanMessage(content=content))
+        elif role == "assistant":
+            messages.append(AIMessage(content=content))
+
+    messages.append(HumanMessage(content=message))
+    return messages
+
+
 def final_text(messages: list[BaseMessage]) -> str:
     """Return the agent's last assistant message."""
     for message in reversed(messages):
@@ -378,7 +416,8 @@ def final_text(messages: list[BaseMessage]) -> str:
 async def process_chat_message(
     message: str,
     integration_configs: dict[str, dict],
-    smart_mode: bool = False
+    smart_mode: bool = False,
+    history: list[tuple[str, str]] | None = None,
 ) -> ChatResponse:
     """
     Process a natural language message through the LangChain agent.
@@ -387,6 +426,7 @@ async def process_chat_message(
         message: User's natural language command
         integration_configs: Dict of service name to config
         smart_mode: Use higher intelligence model when True
+        history: Prior (role, content) turns in this conversation, oldest first
     """
     # Build tools based on available integrations
     tools = build_tools(integration_configs)
@@ -402,7 +442,7 @@ async def process_chat_message(
 
     try:
         result = await agent.ainvoke(
-            {"messages": [HumanMessage(content=message)]},
+            {"messages": build_message_history(history, message)},
             config={"recursion_limit": MAX_AGENT_ITERATIONS * 2},
         )
 
@@ -472,7 +512,8 @@ def determine_service(tool_name: str) -> str:
 
 async def process_chat_message_streaming(
     message: str,
-    integration_configs: dict[str, dict]
+    integration_configs: dict[str, dict],
+    history: list[tuple[str, str]] | None = None,
 ) -> AsyncGenerator[dict, None]:
     """
     Process a chat message with streaming task updates.
@@ -514,7 +555,9 @@ async def process_chat_message_streaming(
         
         # Use regular agent for single/unclear requests
         try:
-            result = await process_chat_message(message, integration_configs)
+            result = await process_chat_message(
+                message, integration_configs, history=history
+            )
             yield {
                 "event_type": "complete",
                 "data": {
@@ -574,7 +617,7 @@ Do NOT stop until all tasks are complete."""
         # Stream node updates so events are emitted as work happens, rather than
         # replayed from intermediate_steps once the whole run has finished.
         async for chunk in agent.astream(
-            {"messages": [HumanMessage(content=enhanced_message)]},
+            {"messages": build_message_history(history, enhanced_message)},
             config={"recursion_limit": MAX_AGENT_ITERATIONS * 2},
             stream_mode="updates",
         ):
