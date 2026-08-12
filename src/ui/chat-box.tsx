@@ -13,7 +13,7 @@ import { useNavigate } from "react-router-dom";
 import {
   streamChatMessage,
   getConversationMessages,
-  checkGeminiKey,
+  checkLLMStatus,
   type ActionResult,
   type StreamEvent,
   type Message as ApiMessage,
@@ -213,6 +213,7 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
   const [isActive, setIsActive] = useState(false);
   const [smartMode, setSmartMode] = useState(false);
   const [showApiKeyModal, setShowApiKeyModal] = useState(false);
+  const [llmMessage, setLlmMessage] = useState<string>("");
   
   // Live streaming state
   const [currentStatus, setCurrentStatus] = useState<string>("");
@@ -329,10 +330,11 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
       return;
     }
 
-    // Check if Gemini API key is set
+    // Check the local model server is up with a model loaded
     try {
-      const keyStatus = await checkGeminiKey(user.id);
-      if (!keyStatus.has_key) {
+      const status = await checkLLMStatus();
+      if (!status.available) {
+        setLlmMessage(status.message);
         setShowApiKeyModal(true);
         setIsLoading(false);
         setCurrentStatus("");
@@ -341,8 +343,10 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
         return;
       }
     } catch (err) {
-      console.error("Error checking Gemini key:", err);
-      // Show modal on error - assume key is missing
+      console.error("Error checking local model status:", err);
+      setLlmMessage(
+        "Cannot reach the Locus backend. Make sure it is running."
+      );
       setShowApiKeyModal(true);
       setIsLoading(false);
       setCurrentStatus("");
@@ -557,10 +561,11 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
                   <Lightbulb className="w-8 h-8 text-yellow-600 dark:text-yellow-400" />
                 </div>
                 <h2 className="text-xl font-bold text-foreground mb-2">
-                  Gemini API Key Required
+                  Local model unavailable
                 </h2>
                 <p className="text-muted-foreground mb-6">
-                  Please add your Gemini API Key in Settings to start chatting with Locus.
+                  {llmMessage ||
+                    "Start MoE Model Manager and load a text model to chat with Locus."}
                 </p>
                 <div className="flex gap-3 justify-center">
                   <button

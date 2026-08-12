@@ -5,8 +5,8 @@ LangChain tools for GitHub repository, issue, and pull request management
 Uses classic Personal Access Token (ghp_...) for authentication.
 """
 
+
 import requests
-from typing import Optional
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, Field
 

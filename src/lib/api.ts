@@ -431,31 +431,21 @@ export async function getSupportedCommands(): Promise<Record<string, unknown>> {
 
 // ============== Settings API ==============
 
-export interface GeminiKeyStatus {
-  has_key: boolean;
+/**
+ * Status of the local model backend (MoE Model Manager).
+ * Locus runs entirely on local models; there are no API keys to manage.
+ */
+export interface LLMStatus {
+  available: boolean;
   message: string;
+  provider?: string;
+  base_url?: string;
+  fast_model?: string;
+  smart_model?: string;
 }
 
-export async function setGeminiKey(
-  userId: number,
-  apiKey: string
-): Promise<GeminiKeyStatus> {
-  return apiRequest<GeminiKeyStatus>("/api/settings/gemini-key", {
-    method: "POST",
-    body: JSON.stringify({ user_id: userId, api_key: apiKey }),
-  });
-}
-
-export async function checkGeminiKey(userId: number): Promise<GeminiKeyStatus> {
-  return apiRequest<GeminiKeyStatus>(`/api/settings/gemini-key/${userId}`);
-}
-
-export async function deleteGeminiKey(
-  userId: number
-): Promise<GeminiKeyStatus> {
-  return apiRequest<GeminiKeyStatus>(`/api/settings/gemini-key/${userId}`, {
-    method: "DELETE",
-  });
+export async function checkLLMStatus(): Promise<LLMStatus> {
+  return apiRequest<LLMStatus>("/api/settings/llm");
 }
 
 // ============== Health Check ==============

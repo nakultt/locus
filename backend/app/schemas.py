@@ -4,10 +4,10 @@ Request/Response validation models
 """
 
 from datetime import datetime
-from typing import Optional, Any
 from enum import Enum
-from pydantic import BaseModel, EmailStr, Field
+from typing import Any
 
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 # ============== User Schemas ==============
 
@@ -15,27 +15,25 @@ class UserCreate(BaseModel):
     """Schema for user registration."""
     email: EmailStr
     password: str = Field(..., min_length=6, description="Password must be at least 6 characters")
-    name: Optional[str] = Field(None, description="User's display name")
+    name: str | None = Field(None, description="User's display name")
 
 
 class UserUpdate(BaseModel):
     """Schema for updating user details."""
-    email: Optional[EmailStr] = None
-    password: Optional[str] = Field(None, min_length=6, description="New password")
-    name: Optional[str] = None
+    email: EmailStr | None = None
+    password: str | None = Field(None, min_length=6, description="New password")
+    name: str | None = None
 
 
 class UserResponse(BaseModel):
     """Schema for user response (excludes password)."""
     id: int
     email: str
-    name: Optional[str] = None
-    created_at: Optional[datetime] = None
-    token: Optional[str] = Field(None, description="JWT access token")
-    has_gemini_key: bool = Field(False, description="Whether user has configured Gemini API key")
+    name: str | None = None
+    created_at: datetime | None = None
+    token: str | None = Field(None, description="JWT access token")
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class UserLogin(BaseModel):
@@ -45,16 +43,14 @@ class UserLogin(BaseModel):
     remember_me: bool = Field(False, description="Keep user logged in for 30 days")
 
 
-class GeminiKeySet(BaseModel):
-    """Schema for setting Gemini API key."""
-    user_id: int
-    api_key: str = Field(..., min_length=1, description="Google Gemini API key")
-
-
-class GeminiKeyStatus(BaseModel):
-    """Schema for Gemini key status response."""
-    has_key: bool
-    message: str
+class LLMStatus(BaseModel):
+    """Status of the local model backend."""
+    available: bool = Field(..., description="Whether a text model is loaded and ready")
+    message: str = Field(..., description="Human-readable status or remediation hint")
+    provider: str | None = None
+    base_url: str | None = None
+    fast_model: str | None = None
+    smart_model: str | None = None
 
 
 # ============== Integration Schemas ==============
@@ -66,8 +62,8 @@ class IntegrationCreate(BaseModel):
         ...,
         description="Service name: jira, gmail, calendar, slack, notion"
     )
-    api_key: Optional[str] = Field(None, description="API key for simple auth")
-    credentials: Optional[dict[str, Any]] = Field(
+    api_key: str | None = Field(None, description="API key for simple auth")
+    credentials: dict[str, Any] | None = Field(
         None,
         description="OAuth credentials or complex auth config"
     )
@@ -78,11 +74,10 @@ class IntegrationResponse(BaseModel):
     id: int
     service_name: str
     owner_id: int
-    created_at: Optional[datetime] = None
+    created_at: datetime | None = None
     is_connected: bool = True
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class IntegrationList(BaseModel):
@@ -98,7 +93,7 @@ class ChatRequest(BaseModel):
     user_id: int
     message: str = Field(..., min_length=1, description="User's natural language command")
     smart_mode: bool = Field(False, description="Use higher intelligence model when enabled")
-    conversation_id: Optional[int] = Field(None, description="Existing conversation ID, or None to create new")
+    conversation_id: int | None = Field(None, description="Existing conversation ID, or None to create new")
 
 
 class ActionResult(BaseModel):
@@ -106,16 +101,16 @@ class ActionResult(BaseModel):
     service: str
     action: str
     success: bool
-    result: Optional[Any] = None
-    error: Optional[str] = None
+    result: Any | None = None
+    error: str | None = None
 
 
 class ChatResponse(BaseModel):
     """Schema for chat response."""
     message: str
     actions_taken: list[ActionResult] = []
-    raw_response: Optional[str] = None
-    conversation_id: Optional[int] = None
+    raw_response: str | None = None
+    conversation_id: int | None = None
 
 
 # ============== Streaming Task Schemas ==============
@@ -135,9 +130,9 @@ class TaskUpdate(BaseModel):
     action: str
     description: str
     status: TaskStatusEnum
-    tool_name: Optional[str] = None
-    result: Optional[str] = None
-    error: Optional[str] = None
+    tool_name: str | None = None
+    result: str | None = None
+    error: str | None = None
     depends_on: list[str] = []
 
 
@@ -153,7 +148,7 @@ class TaskPlanResponse(BaseModel):
     total: int
     completed: int = 0
     failed: int = 0
-    current_task_id: Optional[str] = None
+    current_task_id: str | None = None
 
 
 # ============== Conversation Schemas ==============
@@ -161,7 +156,7 @@ class TaskPlanResponse(BaseModel):
 class ConversationCreate(BaseModel):
     """Schema for creating a new conversation."""
     user_id: int
-    title: Optional[str] = Field("New Chat", description="Conversation title")
+    title: str | None = Field("New Chat", description="Conversation title")
 
 
 class ConversationResponse(BaseModel):
@@ -170,10 +165,9 @@ class ConversationResponse(BaseModel):
     title: str
     owner_id: int
     created_at: datetime
-    updated_at: Optional[datetime] = None
+    updated_at: datetime | None = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ConversationList(BaseModel):
@@ -188,11 +182,10 @@ class MessageResponse(BaseModel):
     conversation_id: int
     role: str
     content: str
-    actions_taken: Optional[list[ActionResult]] = None
+    actions_taken: list[ActionResult] | None = None
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ConversationUpdate(BaseModel):
@@ -200,9 +193,114 @@ class ConversationUpdate(BaseModel):
     title: str
 
 
+# ============== PR Context Agent Schemas ==============
+
+class SecuritySeverity(str, Enum):
+    """Severity of a security finding."""
+    critical = "critical"
+    high = "high"
+    medium = "medium"
+    low = "low"
+    info = "info"
+
+
+class FindingSource(str, Enum):
+    """
+    Where a finding came from.
+
+    `semgrep` findings are deterministic rule matches and are reported as
+    confirmed. `llm` findings are model-generated and reported as unverified;
+    the two are never merged into one list, because a wrong "confirmed
+    vulnerability" on someone's PR destroys trust in the tool.
+    """
+    semgrep = "semgrep"
+    gitleaks = "gitleaks"
+    llm = "llm"
+
+
+class SecurityFinding(BaseModel):
+    """A single security finding against a PR diff."""
+    source: FindingSource
+    severity: SecuritySeverity
+    title: str
+    file_path: str
+    line: int | None = None
+    description: str
+    rule_id: str | None = None
+    # Deliberately no `secret_value` field. Detected credentials are reported
+    # by location only; echoing them into a PR comment widens the exposure.
+
+
+class RelatedTicket(BaseModel):
+    """A ticket linked to a PR."""
+    key: str
+    summary: str | None = None
+    status: str | None = None
+    assignee: str | None = None
+    url: str | None = None
+    source: str = Field("jira", description="jira or linear")
+
+
+class RelatedSlackThread(BaseModel):
+    """A Slack thread linked to a PR."""
+    channel: str
+    permalink: str | None = None
+    message_count: int = 0
+    summary: str | None = None
+    participants: list[str] = []
+
+
+class PRContext(BaseModel):
+    """Everything gathered about a pull request."""
+    repo: str
+    pr_number: int
+    title: str
+    author: str
+    url: str
+    branch: str | None = None
+    ticket_keys: list[str] = []
+    tickets: list[RelatedTicket] = []
+    slack_threads: list[RelatedSlackThread] = []
+    files_changed: int = 0
+    additions: int = 0
+    deletions: int = 0
+
+
+class PRAnalysisResult(BaseModel):
+    """Result of the full PR analysis pipeline."""
+    context: PRContext
+    confirmed_findings: list[SecurityFinding] = []
+    unverified_findings: list[SecurityFinding] = []
+    summary: str = ""
+    pr_comment_posted: bool = False
+    slack_posted: bool = False
+    errors: list[str] = []
+
+
+class PRJobStatus(str, Enum):
+    """Lifecycle of a queued PR analysis job."""
+    queued = "queued"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+
+
+class PRJobResponse(BaseModel):
+    """Status of a PR analysis job."""
+    id: int
+    status: PRJobStatus
+    repo: str
+    pr_number: int
+    created_at: datetime
+    completed_at: datetime | None = None
+    error: str | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 # ============== Error Schemas ==============
 
 class ErrorResponse(BaseModel):
     """Schema for error responses."""
     detail: str
-    error_code: Optional[str] = None
+    error_code: str | None = None

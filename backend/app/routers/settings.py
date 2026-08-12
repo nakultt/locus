@@ -1,94 +1,39 @@
 """
 User Settings Router
-Handles user settings including Gemini API key management
+Local model backend status.
+
+Locus runs entirely on a local OpenAI-compatible model server (MoE Model
+Manager). There are no per-user model API keys to manage.
 """
 
-from fastapi import APIRouter, HTTPException, status, Depends
-from sqlalchemy.orm import Session
+from fastapi import APIRouter
 
-from app.database import get_db
-from app import crud, schemas
+from app import schemas
+from app.services.llm import check_llm_available, describe_backend
 
 router = APIRouter()
 
 
-@router.post(
-    "/gemini-key",
-    response_model=schemas.GeminiKeyStatus,
-    summary="Set user's Gemini API key"
-)
-async def set_gemini_key(
-    request: schemas.GeminiKeySet,
-    db: Session = Depends(get_db)
-) -> schemas.GeminiKeyStatus:
-    """
-    Set or update user's Gemini API key.
-    The key is encrypted before storage.
-    """
-    success = crud.set_user_gemini_key(db, request.user_id, request.api_key)
-    
-    if not success:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
-    
-    return schemas.GeminiKeyStatus(
-        has_key=True,
-        message="Gemini API key saved successfully"
-    )
-
-
 @router.get(
-    "/gemini-key/{user_id}",
-    response_model=schemas.GeminiKeyStatus,
-    summary="Check if user has Gemini API key"
+    "/llm",
+    response_model=schemas.LLMStatus,
+    summary="Local model backend status"
 )
-async def check_gemini_key(
-    user_id: int,
-    db: Session = Depends(get_db)
-) -> schemas.GeminiKeyStatus:
+async def llm_status() -> schemas.LLMStatus:
     """
-    Check if a user has configured their Gemini API key.
-    Does not return the actual key for security.
-    """
-    user = crud.get_user_by_id(db, user_id)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
-    
-    has_key = crud.has_gemini_key(db, user_id)
-    
-    return schemas.GeminiKeyStatus(
-        has_key=has_key,
-        message="Gemini API key is configured" if has_key else "No Gemini API key configured"
-    )
+    Report whether the local model server is reachable and has a model loaded.
 
+    The frontend uses this to tell the user to start MoE Model Manager, rather
+    than letting chat fail with an opaque connection error.
+    """
+    available, message = await check_llm_available()
+    backend = describe_backend()
 
-@router.delete(
-    "/gemini-key/{user_id}",
-    response_model=schemas.GeminiKeyStatus,
-    summary="Delete user's Gemini API key"
-)
-async def delete_gemini_key(
-    user_id: int,
-    db: Session = Depends(get_db)
-) -> schemas.GeminiKeyStatus:
-    """
-    Delete user's Gemini API key.
-    """
-    user = crud.get_user_by_id(db, user_id)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
-    
-    crud.delete_user_gemini_key(db, user_id)
-    
-    return schemas.GeminiKeyStatus(
-        has_key=False,
-        message="Gemini API key deleted"
+    return schemas.LLMStatus(
+        available=available,
+        message=message,
+        provider=backend["provider"],
+        base_url=backend["base_url"],
+        fast_model=backend["fast_model"],
+        smart_model=backend["smart_model"],
     )

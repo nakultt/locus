@@ -4,10 +4,11 @@ Manage chat conversations and message history
 """
 
 import json
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app import schemas, crud
+from app import crud, schemas
 from app.database import get_db
 
 router = APIRouter()

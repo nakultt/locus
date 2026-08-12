@@ -3,14 +3,15 @@ Security Utilities
 Password hashing (bcrypt) and token encryption (Fernet)
 """
 
-import os
 import json
-from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
-from passlib.context import CryptContext
+import os
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
 from cryptography.fernet import Fernet
-from jose import jwt, JWTError
 from dotenv import load_dotenv
+from jose import JWTError, jwt
+from passlib.context import CryptContext
 
 load_dotenv()
 
@@ -42,14 +43,14 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
 def create_access_token(
     user_id: int, 
     email: str, 
-    name: Optional[str] = None,
+    name: str | None = None,
     remember_me: bool = False
 ) -> str:
     """Create a JWT access token for a user."""
     if remember_me:
-        expire = datetime.now(timezone.utc) + timedelta(days=30)
+        expire = datetime.now(UTC) + timedelta(days=30)
     else:
-        expire = datetime.now(timezone.utc) + timedelta(hours=1)
+        expire = datetime.now(UTC) + timedelta(hours=1)
     to_encode = {
         "sub": str(user_id),
         "email": email,
@@ -60,7 +61,7 @@ def create_access_token(
     return encoded_jwt
 
 
-def verify_token(token: str) -> Optional[dict]:
+def verify_token(token: str) -> dict | None:
     """Verify and decode a JWT token. Returns payload or None if invalid."""
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])

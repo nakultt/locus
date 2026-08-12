@@ -3,19 +3,39 @@ Locus - Enterprise Integration Store
 FastAPI Backend Entry Point
 """
 
+import asyncio
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.database import engine, Base
-from app.routers import auth, chat, google_oauth, linear_oauth, conversations, settings
+from app.database import Base, engine
+from app.routers import (
+    auth,
+    chat,
+    conversations,
+    google_oauth,
+    linear_oauth,
+    settings,
+    webhooks,
+)
+from app.services.worker import worker_loop
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Create database tables on startup."""
+    """Create tables and start the background PR worker."""
     Base.metadata.create_all(bind=engine)
-    yield
+
+    worker_task = asyncio.create_task(worker_loop())
+    try:
+        yield
+    finally:
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(
@@ -50,6 +70,7 @@ app.include_router(linear_oauth.router, prefix="/auth", tags=["Linear OAuth"])
 app.include_router(chat.router, prefix="/api", tags=["Chat"])
 app.include_router(conversations.router, prefix="/api", tags=["Conversations"])
 app.include_router(settings.router, prefix="/api/settings", tags=["Settings"])
+app.include_router(webhooks.router, prefix="/webhooks", tags=["Webhooks"])
 
 
 @app.get("/", tags=["Health"])

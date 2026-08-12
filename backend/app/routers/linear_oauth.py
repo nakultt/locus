@@ -8,13 +8,13 @@ import secrets
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, HTTPException, status, Depends, Query
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
-import httpx
 
-from app.database import get_db
 from app import crud
+from app.database import get_db
 
 router = APIRouter()
 

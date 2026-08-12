@@ -1,0 +1,103 @@
+[project]
+name = "locus-backend"
+version = "1.0.0"
+description = "Locus — cross-tool context for IT work. Local-first LLM, PR Context Agent."
+readme = "../README.md"
+requires-python = ">=3.11,<3.14"
+
+dependencies = [
+    # Web framework
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+
+    # Database
+    "sqlalchemy>=2.0.36",
+    "psycopg2-binary>=2.9.9",
+    "alembic>=1.13.0",
+
+    # Security
+    "bcrypt==4.0.1",
+    "passlib[bcrypt]>=1.7.4",
+    "cryptography>=41.0.0",
+    "python-jose[cryptography]>=3.3.0",
+
+    # Environment
+    "python-dotenv>=1.0.0",
+    "email-validator>=2.0.0",
+
+    # LangChain — pinned for stability
+    "langchain==0.3.18",
+    "langchain-core==0.3.49",
+    "langchain-openai>=0.3.0",
+    "langchain-community==0.3.17",
+    "langgraph==0.3.30",
+
+    # Timezone-aware date parsing (IST default)
+    "dateparser>=1.2.0",
+
+    # Integration SDKs
+    "atlassian-python-api>=3.41.0",
+    "google-api-python-client>=2.100.0",
+    "google-auth-httplib2>=0.2.0",
+    "google-auth-oauthlib>=1.2.0",
+    "slack-sdk>=3.26.0",
+    "notion-client>=2.2.0",
+
+    # HTTP
+    "requests>=2.31.0",
+    "httpx>=0.25.0",
+]
+
+[project.optional-dependencies]
+# Deterministic security scanning for the PR Context Agent. Without these the
+# confirmed-findings half of the scan is skipped and only the unverified LLM
+# pass runs.
+security = [
+    "semgrep>=1.60.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.6.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = [
+    "E501",   # line length is handled by the formatter
+    "B008",   # FastAPI's Depends() in defaults is the documented pattern
+    "UP042",  # str+Enum is intentional: Pydantic serializes these to plain strings
+]
+
+[tool.ruff.lint.per-file-ignores]
+# The integration service modules predate this config. They use bare excepts as
+# a blanket "never let a third-party SDK crash the agent" guard. Worth cleaning
+# up alongside the credential-globals refactor, not in a lint pass.
+"app/services/bugasura.py" = ["E722"]
+"app/services/calendar.py" = ["E722"]
+"app/services/github.py" = ["E741"]
+"app/services/gmail.py" = ["E722"]
+"app/services/google_docs.py" = ["E722"]
+"app/services/google_drive.py" = ["E722", "F841"]
+"app/services/google_forms.py" = ["E722"]
+"app/services/google_meet.py" = ["E722"]
+"app/services/google_sheets.py" = ["E722"]
+"app/services/google_slides.py" = ["E722"]
+"app/services/jira.py" = ["E701", "E741", "F841"]
+"app/services/linear.py" = ["E741"]
+"app/routers/google_oauth.py" = ["E722"]
+# Migrations insert the project root on sys.path before importing app.*
+"migrations/*.py" = ["E402"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

@@ -3,7 +3,7 @@ Database Models
 SQLAlchemy ORM models for User and Integration tables
 """
 
-from sqlalchemy import Column, Integer, String, Text, ForeignKey, DateTime
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -19,7 +19,8 @@ class User(Base):
     email = Column(String(255), unique=True, index=True, nullable=False)
     name = Column(String(255), nullable=True)
     hashed_password = Column(String(255), nullable=False)
-    encrypted_gemini_key = Column(Text, nullable=True)  # User's own Gemini API key (encrypted)
+    # IANA timezone, e.g. "Asia/Kolkata". Drives calendar parsing and scheduling.
+    timezone = Column(String(64), nullable=False, default="Asia/Kolkata")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
@@ -27,6 +28,8 @@ class User(Base):
     integrations = relationship("Integration", back_populates="owner", cascade="all, delete-orphan")
     # Relationship: User has many Conversations
     conversations = relationship("Conversation", back_populates="owner", cascade="all, delete-orphan")
+    # Relationship: User has many PR analysis jobs
+    pr_jobs = relationship("PRJob", back_populates="owner", cascade="all, delete-orphan")
 
     def __repr__(self) -> str:
         return f"<User(id={self.id}, email={self.email})>"
@@ -94,3 +97,60 @@ class Message(Base):
 
     def __repr__(self) -> str:
         return f"<Message(id={self.id}, role={self.role}, conversation_id={self.conversation_id})>"
+
+
+class PRJob(Base):
+    """
+    A queued pull-request analysis job.
+
+    GitHub webhooks time out at 10s but the analysis pipeline takes 30-60s, so
+    the webhook persists a job here and returns 200 immediately. A worker picks
+    it up. Persisting (rather than using FastAPI BackgroundTasks) means jobs
+    survive a restart and can be retried.
+    """
+
+    __tablename__ = "pr_jobs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    repo = Column(String(255), nullable=False, index=True)  # "owner/name"
+    pr_number = Column(Integer, nullable=False)
+    action = Column(String(32), nullable=False)  # opened, synchronize, reopened
+    head_sha = Column(String(64), nullable=True)
+
+    status = Column(String(20), nullable=False, default="queued", index=True)
+    result_json = Column(Text, nullable=True)  # Serialized PRAnalysisResult
+    error = Column(Text, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    owner = relationship("User", back_populates="pr_jobs")
+
+    def __repr__(self) -> str:
+        return f"<PRJob(id={self.id}, repo={self.repo}, pr=#{self.pr_number}, status={self.status})>"
+
+
+class RepoWebhook(Base):
+    """
+    Per-repo webhook registration.
+
+    The `webhook_secret` is what proves an inbound POST /webhooks/github really
+    came from GitHub, via HMAC-SHA256 over the raw body. It is encrypted at
+    rest like any other credential.
+    """
+
+    __tablename__ = "repo_webhooks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    repo = Column(String(255), nullable=False, index=True)  # "owner/name"
+    encrypted_secret = Column(Text, nullable=False)
+    slack_channel = Column(String(255), nullable=True)  # Where to post summaries
+    enabled = Column(Integer, nullable=False, default=1)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<RepoWebhook(repo={self.repo}, owner_id={self.owner_id})>"

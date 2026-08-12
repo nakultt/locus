@@ -3,9 +3,10 @@ Google Slides Integration Service
 LangChain tools for presentation management using direct HTTP API calls
 """
 
-import httpx
-from typing import Any
 from datetime import datetime, timedelta
+from typing import Any
+
+import httpx
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, Field
 
