@@ -3,10 +3,11 @@ Google Drive Integration Service
 LangChain tools for file management using direct HTTP API calls
 """
 
-import httpx
 import base64
-from typing import Any
 from datetime import datetime, timedelta
+from typing import Any
+
+import httpx
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, Field
 
@@ -160,7 +161,7 @@ def drive_upload_file(file_name: str, mime_type: str = "text/plain", content: st
                 f'{{"name": "{file_name}", "mimeType": "{mime_type}"}}\r\n'
                 f"--{boundary}\r\n"
                 f"Content-Type: {mime_type}\r\n\r\n"
-            ).encode("utf-8") + file_content + f"\r\n--{boundary}--".encode("utf-8")
+            ).encode() + file_content + f"\r\n--{boundary}--".encode()
             
             response = client.post(
                 f"{DRIVE_UPLOAD_URL}?uploadType=multipart",

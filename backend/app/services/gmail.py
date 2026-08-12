@@ -4,10 +4,11 @@ LangChain tools for email management using direct HTTP API calls
 """
 
 import base64
-import httpx
+from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from typing import Any
-from datetime import datetime, timedelta
+
+import httpx
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, Field
 

@@ -6,8 +6,8 @@ Uses Personal API Key for authentication.
 API Endpoint: https://api.linear.app/graphql
 """
 
+
 import requests
-from typing import Optional
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, Field
 
@@ -531,7 +531,7 @@ def linear_list_states(team_id: str) -> str:
     
     team = data.get("team")
     if not team:
-        return f"❌ Team not found."
+        return "❌ Team not found."
     
     states = team.get("states", {}).get("nodes", [])
     

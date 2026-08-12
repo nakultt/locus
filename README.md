@@ -1,73 +1,283 @@
-# React + TypeScript + Vite
+# Locus
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Cross-tool context for people with IT jobs.
 
-Currently, two official plugins are available:
+Slack holds the discussion, Jira holds the requirement, GitHub holds the code — and nothing joins them. Locus does. It connects your workplace tools, runs entirely on **local models**, and stitches the scattered facets of a work item back together.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+No cloud LLM. No API keys. Your source diffs and private Slack threads never leave your machine.
 
-## React Compiler
+---
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## What it does
 
-## Expanding the ESLint configuration
+**Chat across your tools.** Natural-language commands that fan out across Jira, GitHub, Linear, Slack, Notion, Gmail, Calendar, and the Google Workspace suite — with a live task plan streamed to the UI as the agent works.
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+**PR Context Agent.** Open a pull request and Locus automatically:
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+1. Extracts ticket keys from the title, branch, body, and commits
+2. Pulls the matching Jira/Linear tickets — status, assignee, summary
+3. Searches Slack for prior discussion of the same work
+4. Scans the diff for vulnerabilities (Semgrep + Gitleaks, plus an LLM pass)
+5. Comments the assembled context on the PR — updating in place, not spamming
+6. Posts a summary to your Slack channel
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+---
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+## Architecture
+
+```
+┌─────────────┐     ┌──────────────────────┐     ┌────────────────────┐
+│  React SPA  │────▶│   FastAPI backend    │────▶│  MoE Model Manager │
+│   (Vite)    │◀────│                      │◀────│  127.0.0.1:8081/v1 │
+└─────────────┘ SSE │  ┌────────────────┐  │     │  (local GPU)       │
+                    │  │  LangChain     │  │     └────────────────────┘
+┌─────────────┐     │  │  agent + tools │  │
+│   GitHub    │────▶│  └────────────────┘  │     ┌────────────────────┐
+│  webhooks   │     │  ┌────────────────┐  │────▶│  Jira · Slack ·    │
+└─────────────┘     │  │  PR worker     │  │     │  GitHub · Linear · │
+                    │  └────────────────┘  │     │  Google Workspace  │
+                    └──────────────────────┘     └────────────────────┘
+                              │
+                       ┌──────────────┐
+                       │  PostgreSQL  │  encrypted credentials (Fernet)
+                       └──────────────┘
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+### Local-first inference
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+Locus talks to any OpenAI-compatible endpoint. By default that is [MoE Model Manager](https://github.com/nakultt/MoE) on `http://127.0.0.1:8081/v1`, serving Qwen3.6 35B and Gemma 4 26B on local hardware.
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+| Mode | Model | Used for |
+|---|---|---|
+| Fast (default) | `gemma-4-26b-a4b` | Chat, task planning, PR summaries |
+| Smart | `qwen3.6-35b-a3b` | Complex multi-step requests |
+
+**MoE holds one GPU model at a time.** Load a text model before using Locus; `GET /api/settings/llm` reports readiness, and chat returns `503` with a remediation hint rather than an opaque connection error.
+
+Because inference is local, **the backend must run on the machine with the GPU.** A remotely hosted backend cannot reach `127.0.0.1:8081`.
+
+---
+
+## Setup
+
+### Prerequisites
+
+| Requirement | Notes |
+|---|---|
+| Python 3.11+ | Backend |
+| Node 18+ | Frontend |
+| PostgreSQL | SQLite works for local dev |
+| [MoE Model Manager](https://github.com/nakultt/MoE) | Running with a text model loaded |
+| `semgrep` | Optional — enables confirmed security findings |
+| `gitleaks` | Optional — enables secret detection |
+
+### Backend
+
+Dependencies are managed with [uv](https://docs.astral.sh/uv/).
+
+```bash
+cd backend && uv sync --extra security
+```
+
+`--extra security` installs Semgrep, which produces the confirmed half of the PR security scan. Without it only the unverified LLM pass runs.
+
+Then copy `backend/.env.example` to `backend/.env` and fill in `SECRET_KEY` and `ENCRYPTION_KEY`:
+
+```bash
+uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+> **`ENCRYPTION_KEY` must be set and must never change.** Every stored integration credential is encrypted with it. Rotating or losing it makes all of them permanently undecryptable.
+
+Upgrading an existing database:
+
+```bash
+uv run python migrations/002_local_first_and_pr_agent.py
+```
+
+Run it:
+
+```bash
+uv run uvicorn main:app --reload
+```
+
+### Frontend
+
+```bash
+npm install && npm run dev
+```
+
+### Checks
+
+```bash
+cd backend && uv run pytest tests/ -q && uv run ruff check .
+```
+```bash
+npm run build
+```
+
+---
+
+## Integrations
+
+| Service | Auth | Notes |
+|---|---|---|
+| GitHub | PAT | Repos, issues, PRs, diffs |
+| Jira | API token + email + URL | Issues, JQL, projects, workflows |
+| Linear | OAuth | Issues, teams, states |
+| Slack | OAuth (bot + user token) | `xoxp-` user token needed for search |
+| Notion | Integration token | Pages, search |
+| Gmail / Calendar / Docs / Sheets / Slides / Drive / Forms / Meet | Google OAuth | One consent covers all |
+| Bugasura | API key | Bug tracking |
+
+### Slack tokens
+
+Slack takes **two** tokens, both entered on the Slack card in Integrations:
+
+| Token | Field | Enables |
+|---|---|---|
+| `xoxb-…` | Bot Token | Posting messages, listing and reading channels |
+| `xoxp-…` | User Token (optional) | `slack_search` — searching message history |
+
+`search.messages` cannot be called with a bot token, and searching is what finds a PR's prior discussion. Without a user token the `slack_search` tool is not registered at all — rather than offered and always failing — and the PR agent logs that it skipped the search.
+
+Required scopes:
+- **Bot:** `chat:write`, `channels:read`, `channels:history`, `groups:history`, `users:read`
+- **User:** `search:read`
+
+Do not add any `admin.*` scope; those are Enterprise Grid only and will block installation.
+
+---
+
+## PR Context Agent
+
+### Setup
+
+1. Connect GitHub, Jira, and Slack in Locus
+2. Register the repo, which returns a webhook secret
+3. In GitHub: **Settings → Webhooks → Add webhook**
+   - Payload URL: `https://<your-backend>/webhooks/github`
+   - Content type: `application/json`
+   - Secret: the value from step 2
+   - Events: **Pull requests** only
+
+### How it works
+
+```
+PR opened
+    │
+    ▼
+POST /webhooks/github ──▶ verify HMAC-SHA256 over raw body
+    │                     (reject before parsing if invalid)
+    ▼
+persist PRJob, return 202 immediately   ← GitHub times out at 10s
+    │
+    ▼
+worker picks up job
+    │
+    ├─▶ extract ticket keys   (title, branch, body, commits)
+    ├─▶ fetch Jira tickets
+    ├─▶ search Slack threads
+    └─▶ scan diff
+            ├─ Semgrep + Gitleaks ──▶ CONFIRMED
+            └─ LLM review ──────────▶ UNVERIFIED
+    │
+    ├─▶ upsert PR comment  (edits its own prior comment)
+    └─▶ post Slack summary
+```
+
+### Design decisions worth knowing
+
+**Confirmed and unverified findings are never merged.** Semgrep and Gitleaks are deterministic rule matches, reported as confirmed. The LLM pass catches logic-level problems no rule encodes — missing authz, injection, unsafe deserialization — and is reported as unverified. One hallucinated "confirmed vulnerability" on a colleague's PR is enough for a team to stop trusting the bot permanently.
+
+**Semgrep scans reconstructed files, not the diff.** Semgrep parses source into an AST; handed a unified diff it silently finds nothing, because a `.diff` is not valid source in any language. The agent fetches the post-change contents of changed files and scans those, filtered to extensions Semgrep has rules for and capped at 400 KB per file.
+
+**Comments are idempotent.** Every comment carries a hidden `<!-- locus-pr-agent -->` marker. On the next push Locus finds its own prior comment and edits it. Without this, an actively developed PR accumulates one bot comment per push.
+
+**Detected secrets are reported by location only.** Gitleaks findings name the file and line and nothing else. Echoing the secret into a PR comment or Slack message would widen the exposure being reported.
+
+**The security LLM has no tools bound.** Diff text and Slack messages are attacker-influenced — anyone who can open a PR controls that content. The scanner returns findings; it cannot act on what it reads.
+
+**Jobs are persisted, not in-memory.** `BackgroundTasks` would lose queued work on restart with no retry path.
+
+---
+
+## API
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/auth/signup` · `/auth/login` | Authentication |
+| `POST` | `/auth/connect` | Store integration credentials |
+| `GET` | `/auth/integrations/{user_id}` | List connections |
+| `DELETE` | `/auth/disconnect/{user_id}/{service}` | Remove a connection |
+| `GET` | `/auth/google` · `/auth/linear` | Start OAuth |
+| `POST` | `/api/chat` | Natural-language command |
+| `POST` | `/api/chat/stream` | Same, with SSE task updates |
+| `GET` | `/api/conversations/{user_id}` | Conversation list |
+| `GET` | `/api/settings/llm` | Local model readiness |
+| `POST` | `/webhooks/github` | GitHub events (HMAC-authenticated) |
+
+### Checking model readiness
+
+```bash
+curl http://localhost:8000/api/settings/llm
+```
+
+```json
+{
+  "available": true,
+  "message": "Local model is ready.",
+  "provider": "moe-local",
+  "base_url": "http://127.0.0.1:8081/v1",
+  "fast_model": "gemma-4-26b-a4b",
+  "smart_model": "qwen3.6-35b-a3b"
+}
+```
+
+---
+
+## Timezone
+
+Locus defaults to **`Asia/Kolkata`** (IST, UTC+05:30) and stores an IANA timezone per user, set at signup. The half-hour offset breaks naive hour arithmetic, so all scheduling goes through a real timezone library rather than integer offsets.
+
+---
+
+## Known limitations
+
+These are tracked in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) and are worth reading before deploying anywhere real.
+
+- **Authentication is not enforced.** `verify_token()` exists but no endpoint calls it; routes trust a client-supplied `user_id`. **Do not expose this to untrusted users.** — Plan §0.1
+- **Most service credentials use module-level globals.** Concurrent requests can cross-contaminate tokens between users, and it prevents safe multi-instance deployment. `slack.py` has been converted to closures; the other 13 have not. — Plan §0.2
+- **Calendar date parsing is minimal.** Only "2pm", "3pm", and "10am" are recognized; everything else silently becomes 9am, and events are written as UTC regardless of the user's timezone. `User.timezone` exists but is not yet used. — Plan §0.4
+- **No repo-registration endpoint.** `repo_webhooks` rows must be inserted manually, so the PR agent cannot yet be set up through the UI.
+- The PR agent has not been run end to end against a live GitHub webhook. Component logic is unit-tested; the Jira and Slack response-shape handling is written against the documented APIs but unverified with real credentials.
+- The worker is single-instance; multi-instance needs row locking or a real queue.
+- Gitleaks is optional and not bundled — without it, committed-secret detection is skipped.
+
+---
+
+## Project layout
+
+```
+backend/
+  app/
+    routers/            auth · chat · conversations · settings · webhooks · oauth
+    services/
+      llm.py            local model provider
+      agent.py          LangChain orchestrator
+      task_planner.py   multi-task decomposition
+      linking.py        ticket-key extraction
+      github_pr.py      PR metadata, diffs, file contents, idempotent comments
+      security_scan.py  Semgrep + Gitleaks + LLM review
+      pr_agent.py       PR pipeline
+      worker.py         background job runner
+      <service>.py      14 integration tool modules
+    models.py · schemas.py · crud.py · security.py
+  migrations/           numbered, idempotent schema upgrades
+  tests/                pytest suite
+  pyproject.toml        uv project + ruff/pytest config
+  uv.lock               pinned dependency graph
+  .env.example
+src/
+  pages/  ui/  context/  lib/
 ```

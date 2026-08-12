@@ -10,7 +10,6 @@ Scopes used:
 - manage:jira-configuration
 """
 
-from typing import Optional
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, Field
 

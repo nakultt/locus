@@ -19,7 +19,17 @@ const INTEGRATIONS = [
     color: "text-purple-600",
     logo: "/slack.svg",
     authType: "api_key" as const,
-    fields: [{ name: "api_key", label: "Bot Token", placeholder: "xoxb-..." }],
+    fields: [
+      { name: "api_key", label: "Bot Token", placeholder: "xoxb-..." },
+      {
+        name: "user_token",
+        label: "User Token (optional)",
+        placeholder: "xoxp-...",
+        isCredential: true,
+        optional: true,
+        help: "Enables searching Slack history. Bot tokens cannot call search.messages.",
+      },
+    ],
   },
   {
     id: "jira",
@@ -192,6 +202,13 @@ const ConnectModal = ({
       }
     });
 
+    // Slack needs both tokens side by side: the bot token posts messages, the
+    // user token searches history. Mirror the api_key in so services read one
+    // consistent shape instead of guessing which field holds which token.
+    if (integration.id === "slack" && apiKey) {
+      credentials["bot_token"] = apiKey;
+    }
+
     await onConnect(
       apiKey,
       Object.keys(credentials).length > 0 ? credentials : undefined
@@ -219,8 +236,11 @@ const ConnectModal = ({
                   setValues({ ...values, [field.name]: e.target.value })
                 }
                 className="w-full px-3 py-2 border border-border rounded-lg bg-background focus:outline-none focus:ring-2 focus:ring-primary"
-                required
+                required={!("optional" in field && field.optional)}
               />
+              {"help" in field && field.help ? (
+                <p className="mt-1 text-xs text-muted-foreground">{field.help}</p>
+              ) : null}
             </div>
           ))}
           <div className="flex gap-3 pt-4">

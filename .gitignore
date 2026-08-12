@@ -1,4 +1,36 @@
-# Logs
+# ============== Secrets ==============
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
+*.pem
+*.pfx
+
+# ============== Node / frontend ==============
+node_modules
+dist
+dist-ssr
+*.local
+.vite
+
+# ============== Python / backend ==============
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local database files
+*.db
+*.sqlite
+*.sqlite3
+
+# ============== Logs ==============
 logs
 *.log
 npm-debug.log*
@@ -7,26 +39,14 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-node_modules
-dist
-dist-ssr
-*.local
-
-# Editor directories and files
+# ============== Editors / OS ==============
 .vscode/*
 !.vscode/extensions.json
 .idea
 .DS_Store
+Thumbs.db
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
-.env
-.env.*
-backend/.env
-backend/.env.*
-
-# Python
-__pycache__/
-*.pyc

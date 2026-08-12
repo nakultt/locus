@@ -4,18 +4,17 @@ Handles OAuth 2.0 authentication flow for Gmail and Google Calendar
 """
 
 import os
-import json
 import secrets
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, HTTPException, status, Depends, Query
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
-import httpx
 
-from app.database import get_db
 from app import crud
+from app.database import get_db
 
 router = APIRouter()
 
@@ -198,7 +197,7 @@ async def google_oauth_callback(
             
             tokens = response.json()
             
-    except Exception as e:
+    except Exception:
         return RedirectResponse(
             url=f"{FRONTEND_URL}/integrations/integrations-page?error=token_exchange_failed"
         )

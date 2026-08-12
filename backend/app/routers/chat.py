@@ -4,13 +4,18 @@ Natural language command processing via LangChain agent
 """
 
 import json
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app import schemas, crud
+from app import crud, schemas
 from app.database import get_db
 from app.services.agent import process_chat_message, process_chat_message_streaming
+from app.services.llm import check_llm_available
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -111,20 +116,19 @@ async def chat(
         if config:
             integration_configs[integration.service_name] = config
     
-    # Get user's Gemini API key
-    gemini_api_key = crud.get_user_gemini_key(db, request.user_id)
-    if not gemini_api_key:
+    # Verify the local model server is up with a model loaded
+    llm_ready, llm_message = await check_llm_available()
+    if not llm_ready:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Gemini API Key is required. Please set it in Settings."
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=llm_message
         )
-    
+
     try:
         # Process message through LangChain agent
         result = await process_chat_message(
             message=request.message,
             integration_configs=integration_configs,
-            gemini_api_key=gemini_api_key,
             smart_mode=request.smart_mode
         )
         
@@ -153,13 +157,16 @@ async def chat(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
-        )
+        ) from e
     except Exception as e:
         # General error
+        # Log the detail server-side; upstream API errors can carry internals
+        # that should not be returned to the client.
+        logger.exception("Chat processing failed for user %s", request.user_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error processing request: {str(e)}"
-        )
+            detail="Error processing request. Check server logs for details."
+        ) from e
 
 
 @router.post(
@@ -261,12 +268,11 @@ async def chat_stream(
         if config:
             integration_configs[integration.service_name] = config
     
-    # Get user's Gemini API key
-    gemini_api_key = crud.get_user_gemini_key(db, request.user_id)
-    if not gemini_api_key:
-        error_msg = "Gemini API Key is required. Please set it in Settings."
+    # Verify the local model server is up with a model loaded
+    llm_ready, llm_message = await check_llm_available()
+    if not llm_ready:
         async def error_generator():
-            yield f"data: {json.dumps({'event_type': 'error', 'data': {'message': error_msg}})}\n\n"
+            yield f"data: {json.dumps({'event_type': 'error', 'data': {'message': llm_message}})}\n\n"
         return StreamingResponse(
             error_generator(),
             media_type="text/event-stream"
@@ -280,8 +286,7 @@ async def chat_stream(
         try:
             async for event in process_chat_message_streaming(
                 message=request.message,
-                integration_configs=integration_configs,
-                gemini_api_key=gemini_api_key
+                integration_configs=integration_configs
             ):
                 # Capture final message and actions from complete event
                 if event.get("event_type") == "complete":

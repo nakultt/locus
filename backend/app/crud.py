@@ -3,20 +3,20 @@ CRUD Operations
 Database create/read operations with encryption
 """
 
-from typing import Optional, Any
+from typing import Any
+
 from sqlalchemy.orm import Session
 
 from app import models, schemas, security
 
-
 # ============== User Operations ==============
 
-def get_user_by_email(db: Session, email: str) -> Optional[models.User]:
+def get_user_by_email(db: Session, email: str) -> models.User | None:
     """Get a user by email address."""
     return db.query(models.User).filter(models.User.email == email).first()
 
 
-def get_user_by_id(db: Session, user_id: int) -> Optional[models.User]:
+def get_user_by_id(db: Session, user_id: int) -> models.User | None:
     """Get a user by ID."""
     return db.query(models.User).filter(models.User.id == user_id).first()
 
@@ -44,7 +44,7 @@ def create_user(db: Session, user: schemas.UserCreate) -> models.User:
     return db_user
 
 
-def authenticate_user(db: Session, email: str, password: str) -> Optional[models.User]:
+def authenticate_user(db: Session, email: str, password: str) -> models.User | None:
     """Authenticate user with email and password."""
     user = get_user_by_email(db, email)
     if not user:
@@ -54,7 +54,7 @@ def authenticate_user(db: Session, email: str, password: str) -> Optional[models
     return user
 
 
-def update_user(db: Session, user_id: int, user_update: schemas.UserUpdate) -> Optional[models.User]:
+def update_user(db: Session, user_id: int, user_update: schemas.UserUpdate) -> models.User | None:
     """
     Update user details.
     
@@ -84,59 +84,6 @@ def update_user(db: Session, user_id: int, user_update: schemas.UserUpdate) -> O
     return db_user
 
 
-def set_user_gemini_key(db: Session, user_id: int, gemini_key: str) -> bool:
-    """
-    Set or update user's Gemini API key (encrypted).
-    
-    Args:
-        db: Database session
-        user_id: User ID
-        gemini_key: Gemini API key (will be encrypted)
-        
-    Returns:
-        True if successful, False if user not found
-    """
-    user = get_user_by_id(db, user_id)
-    if not user:
-        return False
-    
-    user.encrypted_gemini_key = security.encrypt_token(gemini_key) if gemini_key else None
-    db.commit()
-    return True
-
-
-def get_user_gemini_key(db: Session, user_id: int) -> Optional[str]:
-    """
-    Get decrypted Gemini API key for a user.
-    
-    Args:
-        db: Database session
-        user_id: User ID
-        
-    Returns:
-        Decrypted Gemini API key or None if not set
-    """
-    user = get_user_by_id(db, user_id)
-    if not user or not user.encrypted_gemini_key:
-        return None
-    return security.decrypt_token(user.encrypted_gemini_key)
-
-
-def has_gemini_key(db: Session, user_id: int) -> bool:
-    """Check if user has a Gemini API key configured."""
-    user = get_user_by_id(db, user_id)
-    return user is not None and user.encrypted_gemini_key is not None
-
-
-def delete_user_gemini_key(db: Session, user_id: int) -> bool:
-    """Delete user's Gemini API key."""
-    user = get_user_by_id(db, user_id)
-    if not user:
-        return False
-    user.encrypted_gemini_key = None
-    db.commit()
-    return True
-
 # ============== Integration Operations ==============
 
 def get_user_integrations(db: Session, user_id: int) -> list[models.Integration]:
@@ -150,7 +97,7 @@ def get_integration(
     db: Session, 
     user_id: int, 
     service_name: str
-) -> Optional[models.Integration]:
+) -> models.Integration | None:
     """Get a specific integration by user and service name."""
     return db.query(models.Integration).filter(
         models.Integration.owner_id == user_id,
@@ -162,8 +109,8 @@ def add_integration(
     db: Session,
     user_id: int,
     service_name: str,
-    api_key: Optional[str] = None,
-    credentials: Optional[dict[str, Any]] = None
+    api_key: str | None = None,
+    credentials: dict[str, Any] | None = None
 ) -> models.Integration:
     """
     Add or update an integration with encrypted credentials.
@@ -210,7 +157,7 @@ def get_integration_key(
     db: Session, 
     user_id: int, 
     service_name: str
-) -> Optional[str]:
+) -> str | None:
     """
     Get decrypted API key for a service.
     
@@ -232,7 +179,7 @@ def get_integration_credentials(
     db: Session, 
     user_id: int, 
     service_name: str
-) -> Optional[dict[str, Any]]:
+) -> dict[str, Any] | None:
     """
     Get decrypted credentials for a service.
     
@@ -311,7 +258,7 @@ def create_conversation(
     return db_conversation
 
 
-def get_conversation(db: Session, conversation_id: int) -> Optional[models.Conversation]:
+def get_conversation(db: Session, conversation_id: int) -> models.Conversation | None:
     """Get a conversation by ID."""
     return db.query(models.Conversation).filter(
         models.Conversation.id == conversation_id
@@ -329,7 +276,7 @@ def update_conversation_title(
     db: Session,
     conversation_id: int,
     title: str
-) -> Optional[models.Conversation]:
+) -> models.Conversation | None:
     """Update a conversation's title."""
     conversation = get_conversation(db, conversation_id)
     if not conversation:
@@ -357,7 +304,7 @@ def add_message(
     conversation_id: int,
     role: str,
     content: str,
-    actions_json: Optional[str] = None
+    actions_json: str | None = None
 ) -> models.Message:
     """Add a message to a conversation."""
     db_message = models.Message(

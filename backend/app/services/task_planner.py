@@ -4,14 +4,14 @@ Parses user messages to extract individual tasks and plan execution order.
 Uses LLM to intelligently identify and structure tasks from natural language.
 """
 
-from dataclasses import dataclass, field
-from typing import Optional, Any
-from enum import Enum
 import json
-import os
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any
 
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
+
+from app.services.llm import get_llm
 
 
 class TaskStatus(str, Enum):
@@ -32,8 +32,8 @@ class PlannedTask:
     tool_name: str  # Actual tool function name
     parameters: dict = field(default_factory=dict)
     status: TaskStatus = TaskStatus.PENDING
-    result: Optional[str] = None
-    error: Optional[str] = None
+    result: str | None = None
+    error: str | None = None
     depends_on: list[str] = field(default_factory=list)  # Task IDs this depends on
     
     def to_dict(self) -> dict:
@@ -59,7 +59,7 @@ class TaskPlan:
     total: int = 0
     completed: int = 0
     failed: int = 0
-    current_task_id: Optional[str] = None
+    current_task_id: str | None = None
     task_results: dict[str, Any] = field(default_factory=dict)  # Store results for chaining
     
     def to_dict(self) -> dict:
@@ -76,7 +76,7 @@ class TaskPlan:
         """Get tasks that are still pending."""
         return [t for t in self.tasks if t.status == TaskStatus.PENDING]
     
-    def get_next_task(self) -> Optional[PlannedTask]:
+    def get_next_task(self) -> PlannedTask | None:
         """Get the next task to execute, respecting dependencies."""
         for task in self.tasks:
             if task.status != TaskStatus.PENDING:
@@ -97,8 +97,8 @@ class TaskPlan:
         self, 
         task_id: str, 
         status: TaskStatus, 
-        result: Optional[str] = None,
-        error: Optional[str] = None
+        result: str | None = None,
+        error: str | None = None
     ):
         """Update a task's status and optionally its result/error."""
         for task in self.tasks:
@@ -248,19 +248,9 @@ def parse_tasks_from_message(message: str, available_services: list[str]) -> Tas
     Returns:
         TaskPlan with extracted tasks
     """
-    google_api_key = os.getenv("GOOGLE_API_KEY")
-    
-    if not google_api_key:
-        # Fallback: simple keyword-based extraction
-        return _fallback_parse_tasks(message, available_services)
-    
     try:
-        llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
-            google_api_key=google_api_key,
-            temperature=0,
-        )
-        
+        llm = get_llm(temperature=0)
+
         prompt = ChatPromptTemplate.from_template(TASK_PLANNING_PROMPT)
         chain = prompt | llm
         

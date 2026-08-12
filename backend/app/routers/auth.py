@@ -6,7 +6,7 @@ Endpoints for user signup, login, and integration connection
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app import schemas, crud, security
+from app import crud, schemas, security
 from app.database import get_db
 
 router = APIRouter()

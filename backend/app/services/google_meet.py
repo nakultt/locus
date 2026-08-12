@@ -3,10 +3,11 @@ Google Meet Integration Service
 LangChain tools for creating meetings via Calendar API with conferenceData
 """
 
-import httpx
 import uuid
-from typing import Any
 from datetime import datetime, timedelta
+from typing import Any
+
+import httpx
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, Field
 

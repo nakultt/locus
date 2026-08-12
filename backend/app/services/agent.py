@@ -3,56 +3,32 @@ LangChain Agent Orchestrator
 Main agent that processes natural language and routes to appropriate tools
 """
 
-import os
-from typing import Any, Optional
-from dotenv import load_dotenv
+from collections.abc import AsyncGenerator
 
-from langchain_google_genai import ChatGoogleGenerativeAI
+from dotenv import load_dotenv
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import BaseTool
 
-from app.schemas import ChatResponse, ActionResult
-from app.services.jira import get_jira_tools
-from app.services.gmail import get_gmail_tools
-from app.services.calendar import get_calendar_tools
-from app.services.slack import get_slack_tools
-from app.services.notion import get_notion_tools
+from app.schemas import ActionResult, ChatResponse
 from app.services.bugasura import get_bugasura_tools
+from app.services.calendar import get_calendar_tools
+from app.services.github import get_github_tools
+from app.services.gmail import get_gmail_tools
 from app.services.google_docs import get_docs_tools
-from app.services.google_sheets import get_sheets_tools
-from app.services.google_slides import get_slides_tools
 from app.services.google_drive import get_drive_tools
 from app.services.google_forms import get_forms_tools
 from app.services.google_meet import get_meet_tools
-from app.services.github import get_github_tools
+from app.services.google_sheets import get_sheets_tools
+from app.services.google_slides import get_slides_tools
+from app.services.jira import get_jira_tools
 from app.services.linear import get_linear_tools
+from app.services.llm import get_llm
+from app.services.notion import get_notion_tools
+from app.services.slack import get_slack_tools
+from app.services.task_planner import TaskStatus, parse_tasks_from_message
 
 load_dotenv()
-
-# Fallback to server-level API key if user hasn't configured their own
-FALLBACK_GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-
-
-def get_llm(api_key: str, smart_mode: bool = False) -> ChatGoogleGenerativeAI:
-    """
-    Create a Gemini LLM instance with the given API key.
-    
-    Args:
-        api_key: User's Gemini API key
-        smart_mode: Use higher intelligence model when True
-        
-    Returns:
-        ChatGoogleGenerativeAI instance
-    """
-    model = "gemini-2.5-pro" if smart_mode else "gemini-2.5-flash"
-    
-    return ChatGoogleGenerativeAI(
-        model=model,
-        google_api_key=api_key,
-        temperature=0.1,
-        convert_system_message_to_human=True,
-    )
 
 
 # System prompt for the agent
@@ -197,8 +173,11 @@ def build_tools(integration_configs: dict[str, dict]) -> list[BaseTool]:
     # Slack tools
     if "slack" in integration_configs:
         config = integration_configs["slack"]
+        credentials = config.get("credentials", {}) or {}
+        # Bot token may be stored either as the api_key or inside credentials.
         slack_tools = get_slack_tools(
-            bot_token=config.get("api_key", "")
+            bot_token=credentials.get("bot_token") or config.get("api_key", ""),
+            user_token=credentials.get("user_token", ""),
         )
         tools.extend(slack_tools)
     
@@ -287,17 +266,15 @@ def build_tools(integration_configs: dict[str, dict]) -> list[BaseTool]:
     return tools
 
 
-def create_agent_executor(tools: list[BaseTool], api_key: str, smart_mode: bool = False) -> AgentExecutor:
+def create_agent_executor(tools: list[BaseTool], smart_mode: bool = False) -> AgentExecutor:
     """Create a LangChain agent with the given tools using native tool calling.
-    
+
     Args:
         tools: List of available tools
-        api_key: User's Gemini API key
         smart_mode: Use higher intelligence model when True
     """
-    # Create LLM with user's API key
-    selected_llm = get_llm(api_key, smart_mode)
-    
+    selected_llm = get_llm(smart_mode=smart_mode)
+
     # Create a prompt that works with the tool calling agent
     prompt = ChatPromptTemplate.from_messages([
         ("system", SYSTEM_PROMPT),
@@ -320,41 +297,29 @@ def create_agent_executor(tools: list[BaseTool], api_key: str, smart_mode: bool 
 async def process_chat_message(
     message: str,
     integration_configs: dict[str, dict],
-    gemini_api_key: Optional[str] = None,
     smart_mode: bool = False
 ) -> ChatResponse:
     """
     Process a natural language message through the LangChain agent.
-    
+
     Args:
         message: User's natural language command
         integration_configs: Dict of service name to config
-        gemini_api_key: User's Gemini API key (required)
         smart_mode: Use higher intelligence model when True
     """
     # Build tools based on available integrations
     tools = build_tools(integration_configs)
-    
+
     if not tools:
         return ChatResponse(
             message="No integration tools available. Please connect at least one service.",
             actions_taken=[],
             raw_response=None
         )
-    
-    # Check for API key - use user's key or fall back to server key
-    api_key = gemini_api_key or FALLBACK_GOOGLE_API_KEY
-    
-    if not api_key:
-        return ChatResponse(
-            message="No Gemini API key configured. Please add your Gemini API key in Settings.",
-            actions_taken=[],
-            raw_response=None
-        )
-    
+
     # Create and run agent SYNCHRONOUSLY to avoid coroutine issues
-    agent = create_agent_executor(tools, api_key=api_key, smart_mode=smart_mode)
-    
+    agent = create_agent_executor(tools, smart_mode=smart_mode)
+
     try:
         # Use sync invoke instead of ainvoke to avoid StopIteration errors
         result = agent.invoke({"input": message})
@@ -433,129 +398,14 @@ def determine_service(tool_name: str) -> str:
     return "unknown"
 
 
-async def process_without_llm(
-    message: str,
-    tools: list[BaseTool],
-    integration_configs: dict[str, dict]
-) -> ChatResponse:
-    """
-    Simple keyword-based processing when no LLM is available.
-    """
-    message_lower = message.lower()
-    actions_taken: list[ActionResult] = []
-    response_parts: list[str] = []
-    
-    # Jira commands
-    if "jira" in message_lower or "ticket" in message_lower or "issue" in message_lower:
-        if "create" in message_lower:
-            # Extract summary from message
-            summary = message.replace("create", "").replace("jira", "").replace("ticket", "").replace("issue", "").strip()
-            if not summary:
-                summary = "New issue from Conflux"
-            
-            for tool in tools:
-                if "create" in tool.name.lower() and "jira" in tool.name.lower():
-                    try:
-                        result = tool.invoke({"summary": summary, "description": "", "project_key": "CONFLUX", "issue_type": "Task"})
-                        response_parts.append(str(result))
-                        actions_taken.append(ActionResult(
-                            service="jira",
-                            action=tool.name,
-                            success=True,
-                            result=str(result)
-                        ))
-                    except Exception as e:
-                        response_parts.append(f"Error: {e}")
-                    break
-        elif "search" in message_lower or "find" in message_lower:
-            query = message.replace("search", "").replace("find", "").replace("jira", "").strip()
-            for tool in tools:
-                if "search" in tool.name.lower() and "jira" in tool.name.lower():
-                    try:
-                        result = tool.invoke({"query": query, "max_results": 5})
-                        response_parts.append(str(result))
-                        actions_taken.append(ActionResult(
-                            service="jira",
-                            action=tool.name,
-                            success=True,
-                            result=str(result)
-                        ))
-                    except Exception as e:
-                        response_parts.append(f"Error: {e}")
-                    break
-    
-    # Slack commands
-    if "slack" in message_lower or "post" in message_lower:
-        if "send" in message_lower or "post" in message_lower:
-            for tool in tools:
-                if "slack" in tool.name.lower() and "send" in tool.name.lower():
-                    try:
-                        result = tool.invoke({"channel": "general", "message": message})
-                        response_parts.append(str(result))
-                        actions_taken.append(ActionResult(
-                            service="slack",
-                            action=tool.name,
-                            success=True,
-                            result=str(result)
-                        ))
-                    except Exception as e:
-                        response_parts.append(f"Error: {e}")
-                    break
-    
-    # Calendar commands
-    if "calendar" in message_lower or "schedule" in message_lower or "meeting" in message_lower:
-        if "create" in message_lower or "schedule" in message_lower:
-            for tool in tools:
-                if "calendar" in tool.name.lower() and "create" in tool.name.lower():
-                    try:
-                        result = tool.invoke({
-                            "summary": message,
-                            "description": "",
-                            "start_time": "tomorrow at 2pm",
-                            "duration_minutes": 60,
-                            "attendees": ""
-                        })
-                        response_parts.append(str(result))
-                        actions_taken.append(ActionResult(
-                            service="calendar",
-                            action=tool.name,
-                            success=True,
-                            result=str(result)
-                        ))
-                    except Exception as e:
-                        response_parts.append(f"Error: {e}")
-                    break
-    
-    if not response_parts:
-        response_parts.append(
-            "I understood your request but couldn't find a matching action. "
-            "Try commands like:\n"
-            "- 'Create a Jira ticket for [issue]'\n"
-            "- 'Search Jira for [query]'\n"
-            "- 'Send [message] to Slack channel [name]'\n"
-            "- 'Schedule a meeting [when]'\n"
-            "\nNote: For full natural language support, please configure your GOOGLE_API_KEY."
-        )
-    
-    return ChatResponse(
-        message="\n\n".join(response_parts),
-        actions_taken=actions_taken,
-        raw_response=None
-    )
-
-
 # ============================================================================
 # STREAMING CHAT PROCESSING
 # ============================================================================
 
-from typing import AsyncGenerator
-from app.services.task_planner import parse_tasks_from_message, TaskPlan, TaskStatus
-
 
 async def process_chat_message_streaming(
     message: str,
-    integration_configs: dict[str, dict],
-    gemini_api_key: Optional[str] = None
+    integration_configs: dict[str, dict]
 ) -> AsyncGenerator[dict, None]:
     """
     Process a chat message with streaming task updates.
@@ -579,17 +429,7 @@ async def process_chat_message_streaming(
             "data": {"message": "No integration tools available. Please connect at least one service."}
         }
         return
-    
-    # Check for API key - use user's key or fall back to server key
-    api_key = gemini_api_key or FALLBACK_GOOGLE_API_KEY
-    
-    if not api_key:
-        yield {
-            "event_type": "error",
-            "data": {"message": "No Gemini API key configured. Please add your Gemini API key in Settings."}
-        }
-        return
-    
+
     # Step 1: Parse and plan tasks
     yield {
         "event_type": "planning",
@@ -607,7 +447,7 @@ async def process_chat_message_streaming(
         
         # Use regular agent for single/unclear requests
         try:
-            result = await process_chat_message(message, integration_configs, gemini_api_key=api_key)
+            result = await process_chat_message(message, integration_configs)
             yield {
                 "event_type": "complete",
                 "data": {
@@ -628,8 +468,8 @@ async def process_chat_message_streaming(
         "data": task_plan.to_dict()
     }
     
-    # Step 3: Create agent for execution with user's API key
-    agent = create_agent_executor(tools, api_key=api_key)
+    # Step 3: Create agent for execution
+    agent = create_agent_executor(tools)
     
     # Step 4: Execute using the agent with enhanced prompt
     # Build a prompt that explicitly lists all tasks
