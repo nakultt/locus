@@ -12,6 +12,8 @@ No cloud LLM. No API keys. Your source diffs and private Slack threads never lea
 
 **Chat across your tools.** Natural-language commands that fan out across Jira, GitHub, Linear, Slack, Notion, Gmail, Calendar, and the Google Workspace suite — with a live task plan streamed to the UI as the agent works.
 
+The agent runs on **LangChain 1.x `create_agent`**, which compiles to a LangGraph. Task events are emitted from the graph stream as work happens, and a tool that raises becomes a failed task rather than an aborted run — a request touching five integrations keeps the four that succeeded.
+
 **PR Context Agent.** Open a pull request and Locus automatically:
 
 1. Extracts ticket keys from the title, branch, body, and commits
@@ -64,7 +66,7 @@ Because inference is local, **the backend must run on the machine with the GPU.*
 
 | Requirement | Notes |
 |---|---|
-| Python 3.11+ | Backend |
+| Python 3.11–3.13 | Backend |
 | Node 18+ | Frontend |
 | PostgreSQL | SQLite works for local dev |
 | [MoE Model Manager](https://github.com/nakultt/MoE) | Running with a text model loaded |

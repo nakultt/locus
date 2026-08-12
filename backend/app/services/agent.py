@@ -6,8 +6,9 @@ Main agent that processes natural language and routes to appropriate tools
 from collections.abc import AsyncGenerator
 
 from dotenv import load_dotenv
-from langchain.agents import AgentExecutor, create_tool_calling_agent
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain.agents import create_agent
+from langchain.agents.middleware import AgentMiddleware
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool
 
 from app.schemas import ActionResult, ChatResponse
@@ -266,32 +267,112 @@ def build_tools(integration_configs: dict[str, dict]) -> list[BaseTool]:
     return tools
 
 
-def create_agent_executor(tools: list[BaseTool], smart_mode: bool = False) -> AgentExecutor:
-    """Create a LangChain agent with the given tools using native tool calling.
+# Cap on agent loop turns. Multi-task requests legitimately need many tool
+# calls; this stops a confused model looping forever on a local GPU.
+MAX_AGENT_ITERATIONS = 25
+
+
+class ToolErrorMiddleware(AgentMiddleware):
+    """
+    Convert a tool exception into an error ToolMessage instead of aborting.
+
+    A request that touches five integrations should not lose the four that
+    succeeded because the fifth had an expired token. The agent sees the error
+    and can report it; the caller still gets partial results.
+    """
+
+    def wrap_tool_call(self, request, handler):
+        try:
+            return handler(request)
+        except Exception as e:
+            return ToolMessage(
+                content=f"Error: {e}",
+                tool_call_id=request.tool_call["id"],
+                name=request.tool_call.get("name", ""),
+                status="error",
+            )
+
+    async def awrap_tool_call(self, request, handler):
+        try:
+            return await handler(request)
+        except Exception as e:
+            return ToolMessage(
+                content=f"Error: {e}",
+                tool_call_id=request.tool_call["id"],
+                name=request.tool_call.get("name", ""),
+                status="error",
+            )
+
+
+def create_agent_executor(tools: list[BaseTool], smart_mode: bool = False):
+    """
+    Build an agent graph over the given tools.
+
+    LangChain 1.x replaced AgentExecutor with `create_agent`, which returns a
+    compiled LangGraph. The invoke contract changed with it: messages in and
+    messages out, rather than {"input": ...} -> {"output", "intermediate_steps"}.
 
     Args:
-        tools: List of available tools
-        smart_mode: Use higher intelligence model when True
+        tools: Tools the agent may call
+        smart_mode: Use the higher-capability model when True
     """
-    selected_llm = get_llm(smart_mode=smart_mode)
-
-    # Create a prompt that works with the tool calling agent
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", SYSTEM_PROMPT),
-        ("human", "{input}"),
-        MessagesPlaceholder(variable_name="agent_scratchpad"),
-    ])
-    
-    # Use tool calling agent instead of ReAct for better structured output
-    agent = create_tool_calling_agent(selected_llm, tools, prompt)
-    
-    return AgentExecutor(
-        agent=agent,
+    return create_agent(
+        model=get_llm(smart_mode=smart_mode),
         tools=tools,
-        verbose=True,
-        handle_parsing_errors=True,
-        max_iterations=25  # Increased for multi-tool requests (up to 25 tools)
+        system_prompt=SYSTEM_PROMPT,
+        middleware=[ToolErrorMiddleware()],
     )
+
+
+def extract_actions(messages: list[BaseMessage]) -> list[ActionResult]:
+    """
+    Turn an agent message list into the ActionResult list the UI renders.
+
+    Tool calls arrive as an AIMessage carrying `tool_calls`, each paired with a
+    later ToolMessage holding the result and matching `tool_call_id`. This
+    replaces the (action, observation) tuples AgentExecutor used to expose.
+    """
+    # tool_call_id -> ToolMessage, so a result can be found for each call.
+    results_by_id: dict[str, ToolMessage] = {
+        m.tool_call_id: m for m in messages if isinstance(m, ToolMessage)
+    }
+
+    actions: list[ActionResult] = []
+    for message in messages:
+        for call in getattr(message, "tool_calls", None) or []:
+            tool_name = call.get("name", "unknown")
+            result = results_by_id.get(call.get("id", ""))
+
+            observation = str(result.content) if result is not None else ""
+            # ToolMessage.status is the framework's own signal, far more
+            # reliable than sniffing the string for the word "error".
+            failed = result is not None and getattr(result, "status", None) == "error"
+
+            actions.append(ActionResult(
+                service=determine_service(tool_name),
+                action=tool_name,
+                success=not failed,
+                result=observation if not failed else None,
+                error=observation if failed else None,
+            ))
+
+    return actions
+
+
+def final_text(messages: list[BaseMessage]) -> str:
+    """Return the agent's last assistant message."""
+    for message in reversed(messages):
+        if isinstance(message, AIMessage) and message.content:
+            content = message.content
+            if isinstance(content, str):
+                return content
+            # Some providers return content as a list of blocks.
+            return "".join(
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict)
+            )
+    return ""
 
 
 async def process_chat_message(
@@ -317,38 +398,24 @@ async def process_chat_message(
             raw_response=None
         )
 
-    # Create and run agent SYNCHRONOUSLY to avoid coroutine issues
     agent = create_agent_executor(tools, smart_mode=smart_mode)
 
     try:
-        # Use sync invoke instead of ainvoke to avoid StopIteration errors
-        result = agent.invoke({"input": message})
-        
-        output = result.get("output", "")
-        intermediate_steps = result.get("intermediate_steps", [])
-        
-        # Extract actions taken
-        actions_taken: list[ActionResult] = []
-        for step in intermediate_steps:
-            if len(step) >= 2:
-                action, observation = step[0], step[1]
-                tool_name = getattr(action, "tool", "unknown")
-                
-                service = determine_service(tool_name)
-                
-                actions_taken.append(ActionResult(
-                    service=service,
-                    action=tool_name,
-                    success=True,
-                    result=str(observation) if observation else None
-                ))
-        
+        result = await agent.ainvoke(
+            {"messages": [HumanMessage(content=message)]},
+            config={"recursion_limit": MAX_AGENT_ITERATIONS * 2},
+        )
+
+        messages = result.get("messages", [])
+        output = final_text(messages)
+
         return ChatResponse(
             message=output,
-            actions_taken=actions_taken,
+            actions_taken=extract_actions(messages),
             raw_response=output
         )
-        
+
+
     except Exception as e:
         return ChatResponse(
             message=f"I encountered an error while processing your request: {str(e)}",
@@ -487,87 +554,88 @@ Execute each task in order and use the results from earlier tasks when needed (e
 Do NOT stop until all tasks are complete."""
     
     actions_taken: list[ActionResult] = []
-    completed_tasks: dict[str, str] = {}  # task_id -> result
-    
+    output = ""
+
+    # Pending tool calls awaiting their result: tool_call_id -> (task_id, service, tool_name)
+    in_flight: dict[str, tuple[str, str, str]] = {}
+    step_counter = 0
+
+    def claim_task(tool_name: str) -> tuple[str, str]:
+        """Match a tool call to a planned task, returning (task_id, description)."""
+        nonlocal step_counter
+        for task in task_plan.tasks:
+            if task.tool_name == tool_name and task.status == TaskStatus.PENDING:
+                task.status = TaskStatus.IN_PROGRESS
+                return task.id, task.description
+        step_counter += 1
+        return f"task_{step_counter}", tool_name
+
     try:
-        # Execute with the agent
-        result = agent.invoke({"input": enhanced_message})
-        
-        output = result.get("output", "")
-        intermediate_steps = result.get("intermediate_steps", [])
-        
-        # Process each step and emit updates
-        for i, step in enumerate(intermediate_steps):
-            if len(step) >= 2:
-                action, observation = step[0], step[1]
-                tool_name = getattr(action, "tool", "unknown")
-                
-                service = determine_service(tool_name)
-                
-                # Find matching task in plan
-                matching_task = None
-                for task in task_plan.tasks:
-                    if task.tool_name == tool_name and task.status == TaskStatus.PENDING:
-                        matching_task = task
-                        break
-                
-                task_id = matching_task.id if matching_task else f"task_{i+1}"
-                
-                # Emit task started
-                yield {
-                    "event_type": "task_started",
-                    "data": {
-                        "task_id": task_id,
-                        "service": service,
-                        "action": tool_name,
-                        "description": matching_task.description if matching_task else tool_name,
-                    }
-                }
-                
-                # Check if successful (basic heuristic)
-                is_success = observation and "error" not in str(observation).lower()[:50]
-                
-                if is_success:
-                    # Update plan
-                    if matching_task:
-                        task_plan.update_task_status(task_id, TaskStatus.COMPLETED, str(observation))
-                    completed_tasks[task_id] = str(observation)
-                    
-                    # Emit task completed
-                    yield {
-                        "event_type": "task_completed",
-                        "data": {
-                            "task_id": task_id,
-                            "service": service,
-                            "action": tool_name,
-                            "result": str(observation)[:500],  # Truncate for SSE
+        # Stream node updates so events are emitted as work happens, rather than
+        # replayed from intermediate_steps once the whole run has finished.
+        async for chunk in agent.astream(
+            {"messages": [HumanMessage(content=enhanced_message)]},
+            config={"recursion_limit": MAX_AGENT_ITERATIONS * 2},
+            stream_mode="updates",
+        ):
+            for node_output in chunk.values():
+                for msg in node_output.get("messages", []) if isinstance(node_output, dict) else []:
+
+                    # The model decided to call tools: announce them now.
+                    for call in getattr(msg, "tool_calls", None) or []:
+                        tool_name = call.get("name", "unknown")
+                        service = determine_service(tool_name)
+                        task_id, description = claim_task(tool_name)
+                        in_flight[call.get("id", "")] = (task_id, service, tool_name)
+
+                        yield {
+                            "event_type": "task_started",
+                            "data": {
+                                "task_id": task_id,
+                                "service": service,
+                                "action": tool_name,
+                                "description": description,
+                            }
                         }
-                    }
-                else:
-                    # Update plan
-                    if matching_task:
-                        task_plan.update_task_status(task_id, TaskStatus.FAILED, error=str(observation))
-                    
-                    # Emit task failed
-                    yield {
-                        "event_type": "task_failed",
-                        "data": {
-                            "task_id": task_id,
-                            "service": service,
-                            "action": tool_name,
-                            "error": str(observation)[:500],
+
+                    # A tool returned: report success or failure.
+                    if isinstance(msg, ToolMessage):
+                        task_id, service, tool_name = in_flight.pop(
+                            msg.tool_call_id, (f"task_{step_counter}", "unknown", msg.name or "unknown")
+                        )
+                        observation = str(msg.content)
+                        failed = getattr(msg, "status", None) == "error"
+
+                        task_plan.update_task_status(
+                            task_id,
+                            TaskStatus.FAILED if failed else TaskStatus.COMPLETED,
+                            **({"error": observation} if failed else {"result": observation}),
+                        )
+
+                        yield {
+                            "event_type": "task_failed" if failed else "task_completed",
+                            "data": {
+                                "task_id": task_id,
+                                "service": service,
+                                "action": tool_name,
+                                ("error" if failed else "result"): observation[:500],
+                            }
                         }
-                    }
-                
-                actions_taken.append(ActionResult(
-                    service=service,
-                    action=tool_name,
-                    success=is_success,
-                    result=str(observation) if is_success else None,
-                    error=str(observation) if not is_success else None
-                ))
-        
-        # Step 5: Emit completion
+
+                        actions_taken.append(ActionResult(
+                            service=service,
+                            action=tool_name,
+                            success=not failed,
+                            result=None if failed else observation,
+                            error=observation if failed else None,
+                        ))
+
+                    # Plain assistant text is the running final answer.
+                    elif isinstance(msg, AIMessage) and msg.content:
+                        text = final_text([msg])
+                        if text:
+                            output = text
+
         yield {
             "event_type": "complete",
             "data": {
@@ -578,7 +646,8 @@ Do NOT stop until all tasks are complete."""
                 "failed_tasks": task_plan.failed,
             }
         }
-        
+
+
     except Exception as e:
         yield {
             "event_type": "error",
