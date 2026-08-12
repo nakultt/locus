@@ -10,6 +10,7 @@ Credentials are passed per call. Nothing is stored at module level; a
 background worker and a live request must never share credential state.
 """
 
+import re
 from pathlib import Path
 
 import httpx
@@ -160,6 +161,123 @@ async def get_changed_file_contents(
                 continue
 
     return contents, notes
+
+
+GITHUB_GRAPHQL = "https://api.github.com/graphql"
+
+# GitHub resolves "Closes #12" / "Fixes #12" into a real link. REST does not
+# expose that edge, so the linked-issue set only comes from GraphQL.
+_LINKED_ISSUES_QUERY = """
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      closingIssuesReferences(first: 10) {
+        nodes { number title state url body author { login } }
+      }
+    }
+  }
+}
+"""
+
+# Bare "#12" mentions anywhere in the PR body. These are references rather than
+# closing links, so they are fetched separately and marked as such.
+ISSUE_REF_PATTERN = re.compile(r"(?:^|\s)#(\d{1,6})\b")
+
+
+async def get_linked_issues(token: str, repo: str, pr_number: int) -> list[dict]:
+    """
+    Issues this PR closes, per GitHub's own link graph.
+
+    Uses GraphQL because `closingIssuesReferences` has no REST equivalent --
+    REST would force us to re-parse the body and guess.
+
+    Returns:
+        Issue dicts; empty on any failure, since context is best-effort.
+    """
+    owner, name = repo.split("/", 1)
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            GITHUB_GRAPHQL,
+            headers=_headers(token),
+            json={
+                "query": _LINKED_ISSUES_QUERY,
+                "variables": {"owner": owner, "name": name, "number": pr_number},
+            },
+        )
+        if response.status_code != 200:
+            return []
+
+        payload = response.json()
+
+    try:
+        nodes = (
+            payload["data"]["repository"]["pullRequest"]
+            ["closingIssuesReferences"]["nodes"]
+        )
+    except (KeyError, TypeError):
+        return []
+
+    return [
+        {
+            "number": n.get("number"),
+            "title": n.get("title", ""),
+            "state": (n.get("state") or "").lower(),
+            "url": n.get("url", ""),
+            "body": (n.get("body") or "")[:2000],
+            "author": (n.get("author") or {}).get("login", ""),
+            "relation": "closes",
+        }
+        for n in nodes
+        if n
+    ]
+
+
+async def get_referenced_issues(
+    token: str, repo: str, body: str | None, exclude: set[int]
+) -> list[dict]:
+    """
+    Issues mentioned as "#N" in the PR body but not formally linked.
+
+    Args:
+        exclude: Issue numbers already returned as closing links.
+    """
+    if not body:
+        return []
+
+    numbers = {
+        int(m) for m in ISSUE_REF_PATTERN.findall(body)
+    } - exclude
+
+    issues: list[dict] = []
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for number in sorted(numbers)[:5]:
+            try:
+                response = await client.get(
+                    f"{GITHUB_API_BASE}/repos/{repo}/issues/{number}",
+                    headers=_headers(token),
+                )
+                if response.status_code != 200:
+                    continue
+                data = response.json()
+
+                # This endpoint also returns PRs; only issues are wanted here.
+                if "pull_request" in data:
+                    continue
+
+                issues.append({
+                    "number": data.get("number"),
+                    "title": data.get("title", ""),
+                    "state": data.get("state", ""),
+                    "url": data.get("html_url", ""),
+                    "body": (data.get("body") or "")[:2000],
+                    "author": (data.get("user") or {}).get("login", ""),
+                    "relation": "mentions",
+                })
+            except Exception:
+                continue
+
+    return issues
 
 
 async def get_pr_commits(token: str, repo: str, pr_number: int) -> list[str]:

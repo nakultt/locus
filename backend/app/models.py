@@ -131,6 +131,41 @@ class PRJob(Base):
         return f"<PRJob(id={self.id}, repo={self.repo}, pr=#{self.pr_number}, status={self.status})>"
 
 
+class QAThread(Base):
+    """
+    A QA notification Locus posted, and the PR state it refers to.
+
+    Slack replies arrive carrying only a channel and a thread timestamp, so the
+    work items to reopen have to be recorded when the notification is sent --
+    there is no way to recover them from the reply itself.
+    """
+
+    __tablename__ = "qa_threads"
+
+    id = Column(Integer, primary_key=True, index=True)
+    repo = Column(String(255), nullable=False, index=True)
+    pr_number = Column(Integer, nullable=False)
+    pr_url = Column(String(512), nullable=False)
+
+    # Slack correlation: channel id plus the parent message timestamp.
+    slack_channel = Column(String(64), nullable=True, index=True)
+    slack_thread_ts = Column(String(32), nullable=True, index=True)
+    # Email correlation, for the Gmail fallback.
+    email_message_id = Column(String(512), nullable=True, index=True)
+
+    # What to reopen if a tester reports a failure, as JSON lists.
+    ticket_keys_json = Column(Text, nullable=True)
+    issue_numbers_json = Column(Text, nullable=True)
+
+    resolved = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<QAThread(repo={self.repo}, pr=#{self.pr_number})>"
+
+
 class RepoWebhook(Base):
     """
     Per-repo webhook registration.
@@ -146,6 +181,16 @@ class RepoWebhook(Base):
     repo = Column(String(255), nullable=False, index=True)  # "owner/name"
     encrypted_secret = Column(Text, nullable=False)
     slack_channel = Column(String(255), nullable=True)  # Where to post summaries
+    # Write each analysis to a Google Doc as a durable record.
+    export_to_docs = Column(Integer, nullable=False, default=0)
+    # Google Doc ids pinned to this repo, newline-separated. Their text is fed
+    # to the reviewer as context on every analysis.
+    context_doc_ids = Column(Text, nullable=True)
+    # Test team addresses emailed when a PR merges, newline-separated.
+    qa_emails = Column(Text, nullable=True)
+    # Jira status to move tickets to on merge. Forward-only; see merge_actions.
+    jira_done_status = Column(String(64), nullable=False, default="Done")
+    close_issues_on_merge = Column(Integer, nullable=False, default=1)
     enabled = Column(Integer, nullable=False, default=1)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())

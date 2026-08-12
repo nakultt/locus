@@ -10,6 +10,7 @@ import {
 import { AnimatePresence, motion } from "framer-motion";
 import { useAuth } from "@/context/AuthContext";
 import { useNavigate } from "react-router-dom";
+import MarkdownMessage from "@/ui/markdown-message";
 import {
   streamChatMessage,
   getConversationMessages,
@@ -189,9 +190,7 @@ const ChatMessage = ({ message }: { message: Message }) => {
               ))}
             </div>
           )}
-          <p className="text-sm leading-relaxed text-foreground whitespace-pre-wrap">
-            {message.content}
-          </p>
+          <MarkdownMessage content={message.content} />
         </div>
       )}
     </motion.div>

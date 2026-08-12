@@ -11,6 +11,8 @@ is parsed at all.
 import hashlib
 import hmac
 import json
+import os
+import secrets
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
@@ -18,13 +20,25 @@ from sqlalchemy.orm import Session
 
 from app import crud, models, schemas, security
 from app.database import SessionLocal, get_db
+from app.services.capabilities import build_readiness
+from app.services.google_docs_context import extract_document_id
+from app.services.merge_actions import run_merge_actions
 from app.services.pr_agent import analyze_pull_request
+from app.services.security_scan import gitleaks_available, semgrep_available
 
 router = APIRouter()
+
+# Public origin GitHub will POST to. Locally this is a tunnel URL (cloudflared
+# or ngrok), since GitHub cannot reach localhost. Only used to build the
+# payload URL shown after registering a repo.
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000")
 
 # PR actions worth analyzing. Ignoring the rest keeps us from re-running on
 # label changes, assignments, and other noise.
 ANALYZED_ACTIONS = {"opened", "reopened", "synchronize", "ready_for_review"}
+
+# A merged PR triggers the post-merge actions instead of a fresh analysis.
+MERGE_ACTION = "merged"
 
 
 def verify_github_signature(payload: bytes, signature: str, secret: str) -> bool:
@@ -112,10 +126,16 @@ async def github_webhook(
         )
 
     action = payload.get("action", "")
-    if action not in ANALYZED_ACTIONS:
+    pr = payload.get("pull_request", {})
+
+    # "closed" with merged=true is the only signal GitHub gives for a merge.
+    if action == "closed":
+        if not pr.get("merged"):
+            return {"message": "Ignoring closed-without-merge"}
+        action = MERGE_ACTION
+    elif action not in ANALYZED_ACTIONS:
         return {"message": f"Ignoring action: {action}"}
 
-    pr = payload.get("pull_request", {})
     if pr.get("draft"):
         return {"message": "Ignoring draft PR"}
 
@@ -132,6 +152,350 @@ async def github_webhook(
     db.refresh(job)
 
     return {"message": "Analysis queued", "job_id": job.id}
+
+
+@router.post(
+    "/repos",
+    response_model=schemas.RepoRegistration,
+    status_code=status.HTTP_201_CREATED,
+    summary="Register a repository for PR analysis",
+)
+async def register_repo(
+    request: schemas.RepoRegister,
+    db: Session = Depends(get_db),
+) -> schemas.RepoRegistration:
+    """
+    Register a repo and mint its webhook secret.
+
+    The secret is returned exactly once, here. It is stored encrypted and there
+    is no endpoint that reads it back -- re-register to rotate.
+    """
+    user = crud.get_user_by_id(db, request.user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+        )
+
+    secret = secrets.token_urlsafe(32)
+
+    # Accept full Docs URLs or bare ids; store ids only.
+    doc_ids = [
+        doc_id
+        for raw in request.context_docs
+        if (doc_id := extract_document_id(raw))
+    ]
+    stored_docs = "\n".join(doc_ids) if doc_ids else None
+
+    # Basic sanity only; a bad address surfaces as a send failure, not a 400.
+    emails = [e.strip() for e in request.qa_emails if e.strip() and "@" in e]
+    stored_emails = "\n".join(emails) if emails else None
+
+    existing = db.query(models.RepoWebhook).filter(
+        models.RepoWebhook.repo == request.repo,
+        models.RepoWebhook.owner_id == request.user_id,
+    ).first()
+
+    if existing:
+        # Re-registering rotates the secret; the old one stops working.
+        existing.encrypted_secret = security.encrypt_token(secret)
+        existing.slack_channel = request.slack_channel
+        existing.export_to_docs = 1 if request.export_to_docs else 0
+        existing.context_doc_ids = stored_docs
+        existing.qa_emails = stored_emails
+        existing.jira_done_status = request.jira_done_status
+        existing.close_issues_on_merge = 1 if request.close_issues_on_merge else 0
+        existing.enabled = 1
+        registration = existing
+    else:
+        registration = models.RepoWebhook(
+            repo=request.repo,
+            encrypted_secret=security.encrypt_token(secret),
+            slack_channel=request.slack_channel,
+            export_to_docs=1 if request.export_to_docs else 0,
+            context_doc_ids=stored_docs,
+            qa_emails=stored_emails,
+            jira_done_status=request.jira_done_status,
+            close_issues_on_merge=1 if request.close_issues_on_merge else 0,
+            enabled=1,
+            owner_id=request.user_id,
+        )
+        db.add(registration)
+
+    db.commit()
+    db.refresh(registration)
+
+    return schemas.RepoRegistration(
+        id=registration.id,
+        repo=registration.repo,
+        slack_channel=registration.slack_channel,
+        export_to_docs=bool(registration.export_to_docs),
+        context_docs=doc_ids,
+        qa_emails=emails,
+        jira_done_status=registration.jira_done_status,
+        close_issues_on_merge=bool(registration.close_issues_on_merge),
+        enabled=True,
+        webhook_url=f"{PUBLIC_BASE_URL.rstrip('/')}/webhooks/github",
+        webhook_secret=secret,
+    )
+
+
+@router.get(
+    "/repos/{user_id}",
+    response_model=schemas.RepoRegistrationList,
+    summary="List registered repositories",
+)
+async def list_repos(
+    user_id: int,
+    db: Session = Depends(get_db),
+) -> schemas.RepoRegistrationList:
+    """List a user's registered repos. Secrets are never returned."""
+    rows = db.query(models.RepoWebhook).filter(
+        models.RepoWebhook.owner_id == user_id
+    ).all()
+
+    return schemas.RepoRegistrationList(
+        repos=[
+            schemas.RepoRegistration(
+                id=r.id,
+                repo=r.repo,
+                slack_channel=r.slack_channel,
+                export_to_docs=bool(r.export_to_docs),
+                context_docs=(r.context_doc_ids or "").splitlines() if r.context_doc_ids else [],
+                qa_emails=(r.qa_emails or "").splitlines() if r.qa_emails else [],
+                jira_done_status=r.jira_done_status or "Done",
+                close_issues_on_merge=bool(r.close_issues_on_merge),
+                enabled=bool(r.enabled),
+            )
+            for r in rows
+        ],
+        total=len(rows),
+    )
+
+
+@router.delete(
+    "/repos/{user_id}/{owner}/{name}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Unregister a repository",
+)
+async def unregister_repo(
+    user_id: int,
+    owner: str,
+    name: str,
+    db: Session = Depends(get_db),
+) -> None:
+    """Remove a repo registration. Its webhook secret stops being accepted."""
+    registration = db.query(models.RepoWebhook).filter(
+        models.RepoWebhook.repo == f"{owner}/{name}",
+        models.RepoWebhook.owner_id == user_id,
+    ).first()
+
+    if not registration:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Repository not registered"
+        )
+
+    db.delete(registration)
+    db.commit()
+
+
+@router.post(
+    "/analyze/{user_id}/{owner}/{name}/{pr_number}",
+    response_model=schemas.PRJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Analyze a pull request now",
+)
+async def trigger_analysis(
+    user_id: int,
+    owner: str,
+    name: str,
+    pr_number: int,
+    db: Session = Depends(get_db),
+) -> schemas.PRJobResponse:
+    """
+    Queue analysis of an existing PR without waiting for a webhook.
+
+    Useful for testing the pipeline, re-running after fixing a credential, and
+    demoing against a PR that is already open.
+    """
+    user = crud.get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+        )
+
+    job = models.PRJob(
+        repo=f"{owner}/{name}",
+        pr_number=pr_number,
+        action="manual",
+        status=schemas.PRJobStatus.queued.value,
+        owner_id=user_id,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    return schemas.PRJobResponse.model_validate(job)
+
+
+@router.get(
+    "/jobs/{user_id}",
+    response_model=list[schemas.PRJobResponse],
+    summary="Recent PR analysis jobs",
+)
+async def list_jobs(
+    user_id: int,
+    limit: int = 20,
+    db: Session = Depends(get_db),
+) -> list[schemas.PRJobResponse]:
+    """List recent jobs, newest first -- the place to look when a run fails."""
+    jobs = (
+        db.query(models.PRJob)
+        .filter(models.PRJob.owner_id == user_id)
+        .order_by(models.PRJob.created_at.desc())
+        .limit(min(limit, 100))
+        .all()
+    )
+    responses: list[schemas.PRJobResponse] = []
+    for job in jobs:
+        response = schemas.PRJobResponse.model_validate(job)
+
+        # Lift the stage list out of the stored result so the run list can show
+        # which steps ran without a request per row.
+        if job.result_json:
+            try:
+                stored = json.loads(job.result_json)
+                response.stages = [
+                    schemas.PipelineStage.model_validate(s)
+                    for s in stored.get("stages", [])
+                ]
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        responses.append(response)
+
+    return responses
+
+
+@router.get(
+    "/jobs/{user_id}/{job_id}",
+    response_model=schemas.PRJobDetail,
+    summary="One job with its full analysis result",
+)
+async def get_job(
+    user_id: int,
+    job_id: int,
+    db: Session = Depends(get_db),
+) -> schemas.PRJobDetail:
+    """Fetch a job including the gathered context and security findings."""
+    job = db.query(models.PRJob).filter(
+        models.PRJob.id == job_id,
+        models.PRJob.owner_id == user_id,
+    ).first()
+
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Job not found"
+        )
+
+    result = None
+    if job.result_json:
+        try:
+            result = schemas.PRAnalysisResult.model_validate_json(job.result_json)
+        except Exception:
+            # A stored result from an older schema should not 500 the endpoint.
+            result = None
+
+    detail = schemas.PRJobDetail.model_validate(job)
+    detail.result = result
+    return detail
+
+
+@router.get(
+    "/summary/{user_id}",
+    response_model=schemas.PRAgentSummary,
+    summary="PR agent dashboard summary",
+)
+async def agent_summary(
+    user_id: int,
+    db: Session = Depends(get_db),
+) -> schemas.PRAgentSummary:
+    """
+    Headline counts plus a readiness picture for the PR agent.
+
+    The dashboard uses this to explain why a run produced thin results -- a
+    missing Slack user token or an absent scanner is invisible otherwise.
+    """
+    jobs = db.query(models.PRJob).filter(models.PRJob.owner_id == user_id).all()
+
+    confirmed = unverified = 0
+    for job in jobs:
+        if not job.result_json:
+            continue
+        try:
+            data = json.loads(job.result_json)
+            confirmed += len(data.get("confirmed_findings", []))
+            unverified += len(data.get("unverified_findings", []))
+        except (json.JSONDecodeError, AttributeError):
+            continue
+
+    by_status: dict[str, int] = {}
+    for job in jobs:
+        by_status[job.status] = by_status.get(job.status, 0) + 1
+
+    slack_credentials = crud.get_integration_credentials(db, user_id, "slack") or {}
+
+    # Build the per-capability view from the same credential shape the pipeline
+    # sees, so the dashboard cannot disagree with what a run would actually do.
+    configs: dict[str, dict] = {}
+    for integration in crud.get_user_integrations(db, user_id):
+        entry: dict = {}
+        key = crud.get_integration_key(db, user_id, integration.service_name)
+        if key:
+            entry["api_key"] = key
+        creds = crud.get_integration_credentials(db, user_id, integration.service_name)
+        if creds:
+            entry["credentials"] = creds
+        if entry:
+            configs[integration.service_name] = entry
+
+    services = [
+        schemas.ServiceStatus(
+            key=s.key,
+            label=s.label,
+            connected=s.connected,
+            required=s.required,
+            capabilities=[
+                schemas.CapabilityStatus(
+                    key=c.key, label=c.label, available=c.available,
+                    required=c.required, hint=c.hint,
+                )
+                for c in s.capabilities
+            ],
+        )
+        for s in build_readiness(configs)
+    ]
+
+    return schemas.PRAgentSummary(
+        total_jobs=len(jobs),
+        completed=by_status.get("completed", 0),
+        failed=by_status.get("failed", 0),
+        running=by_status.get("running", 0),
+        queued=by_status.get("queued", 0),
+        repos_registered=db.query(models.RepoWebhook).filter(
+            models.RepoWebhook.owner_id == user_id
+        ).count(),
+        confirmed_findings=confirmed,
+        unverified_findings=unverified,
+        github_connected=crud.get_integration(db, user_id, "github") is not None,
+        jira_connected=crud.get_integration(db, user_id, "jira") is not None,
+        slack_connected=crud.get_integration(db, user_id, "slack") is not None,
+        slack_search_enabled=bool(slack_credentials.get("user_token")),
+        docs_connected=crud.get_integration(db, user_id, "docs") is not None,
+        semgrep_available=semgrep_available(),
+        gitleaks_available=gitleaks_available(),
+        services=services,
+        public_base_url=PUBLIC_BASE_URL,
+    )
 
 
 async def run_pr_job(job_id: int) -> None:
@@ -170,13 +534,89 @@ async def run_pr_job(job_id: int) -> None:
             if config:
                 integration_configs[integration.service_name] = config
 
+        is_merge = job.action == MERGE_ACTION
+
         result = await analyze_pull_request(
             repo=job.repo,
             pr_number=job.pr_number,
             integration_configs=integration_configs,
-            post_comment=True,
+            # A merged PR is closed; re-commenting on it adds noise. The merge
+            # actions and the QA email carry the outcome instead.
+            post_comment=not is_merge,
             slack_channel=registration.slack_channel if registration else None,
+            export_to_docs=bool(registration.export_to_docs) if registration else False,
+            context_doc_ids=(
+                (registration.context_doc_ids or "").splitlines()
+                if registration and registration.context_doc_ids else []
+            ),
         )
+
+        if is_merge:
+            result.merge_actions = await run_merge_actions(
+                result,
+                integration_configs,
+                jira_done_status=(
+                    registration.jira_done_status if registration else "Done"
+                ),
+                qa_recipients=(
+                    (registration.qa_emails or "").splitlines()
+                    if registration and registration.qa_emails else []
+                ),
+                close_issues=(
+                    bool(registration.close_issues_on_merge) if registration else True
+                ),
+                qa_slack_channel=registration.slack_channel if registration else None,
+            )
+
+            # Surface merge outcomes in the same stage timeline as the reads.
+            merge_result = result.merge_actions
+            result.stages.append(schemas.PipelineStage(
+                key="jira_transition", label="Move Jira ticket", kind="write",
+                state=(
+                    schemas.StageState.done if merge_result.jira_transitioned
+                    else schemas.StageState.skipped
+                ),
+                detail="; ".join(merge_result.jira_transitioned) or "no tickets to move",
+            ))
+            result.stages.append(schemas.PipelineStage(
+                key="close_issues", label="Close linked issues", kind="write",
+                state=(
+                    schemas.StageState.done if merge_result.issues_closed
+                    else schemas.StageState.skipped
+                ),
+                detail="; ".join(merge_result.issues_closed) or "no issues to close",
+            ))
+            result.stages.append(schemas.PipelineStage(
+                key="notify_qa", label="Notify test team", kind="write",
+                state=(
+                    schemas.StageState.done if merge_result.qa_notified
+                    else schemas.StageState.skipped
+                ),
+                detail=(
+                    "Slack thread and/or email sent" if merge_result.qa_notified
+                    else "no QA channel or recipients configured"
+                ),
+            ))
+
+            # Record the thread so a tester's reply can be traced back to the
+            # work items it should reopen -- a Slack reply carries none of that.
+            merge = result.merge_actions
+            if merge and (merge.qa_thread_ts or merge.qa_email_message_id):
+                db.add(models.QAThread(
+                    repo=job.repo,
+                    pr_number=job.pr_number,
+                    pr_url=result.context.url,
+                    slack_channel=registration.slack_channel if registration else None,
+                    slack_thread_ts=merge.qa_thread_ts,
+                    email_message_id=merge.qa_email_message_id,
+                    ticket_keys_json=json.dumps([t.key for t in result.context.tickets]),
+                    issue_numbers_json=json.dumps([
+                        i.number for i in result.context.linked_issues
+                        if i.relation == "closes"
+                    ]),
+                    owner_id=job.owner_id,
+                ))
+                db.commit()
 
         job.result_json = result.model_dump_json()
         job.status = schemas.PRJobStatus.completed.value

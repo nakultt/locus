@@ -250,6 +250,28 @@ class RelatedSlackThread(BaseModel):
     participants: list[str] = []
 
 
+class LinkedIssue(BaseModel):
+    """A GitHub issue this PR closes or mentions."""
+    number: int
+    title: str
+    state: str
+    url: str
+    author: str | None = None
+    body: str | None = None
+    relation: str = Field(
+        "closes", description='"closes" for a real link, "mentions" for a #N reference'
+    )
+
+
+class RelatedDocument(BaseModel):
+    """A Google Doc that appears to describe the work in a PR."""
+    title: str
+    url: str
+    modified_at: str | None = None
+    excerpt: str = Field("", description="Document text, truncated for the context budget")
+    truncated: bool = False
+
+
 class PRContext(BaseModel):
     """Everything gathered about a pull request."""
     repo: str
@@ -260,10 +282,69 @@ class PRContext(BaseModel):
     branch: str | None = None
     ticket_keys: list[str] = []
     tickets: list[RelatedTicket] = []
+    linked_issues: list[LinkedIssue] = []
     slack_threads: list[RelatedSlackThread] = []
+    documents: list[RelatedDocument] = []
     files_changed: int = 0
     additions: int = 0
     deletions: int = 0
+
+
+class ToolInvocation(BaseModel):
+    """
+    One external call the pipeline made.
+
+    Recorded so a run's detail view can show exactly which tools ran, what was
+    searched for, and what came back -- the difference between "no discussion
+    found" and "search never ran".
+    """
+    service: str
+    tool: str
+    query: str | None = Field(None, description="Search terms or identifier used")
+    result_count: int = 0
+    succeeded: bool = True
+    detail: str | None = None
+    duration_ms: int | None = None
+
+
+class StageState(str, Enum):
+    """Lifecycle of one pipeline step."""
+    pending = "pending"
+    running = "running"
+    done = "done"
+    skipped = "skipped"
+    failed = "failed"
+
+
+class PipelineStage(BaseModel):
+    """
+    One step of the PR pipeline, as the dashboard shows it.
+
+    The run detail lists these in order so it is visible what the agent read,
+    what it wrote, and what it skipped -- rather than only the end result.
+    """
+    key: str
+    label: str
+    kind: str = Field("read", description='"read" or "write"')
+    state: StageState = StageState.pending
+    detail: str | None = Field(
+        None, description="What happened, e.g. '2 tickets' or 'Slack not connected'"
+    )
+
+
+class MergeActionResult(BaseModel):
+    """What happened after a pull request merged."""
+    jira_transitioned: list[str] = []
+    issues_closed: list[str] = []
+    qa_notified: bool = False
+    qa_brief: str | None = None
+    qa_thread_ts: str | None = Field(
+        None, description="Slack thread timestamp; ties later replies to this PR"
+    )
+    qa_email_message_id: str | None = Field(
+        None, description="RFC Message-ID; matched against In-Reply-To on replies"
+    )
+    errors: list[str] = []
 
 
 class PRAnalysisResult(BaseModel):
@@ -274,6 +355,18 @@ class PRAnalysisResult(BaseModel):
     summary: str = ""
     pr_comment_posted: bool = False
     slack_posted: bool = False
+    doc_url: str | None = Field(
+        None, description="Google Doc holding the full report, when exported"
+    )
+    tool_calls: list[ToolInvocation] = Field(
+        default_factory=list,
+        description="Every external lookup the pipeline made, in order",
+    )
+    stages: list[PipelineStage] = Field(
+        default_factory=list,
+        description="Each pipeline step and whether it ran, was skipped, or failed",
+    )
+    merge_actions: MergeActionResult | None = None
     errors: list[str] = []
 
 
@@ -285,17 +378,120 @@ class PRJobStatus(str, Enum):
     failed = "failed"
 
 
+class RepoRegister(BaseModel):
+    """Register a repository for PR analysis."""
+    user_id: int
+    repo: str = Field(..., description='Repository as "owner/name"', pattern=r"^[\w.-]+/[\w.-]+$")
+    slack_channel: str | None = Field(
+        None, description="Channel for PR summaries, e.g. #dev-updates"
+    )
+    export_to_docs: bool = Field(
+        False, description="Also write each analysis to a Google Doc"
+    )
+    context_docs: list[str] = Field(
+        default_factory=list,
+        description="Google Doc URLs or ids to always feed the reviewer as context",
+    )
+    qa_emails: list[str] = Field(
+        default_factory=list,
+        description="Test team addresses notified when a PR merges",
+    )
+    jira_done_status: str = Field(
+        "Done", description="Jira status to move tickets to on merge"
+    )
+    close_issues_on_merge: bool = Field(
+        True, description="Close linked GitHub issues when the PR merges"
+    )
+
+
+class RepoRegistration(BaseModel):
+    """A registered repository."""
+    id: int
+    repo: str
+    slack_channel: str | None = None
+    export_to_docs: bool = False
+    context_docs: list[str] = []
+    qa_emails: list[str] = []
+    jira_done_status: str = "Done"
+    close_issues_on_merge: bool = True
+    enabled: bool = True
+    webhook_url: str | None = Field(
+        None, description="Payload URL to paste into GitHub"
+    )
+    webhook_secret: str | None = Field(
+        None, description="Shown once at creation; not retrievable afterwards"
+    )
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RepoRegistrationList(BaseModel):
+    """All repositories registered by a user."""
+    repos: list[RepoRegistration]
+    total: int
+
+
 class PRJobResponse(BaseModel):
     """Status of a PR analysis job."""
     id: int
     status: PRJobStatus
     repo: str
     pr_number: int
+    action: str | None = None
     created_at: datetime
     completed_at: datetime | None = None
     error: str | None = None
+    # Carried on the list response too, so the run list can show which steps
+    # ran without expanding each row.
+    stages: list[PipelineStage] = []
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class PRJobDetail(PRJobResponse):
+    """A job plus its full analysis result, for the dashboard detail view."""
+    result: PRAnalysisResult | None = None
+
+
+class CapabilityStatus(BaseModel):
+    """One concrete thing the pipeline can or cannot do."""
+    key: str
+    label: str
+    available: bool
+    required: bool = False
+    hint: str = ""
+
+
+class ServiceStatus(BaseModel):
+    """A service and its individual capabilities."""
+    key: str
+    label: str
+    connected: bool
+    required: bool = False
+    capabilities: list[CapabilityStatus] = []
+
+
+class PRAgentSummary(BaseModel):
+    """Headline counts for the PR agent dashboard."""
+    total_jobs: int = 0
+    completed: int = 0
+    failed: int = 0
+    running: int = 0
+    queued: int = 0
+    repos_registered: int = 0
+    confirmed_findings: int = 0
+    unverified_findings: int = 0
+    # Which integrations the pipeline can currently draw on. GitHub is
+    # required; the rest degrade to less context rather than failing.
+    github_connected: bool = False
+    jira_connected: bool = False
+    slack_connected: bool = False
+    slack_search_enabled: bool = False
+    docs_connected: bool = False
+    semgrep_available: bool = False
+    gitleaks_available: bool = False
+    services: list[ServiceStatus] = []
+    public_base_url: str | None = None
 
 
 # ============== Error Schemas ==============

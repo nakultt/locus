@@ -202,13 +202,17 @@ async def run_gitleaks(diff_text: str) -> tuple[list[SecurityFinding], str | Non
         except json.JSONDecodeError:
             return [], "gitleaks returned unparseable output"
 
+    # Gitleaks scanned one concatenated .diff, so every hit reports that temp
+    # path. Map diff line numbers back to the real files they belong to.
+    line_map = _map_diff_lines(diff_text)
+
     return [
         SecurityFinding(
             source=FindingSource.gitleaks,
             severity=SecuritySeverity.critical,
             title=f"Possible {leak.get('RuleID', 'credential')} committed",
-            file_path=leak.get("File", "unknown"),
-            line=leak.get("StartLine"),
+            file_path=line_map.get(leak.get("StartLine") or 0, "changed files"),
+            line=None,  # The diff offset would mislead; the file is what matters.
             # Location only. No secret value, by design.
             description=(
                 "A value matching a credential pattern was detected. "
@@ -218,6 +222,26 @@ async def run_gitleaks(diff_text: str) -> tuple[list[SecurityFinding], str | Non
         )
         for leak in leaks
     ], None
+
+
+def _map_diff_lines(diff_text: str) -> dict[int, str]:
+    """
+    Map each line number in a unified diff to the file that line belongs to.
+
+    Gitleaks reports offsets into the diff we handed it; without this the
+    finding points at a temp path instead of the file a reviewer must fix.
+    """
+    mapping: dict[int, str] = {}
+    current = "changed files"
+
+    for index, line in enumerate(diff_text.splitlines(), start=1):
+        if line.startswith("+++ b/"):
+            current = line[6:].strip()
+        elif line.startswith("+++ "):
+            current = line[4:].strip()
+        mapping[index] = current
+
+    return mapping
 
 
 LLM_REVIEW_PROMPT = """You are a security reviewer examining a pull request diff.
@@ -230,6 +254,7 @@ wrong place, broken access control, race conditions on shared state.
 Existing scanner findings:
 {semgrep_summary}
 
+{document_context}
 Diff under review:
 ```
 {diff}
@@ -253,12 +278,19 @@ Return ONLY a JSON array, no prose:
 async def run_llm_review(
     diff_text: str,
     semgrep_findings: list[SecurityFinding],
+    document_context: str = "",
 ) -> tuple[list[SecurityFinding], str | None]:
     """
     LLM pass for logic-level issues.
 
-    Runs on a bare LLM with no tools bound. The diff is untrusted input; a model
-    reading it must not be able to act on instructions embedded in it.
+    Runs on a bare LLM with no tools bound. The diff and any supplied documents
+    are untrusted input; a model reading them must not be able to act on
+    instructions embedded in them.
+
+    Args:
+        document_context: Internal design docs describing intended behaviour,
+            so the review can flag a diff that contradicts the spec rather than
+            judging it in isolation.
     """
     if semgrep_findings:
         semgrep_summary = "\n".join(
@@ -272,6 +304,7 @@ async def run_llm_review(
         chain = ChatPromptTemplate.from_template(LLM_REVIEW_PROMPT) | llm
         response = await chain.ainvoke({
             "semgrep_summary": semgrep_summary,
+            "document_context": document_context,
             "diff": diff_text,
         })
     except Exception as e:
@@ -319,6 +352,7 @@ async def scan_changes(
     files: dict[str, str],
     diff_text: str,
     enable_llm_review: bool = True,
+    document_context: str = "",
 ) -> tuple[list[SecurityFinding], list[SecurityFinding], list[str]]:
     """
     Run the full two-layer scan.
@@ -346,7 +380,9 @@ async def scan_changes(
 
     unverified: list[SecurityFinding] = []
     if enable_llm_review:
-        unverified, llm_error = await run_llm_review(diff_text, semgrep_findings)
+        unverified, llm_error = await run_llm_review(
+            diff_text, semgrep_findings, document_context
+        )
         if llm_error:
             errors.append(llm_error)
 

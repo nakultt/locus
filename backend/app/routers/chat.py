@@ -74,6 +74,13 @@ async def chat(
         conversation = crud.create_conversation(db, request.user_id, title)
         conversation_id = conversation.id
     
+    # Load prior turns BEFORE saving the current one, otherwise the new message
+    # is replayed to the agent twice.
+    history = [
+        (m.role, m.content)
+        for m in crud.get_conversation_messages(db, conversation_id)
+    ]
+
     # Save user message to database
     crud.add_message(
         db=db,
@@ -129,7 +136,8 @@ async def chat(
         result = await process_chat_message(
             message=request.message,
             integration_configs=integration_configs,
-            smart_mode=request.smart_mode
+            smart_mode=request.smart_mode,
+            history=history,
         )
         
         # Save assistant response to database
@@ -224,6 +232,13 @@ async def chat_stream(
         conversation = crud.create_conversation(db, request.user_id, title)
         conversation_id = conversation.id
     
+    # Load prior turns BEFORE saving the current one, otherwise the new message
+    # is replayed to the agent twice.
+    history = [
+        (m.role, m.content)
+        for m in crud.get_conversation_messages(db, conversation_id)
+    ]
+
     # Save user message to database
     crud.add_message(
         db=db,
@@ -286,7 +301,8 @@ async def chat_stream(
         try:
             async for event in process_chat_message_streaming(
                 message=request.message,
-                integration_configs=integration_configs
+                integration_configs=integration_configs,
+                history=history,
             ):
                 # Capture final message and actions from complete event
                 if event.get("event_type") == "complete":
