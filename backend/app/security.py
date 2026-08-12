@@ -3,20 +3,28 @@ Security Utilities
 Password hashing (bcrypt) and token encryption (Fernet)
 """
 
+import hashlib
 import json
 import os
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import bcrypt
 from cryptography.fernet import Fernet
 from dotenv import load_dotenv
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 
 load_dotenv()
 
-# Password hashing context
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# bcrypt is used directly rather than through passlib. passlib 1.7.4 is
+# unmaintained (2020) and raises on bcrypt >= 5, which was pinning us to
+# bcrypt 4.0.1. The stored hash format ($2b$) is unchanged, so hashes created
+# under passlib still verify.
+BCRYPT_ROUNDS = 12
+
+# bcrypt truncates at 72 bytes and errors on longer input; hash a digest of
+# anything longer so long passwords stay usable and distinguishable.
+_MAX_BCRYPT_BYTES = 72
 
 # Encryption key for API tokens
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
@@ -72,14 +80,32 @@ def verify_token(token: str) -> dict | None:
 
 # ============== Password Functions ==============
 
+def _prepare(password: str) -> bytes:
+    """
+    Encode a password for bcrypt.
+
+    bcrypt rejects input over 72 bytes. Rather than truncate -- which would make
+    two long passwords sharing a 72-byte prefix interchangeable -- pre-hash
+    anything longer with SHA-256 so the full input contributes.
+    """
+    raw = password.encode("utf-8")
+    if len(raw) > _MAX_BCRYPT_BYTES:
+        return hashlib.sha256(raw).hexdigest().encode("ascii")
+    return raw
+
+
 def get_password_hash(password: str) -> str:
     """Hash a password using bcrypt."""
-    return pwd_context.hash(password)
+    return bcrypt.hashpw(_prepare(password), bcrypt.gensalt(rounds=BCRYPT_ROUNDS)).decode()
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a password against its hash."""
-    return pwd_context.verify(plain_password, hashed_password)
+    try:
+        return bcrypt.checkpw(_prepare(plain_password), hashed_password.encode())
+    except (ValueError, TypeError):
+        # Malformed or unrecognized hash in the database.
+        return False
 
 
 # ============== Token Encryption Functions ==============

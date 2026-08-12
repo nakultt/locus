@@ -289,8 +289,30 @@ token is present, so the agent is never offered a tool that always fails. The co
 takes both tokens; `credentials.bot_token` is mirrored from `api_key` at submit.
 
 **Tooling and layout.** uv project (`pyproject.toml` + `uv.lock`), ruff and pytest config,
-29-test suite, `.env.example`, `.gitattributes`, numbered `migrations/`, removed a stale
+37-test suite, `.env.example`, `.gitattributes`, numbered `migrations/`, removed a stale
 untracked `frontend/` Next.js build tree and a duplicate requirements file.
+
+**Dependency upgrade to latest.** LangChain 0.3 → 1.3.15, langchain-core → 1.5.4,
+langchain-openai → 1.4.3, LangGraph 0.3 → 1.2.11, bcrypt 4.0.1 → 5.0.0. Dropped
+`langchain-community` (unused) and `passlib` (unmaintained since 2020; it raises on
+bcrypt ≥ 5, which is what pinned bcrypt to 4.0.1).
+
+This brought the LangGraph migration with it rather than as a separate project. LangChain 1.0
+removed `AgentExecutor` and `create_tool_calling_agent`; `create_agent` returns a compiled
+LangGraph, so the agent now:
+
+- takes and returns messages instead of `{"input"}` → `{"output", "intermediate_steps"}`
+- emits task events from the graph stream **as work happens**, replacing the old approach of
+  replaying `intermediate_steps` after the run finished — the UI's progress feed was a replay
+- reads failure from `ToolMessage.status` instead of `"error" not in observation[:50]`, which
+  missed any error message longer than 50 characters
+- survives a tool raising, via a `ToolErrorMiddleware` that converts the exception into an
+  error `ToolMessage`. Previously one bad integration aborted the whole run and discarded the
+  work already completed.
+
+`security.py` now calls bcrypt directly. The stored `$2b$12$` format is unchanged so existing
+passwords still verify, and inputs over bcrypt's 72-byte limit are SHA-256 pre-hashed rather
+than truncated — truncation would make two long passwords sharing a prefix interchangeable.
 
 ### Bugs found and fixed during verification
 
@@ -305,8 +327,10 @@ untracked `frontend/` Next.js build tree and a duplicate requirements file.
 
 ### Verified
 
-- 29 pytest tests: ticket extraction (incl. false positives), HMAC across 7 attack cases,
-  finding separation, secret redaction, severity ordering
+- 37 pytest tests: ticket extraction (incl. false positives), HMAC across 7 attack cases,
+  finding separation, secret redaction, severity ordering, and the LangChain 1.x message
+  contract (tool-call extraction, error status, full streaming lifecycle)
+- Login round-trip under bcrypt 5; 200-character passwords hash and stay distinguishable
 - App boots; 21 routes registered; background worker starts
 - Live webhook flow: signed → 202 queued; tampered/wrong-secret/unsigned → 401; draft and
   non-PR actions ignored; exactly one job created
