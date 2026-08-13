@@ -10,8 +10,12 @@ import httpx
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, Field
 
+from app.services.credential_context import CredentialProxy
+
 # Store credentials at module level for tool access
-_docs_config: dict = {}
+# Task-local so concurrent users cannot see each other's credentials.
+# See app/services/credential_context.py.
+_docs_config = CredentialProxy("google_docs")
 
 # Google Docs API base URL
 DOCS_API_BASE = "https://docs.googleapis.com/v1/documents"
@@ -232,14 +236,13 @@ def get_docs_tools(credentials: dict[str, Any] = None) -> list[BaseTool]:
     Returns:
         List of Google Docs tools
     """
-    global _docs_config
     
     import os
-    _docs_config = {
+    _docs_config.set({
         "credentials": credentials,
         "client_id": os.getenv("GOOGLE_CLIENT_ID", ""),
         "client_secret": os.getenv("GOOGLE_CLIENT_SECRET", ""),
-    }
+    })
     
     return [
         docs_create_document,

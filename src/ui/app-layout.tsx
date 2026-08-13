@@ -41,7 +41,7 @@ const AppLayout = ({ children }: AppLayoutProps) => {
     if (!user?.id) return;
     setIsLoadingConversations(true);
     try {
-      const response = await getUserConversations(user.id);
+      const response = await getUserConversations();
       setConversations(response.conversations);
     } catch (err) {
       console.error("Failed to load conversations:", err);

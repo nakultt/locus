@@ -436,7 +436,7 @@ export default function IntegrationsSection() {
       );
       // Refresh integrations list
       if (user?.id) {
-        listIntegrations(user.id).then((result) => {
+        listIntegrations().then((result) => {
           const connected = new Set(
             result.integrations.map((i: Integration) => i.service_name)
           );
@@ -460,7 +460,7 @@ export default function IntegrationsSection() {
       }
 
       try {
-        const result = await listIntegrations(user.id);
+        const result = await listIntegrations();
         const connected = new Set(
           result.integrations.map((i: Integration) => i.service_name)
         );
@@ -505,7 +505,6 @@ export default function IntegrationsSection() {
     setLoadingService(modalIntegration.id);
     try {
       await connectIntegration(
-        user.id,
         modalIntegration.id,
         apiKey,
         credentials
@@ -524,7 +523,7 @@ export default function IntegrationsSection() {
 
     setLoadingService(serviceId);
     try {
-      await disconnectIntegration(user.id, serviceId);
+      await disconnectIntegration(serviceId);
       setConnectedServices((prev) => {
         const next = new Set(prev);
         next.delete(serviceId);

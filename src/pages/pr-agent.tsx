@@ -568,7 +568,7 @@ const StageChecklist = ({ stages }: { stages: PipelineStage[] }) => {
   );
 };
 
-const JobRow = ({ job, userId }: { job: PRJob; userId: number }) => {
+const JobRow = ({ job }: { job: PRJob }) => {
   const [open, setOpen] = useState(false);
   const [detail, setDetail] = useState<PRJobDetail | null>(null);
   const [loading, setLoading] = useState(false);
@@ -579,7 +579,7 @@ const JobRow = ({ job, userId }: { job: PRJob; userId: number }) => {
     if (next && !detail) {
       setLoading(true);
       try {
-        setDetail(await getPRJob(userId, job.id));
+        setDetail(await getPRJob(job.id));
       } catch {
         setDetail(null);
       } finally {
@@ -657,9 +657,9 @@ export default function PRAgentDashboard() {
     if (!userId) return;
     try {
       const [s, j, r] = await Promise.all([
-        getPRAgentSummary(userId),
-        listPRJobs(userId),
-        listRepos(userId),
+        getPRAgentSummary(),
+        listPRJobs(),
+        listRepos(),
       ]);
       setSummary(s);
       setJobs(j);
@@ -703,7 +703,6 @@ export default function PRAgentDashboard() {
         .filter((e) => e.includes("@"));
 
       const reg = await registerRepo(
-        userId,
         repoInput.trim(),
         channelInput.trim() || undefined,
         exportDocs,
@@ -728,7 +727,7 @@ export default function PRAgentDashboard() {
     setBusy(true);
     setError(null);
     try {
-      await analyzePR(userId, repoInput.trim(), Number(prInput.trim()));
+      await analyzePR(repoInput.trim(), Number(prInput.trim()));
       setPrInput("");
       await refresh();
     } catch (e) {
@@ -1056,7 +1055,7 @@ export default function PRAgentDashboard() {
                   <button
                     onClick={async () => {
                       if (!userId) return;
-                      await unregisterRepo(userId, repo.repo);
+                      await unregisterRepo(repo.repo);
                       refresh();
                     }}
                     className="ml-auto rounded-lg p-1.5 text-muted-foreground hover:bg-muted hover:text-red-500"
@@ -1082,7 +1081,7 @@ export default function PRAgentDashboard() {
         ) : (
           <div className="space-y-2">
             {jobs.map((job) => (
-              <JobRow key={job.id} job={job} userId={userId!} />
+              <JobRow key={job.id} job={job} />
             ))}
           </div>
         )}

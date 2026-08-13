@@ -57,7 +57,6 @@ class LLMStatus(BaseModel):
 
 class IntegrationCreate(BaseModel):
     """Schema for connecting a new integration."""
-    user_id: int
     service_name: str = Field(
         ...,
         description="Service name: jira, gmail, calendar, slack, notion"
@@ -90,7 +89,6 @@ class IntegrationList(BaseModel):
 
 class ChatRequest(BaseModel):
     """Schema for chat message request."""
-    user_id: int
     message: str = Field(..., min_length=1, description="User's natural language command")
     smart_mode: bool = Field(False, description="Use higher intelligence model when enabled")
     conversation_id: int | None = Field(None, description="Existing conversation ID, or None to create new")
@@ -155,7 +153,6 @@ class TaskPlanResponse(BaseModel):
 
 class ConversationCreate(BaseModel):
     """Schema for creating a new conversation."""
-    user_id: int
     title: str | None = Field("New Chat", description="Conversation title")
 
 
@@ -380,7 +377,6 @@ class PRJobStatus(str, Enum):
 
 class RepoRegister(BaseModel):
     """Register a repository for PR analysis."""
-    user_id: int
     repo: str = Field(..., description='Repository as "owner/name"', pattern=r"^[\w.-]+/[\w.-]+$")
     slack_channel: str | None = Field(
         None, description="Channel for PR summaries, e.g. #dev-updates"

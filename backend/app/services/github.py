@@ -10,8 +10,12 @@ import requests
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, Field
 
+from app.services.credential_context import CredentialProxy
+
 # Store credentials at module level for tool access
-_github_config: dict = {}
+# Task-local so concurrent users cannot see each other's credentials.
+# See app/services/credential_context.py.
+_github_config = CredentialProxy("github")
 GITHUB_API_BASE = "https://api.github.com"
 
 
@@ -548,8 +552,7 @@ def get_github_tools(token: str) -> list[BaseTool]:
     Returns:
         List of GitHub tools
     """
-    global _github_config
-    _github_config = {"token": token}
+    _github_config.set({"token": token})
     
     return [
         # Repository tools

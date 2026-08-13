@@ -62,8 +62,8 @@ thread, so the failure mode is gone rather than fixed.
 ### 0.4 Calendar correctness
 
 `_parse_datetime` (`calendar.py:119`) understands only "2pm", "3pm", "10am" — everything else
-silently becomes 9am. It builds naive server-local times and labels them `"timeZone": "UTC"`
-(`calendar.py:186`), so every event is wrong by the user's UTC offset.
+silently becomes 9am. It builds naive server-local times and labels them `"timeZone": "IST"`
+(`calendar.py:186`), so every event is wrong by the user's IST offset.
 
 - Replace with `dateparser` (handles "next Tuesday at 4", "in 2 hours").
 - Add `timezone` column to `User`, populated at signup from
@@ -171,6 +171,8 @@ hallucinates findings.
 ---
 
 ## Phase 3 — Feature B: Adaptive Scheduler
+
+IT SHOULD BE A SEPERATE PAGE IN UI SHOWING A IN APP CALENDER AND NEATLY SHOWING WHAT CALENDER EVENTS NEEDS TO BE CHANGED OR MOVED OR REPLACED OR REMOVED OR ADDED , LIKE THAT USING COLORS
 
 ### 3.1 Deadline model
 

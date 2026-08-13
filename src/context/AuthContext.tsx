@@ -111,7 +111,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const updateProfile = async (data: UserUpdate): Promise<User> => {
     if (!user?.id) throw new Error("User not logged in");
-    const updatedUser = await apiUpdateUser(user.id, data);
+    const updatedUser = await apiUpdateUser(data);
     setUser(updatedUser);
     return updatedUser;
   };

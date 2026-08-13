@@ -10,8 +10,12 @@ import httpx
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, Field
 
+from app.services.credential_context import CredentialProxy
+
 # Store credentials at module level for tool access
-_forms_config: dict = {}
+# Task-local so concurrent users cannot see each other's credentials.
+# See app/services/credential_context.py.
+_forms_config = CredentialProxy("google_forms")
 
 # Google Forms API base URL
 FORMS_API_BASE = "https://forms.googleapis.com/v1/forms"
@@ -233,14 +237,13 @@ def get_forms_tools(credentials: dict[str, Any] = None) -> list[BaseTool]:
     Returns:
         List of Google Forms tools
     """
-    global _forms_config
     
     import os
-    _forms_config = {
+    _forms_config.set({
         "credentials": credentials,
         "client_id": os.getenv("GOOGLE_CLIENT_ID", ""),
         "client_secret": os.getenv("GOOGLE_CLIENT_SECRET", ""),
-    }
+    })
     
     return [
         forms_create_form,

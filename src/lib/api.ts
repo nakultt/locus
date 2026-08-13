@@ -164,8 +164,8 @@ export interface UserUpdate {
   name?: string;
 }
 
-export async function updateUser(userId: number, data: UserUpdate): Promise<User> {
-  return apiRequest<User>(`/auth/user/${userId}`, {
+export async function updateUser(data: UserUpdate): Promise<User> {
+  return apiRequest<User>("/auth/user", {
     method: "PUT",
     body: JSON.stringify(data),
   });
@@ -174,7 +174,6 @@ export async function updateUser(userId: number, data: UserUpdate): Promise<User
 // ============== Integration API ==============
 
 export async function connectIntegration(
-  userId: number,
   serviceName: string,
   apiKey?: string,
   credentials?: Record<string, unknown>
@@ -182,7 +181,6 @@ export async function connectIntegration(
   return apiRequest<Integration>("/auth/connect", {
     method: "POST",
     body: JSON.stringify({
-      user_id: userId,
       service_name: serviceName,
       api_key: apiKey,
       credentials,
@@ -190,17 +188,14 @@ export async function connectIntegration(
   });
 }
 
-export async function listIntegrations(
-  userId: number
-): Promise<IntegrationList> {
-  return apiRequest<IntegrationList>(`/auth/integrations/${userId}`);
+export async function listIntegrations(): Promise<IntegrationList> {
+  return apiRequest<IntegrationList>("/auth/integrations");
 }
 
 export async function disconnectIntegration(
-  userId: number,
   serviceName: string
 ): Promise<void> {
-  return apiRequest<void>(`/auth/disconnect/${userId}/${serviceName}`, {
+  return apiRequest<void>(`/auth/disconnect/${serviceName}`, {
     method: "DELETE",
   });
 }
@@ -208,7 +203,6 @@ export async function disconnectIntegration(
 // ============== Chat API ==============
 
 export async function sendChatMessage(
-  userId: number,
   message: string,
   smartMode: boolean = false,
   conversationId?: number
@@ -216,7 +210,6 @@ export async function sendChatMessage(
   return apiRequest<ChatResponse>("/api/chat", {
     method: "POST",
     body: JSON.stringify({
-      user_id: userId,
       message,
       smart_mode: smartMode,
       conversation_id: conversationId,
@@ -226,20 +219,15 @@ export async function sendChatMessage(
 
 // ============== Conversations API ==============
 
-export async function createConversation(
-  userId: number,
-  title?: string
-): Promise<Conversation> {
+export async function createConversation(title?: string): Promise<Conversation> {
   return apiRequest<Conversation>("/api/conversations", {
     method: "POST",
-    body: JSON.stringify({ user_id: userId, title }),
+    body: JSON.stringify({ title }),
   });
 }
 
-export async function getUserConversations(
-  userId: number
-): Promise<ConversationList> {
-  return apiRequest<ConversationList>(`/api/conversations/${userId}`);
+export async function getUserConversations(): Promise<ConversationList> {
+  return apiRequest<ConversationList>("/api/conversations");
 }
 
 export async function getConversationMessages(
@@ -324,7 +312,6 @@ export interface StreamEvent {
  * Stream chat messages with real-time task progress updates.
  * Uses Server-Sent Events (SSE) for live updates.
  *
- * @param userId - The user's ID
  * @param message - The chat message to send
  * @param onEvent - Callback for each SSE event
  * @param onError - Callback for errors
@@ -333,7 +320,6 @@ export interface StreamEvent {
  * @returns Abort function to cancel the stream
  */
 export function streamChatMessage(
-  userId: number,
   message: string,
   onEvent: (event: StreamEvent) => void,
   onError: (error: Error) => void,
@@ -372,11 +358,7 @@ export function streamChatMessage(
       "Content-Type": "application/json",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
-    body: JSON.stringify({ 
-      user_id: userId, 
-      message,
-      conversation_id: conversationId 
-    }),
+    body: JSON.stringify({ message, conversation_id: conversationId }),
     signal: abortController.signal,
   })
     .then(async (response) => {
@@ -631,27 +613,26 @@ export interface PRAgentSummary {
   public_base_url?: string;
 }
 
-export async function getPRAgentSummary(userId: number): Promise<PRAgentSummary> {
-  return apiRequest<PRAgentSummary>(`/webhooks/summary/${userId}`);
+export async function getPRAgentSummary(): Promise<PRAgentSummary> {
+  return apiRequest<PRAgentSummary>("/webhooks/summary");
 }
 
-export async function listPRJobs(userId: number, limit = 20): Promise<PRJob[]> {
-  return apiRequest<PRJob[]>(`/webhooks/jobs/${userId}?limit=${limit}`);
+export async function listPRJobs(limit = 20): Promise<PRJob[]> {
+  return apiRequest<PRJob[]>(`/webhooks/jobs?limit=${limit}`);
 }
 
-export async function getPRJob(userId: number, jobId: number): Promise<PRJobDetail> {
-  return apiRequest<PRJobDetail>(`/webhooks/jobs/${userId}/${jobId}`);
+export async function getPRJob(jobId: number): Promise<PRJobDetail> {
+  return apiRequest<PRJobDetail>(`/webhooks/jobs/${jobId}`);
 }
 
-export async function listRepos(userId: number): Promise<{
+export async function listRepos(): Promise<{
   repos: RepoRegistration[];
   total: number;
 }> {
-  return apiRequest(`/webhooks/repos/${userId}`);
+  return apiRequest("/webhooks/repos");
 }
 
 export async function registerRepo(
-  userId: number,
   repo: string,
   slackChannel?: string,
   exportToDocs = false,
@@ -663,7 +644,6 @@ export async function registerRepo(
   return apiRequest<RepoRegistration>("/webhooks/repos", {
     method: "POST",
     body: JSON.stringify({
-      user_id: userId,
       repo,
       slack_channel: slackChannel || null,
       export_to_docs: exportToDocs,
@@ -675,18 +655,14 @@ export async function registerRepo(
   });
 }
 
-export async function unregisterRepo(userId: number, repo: string): Promise<void> {
-  return apiRequest<void>(`/webhooks/repos/${userId}/${repo}`, {
+export async function unregisterRepo(repo: string): Promise<void> {
+  return apiRequest<void>(`/webhooks/repos/${repo}`, {
     method: "DELETE",
   });
 }
 
-export async function analyzePR(
-  userId: number,
-  repo: string,
-  prNumber: number
-): Promise<PRJob> {
-  return apiRequest<PRJob>(`/webhooks/analyze/${userId}/${repo}/${prNumber}`, {
+export async function analyzePR(repo: string, prNumber: number): Promise<PRJob> {
+  return apiRequest<PRJob>(`/webhooks/analyze/${repo}/${prNumber}`, {
     method: "POST",
   });
 }

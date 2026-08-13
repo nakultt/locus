@@ -10,8 +10,12 @@ import httpx
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, Field
 
+from app.services.credential_context import CredentialProxy
+
 # Store credentials at module level for tool access
-_sheets_config: dict = {}
+# Task-local so concurrent users cannot see each other's credentials.
+# See app/services/credential_context.py.
+_sheets_config = CredentialProxy("google_sheets")
 
 # Google Sheets API base URL
 SHEETS_API_BASE = "https://sheets.googleapis.com/v4/spreadsheets"
@@ -214,14 +218,13 @@ def get_sheets_tools(credentials: dict[str, Any] = None) -> list[BaseTool]:
     Returns:
         List of Google Sheets tools
     """
-    global _sheets_config
     
     import os
-    _sheets_config = {
+    _sheets_config.set({
         "credentials": credentials,
         "client_id": os.getenv("GOOGLE_CLIENT_ID", ""),
         "client_secret": os.getenv("GOOGLE_CLIENT_SECRET", ""),
-    }
+    })
     
     return [
         sheets_add_row,

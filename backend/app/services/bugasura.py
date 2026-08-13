@@ -12,8 +12,12 @@ import httpx
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, Field
 
+from app.services.credential_context import CredentialProxy
+
 # Store credentials at module level for tool access
-_bugasura_config: dict = {}
+# Task-local so concurrent users cannot see each other's credentials.
+# See app/services/credential_context.py.
+_bugasura_config = CredentialProxy("bugasura")
 
 # Bugasura API base URL (per docs)
 BUGASURA_API_BASE = "https://api.bugasura.io"
@@ -280,12 +284,11 @@ def get_bugasura_tools(api_key: str, team_id: str = "", project_key: str = "") -
     Returns:
         List of Bugasura tools
     """
-    global _bugasura_config
-    _bugasura_config = {
+    _bugasura_config.set({
         "api_key": api_key,
         "team_id": team_id,
         "project_key": project_key
-    }
+    })
     
     return [
         bugasura_create_issue,
