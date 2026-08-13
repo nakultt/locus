@@ -584,3 +584,34 @@ class ScheduleApplyRequest(BaseModel):
     """Apply a previously reviewed plan."""
     moves: list[ScheduleMove]
     additions: list[ScheduleMove] = []
+
+
+class DeadlineCreate(BaseModel):
+    """Register a due date the scheduler must protect."""
+    key: str = Field(..., description="Ticket key or label, e.g. LOC-431")
+    title: str
+    due_at: datetime
+    estimated_minutes: int = Field(60, ge=5, le=2400)
+    source: str = Field("manual", description="jira, linear, or manual")
+    url: str | None = None
+
+
+class DeadlineResponse(BaseModel):
+    """A tracked deadline."""
+    id: int
+    key: str
+    title: str
+    due_at: datetime
+    estimated_minutes: int
+    source: str
+    url: str | None = None
+    completed: bool = False
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class EventConstraintSet(BaseModel):
+    """Override how movable a specific event is."""
+    event_id: str
+    event_class: EventClass
+    note: str | None = None

@@ -1,8 +1,9 @@
 # Locus Implementation Plan
 
-> **Status.** Phase 0 is complete. Feature A (PR Context Agent) and Feature B (Adaptive
-> Scheduler) are both implemented. 152 tests pass. Nothing has been exercised against live
-> third-party services -- see "Not yet verified" at the bottom.
+> **Status.** Phase 0, Feature A and Feature B are implemented; 166 tests pass. Two items in
+> the original plan were deliberately **not** built -- proactive scheduler triggers (3.5) and
+> the Phase 4 scheduler infrastructure. Both are listed under "Deferred" with the reasoning.
+> Nothing has run against live third-party services -- see "Not yet verified".
 
 Two flagship features, plus the foundation they both require.
 
@@ -429,8 +430,40 @@ the response flags whether approval is needed because other attendees are involv
 Two invariants are tested directly: proposed moves never overlap each other, and a plan that
 would move an external meeting reports it as blocked instead.
 
+### Also completed in this pass
+
+**Required secrets.** `SECRET_KEY` and `ENCRYPTION_KEY` now raise at import instead of falling
+back. The generated encryption key changed on every restart, silently making stored
+credentials undecryptable; the default JWT secret was a literal committed to a public repo, so
+anyone could mint a token for any user -- which would have walked straight past the auth work
+in 0.1. Tests supply throwaway values via `tests/conftest.py`.
+
+**Deadlines and constraints (3.1, 3.2).** `deadlines` records due dates the scheduler will not
+push work past, and `event_constraints` overrides its guess at how movable an event is. The
+attendee-count heuristic is wrong often enough to need one: a solo block can be immovable and
+a large meeting trivially movable. Endpoints under `/api/schedule/`.
+
+**Migration 001 was broken.** It queried `information_schema`, which is Postgres-only, so it
+failed outright on SQLite -- the default for local development. Rewritten against SQLAlchemy's
+inspector and renamed to match what it actually does (`001_add_user_name.py`; it never touched
+conversations). All 8 migrations now run clean on both an existing and a fresh database.
+
+### Deferred, with reasons
+
+**3.5 Scheduler triggers.** The scheduler runs on request: plan, review, apply. Firing it
+automatically when a Jira ticket appears means proposing calendar changes nobody asked for,
+and the proposal has to reach the user somewhere -- Slack DM or email -- which is a
+notification system rather than a scheduling one. Worth building once the on-request flow has
+been used enough to know which triggers are actually wanted.
+
+**Phase 4 scheduler infrastructure.** The plan called for APScheduler or Celery. Two
+in-process asyncio loops already cover the current need (PR jobs, Gmail polling), and adding a
+third dependency for a feature with no proactive triggers yet would be premature. The real
+forcing function is multi-instance deployment, which needs row locking regardless.
+
 ### Not yet verified
 
 No part of this has run against live Google Calendar, Jira, Slack, or GitHub. Response shapes
-are written against the documented APIs. The solver and parser are exercised directly and are
-independent of those services, but everything that reads or writes to them is unproven.
+are written against the documented APIs. The solver, the date parser, and the auth and
+credential-isolation work are exercised directly and do not depend on those services, but
+every call that reads or writes to them is unproven.

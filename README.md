@@ -93,7 +93,10 @@ Then copy `backend/.env.example` to `backend/.env` and fill in `SECRET_KEY` and 
 uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-> **`ENCRYPTION_KEY` must be set and must never change.** Every stored integration credential is encrypted with it. Rotating or losing it makes all of them permanently undecryptable.
+> **Both keys are required — the app refuses to start without them.** A generated
+> `ENCRYPTION_KEY` would change on every restart, silently making every stored credential
+> undecryptable, and a default `SECRET_KEY` would let anyone forge a token for any user. Set
+> them once and keep them.
 
 Upgrading an existing database:
 
@@ -336,6 +339,10 @@ classifier has no tools bound — it returns a verdict and nothing else.
 | `GET` | `/api/schedule/conflicts` | Double-bookings in the next two weeks |
 | `POST` | `/api/schedule/plan` | What would move to fit a new event (writes nothing) |
 | `POST` | `/api/schedule/apply` | Apply a reviewed plan |
+| `GET`/`POST` | `/api/schedule/deadlines` | Deadlines the scheduler protects |
+| `DELETE` | `/api/schedule/deadlines/{deadline_id}` | Stop tracking one |
+| `POST` | `/api/schedule/plan-deadline/{deadline_id}` | Reserve work time before a due date |
+| `POST` | `/api/schedule/constraints` | Pin an event as fixed or flexible |
 | `POST` | `/webhooks/github` | GitHub events (HMAC-authenticated) |
 | `POST` | `/webhooks/slack` | Slack events — QA replies (HMAC-authenticated) |
 | `POST` | `/webhooks/repos` | Register a repo; returns the webhook secret once |

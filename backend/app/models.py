@@ -166,6 +166,62 @@ class QAThread(Base):
         return f"<QAThread(repo={self.repo}, pr=#{self.pr_number})>"
 
 
+class Deadline(Base):
+    """
+    A due date the scheduler must protect.
+
+    Sourced from Jira due dates, Linear targets, or entered by hand. The
+    scheduler will not push work past one of these; if it cannot fit the work
+    beforehand it reports that rather than silently missing it.
+    """
+
+    __tablename__ = "deadlines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    # Ticket key, issue reference, or a free-text label.
+    key = Column(String(128), nullable=False, index=True)
+    title = Column(String(512), nullable=False)
+    due_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    # Work still needed, so a slot of the right size can be found.
+    estimated_minutes = Column(Integer, nullable=False, default=60)
+    source = Column(String(32), nullable=False, default="manual")  # jira, linear, manual
+    url = Column(String(512), nullable=True)
+    completed = Column(Integer, nullable=False, default=0)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+
+    def __repr__(self) -> str:
+        return f"<Deadline(key={self.key}, due={self.due_at})>"
+
+
+class EventConstraint(Base):
+    """
+    How movable a specific calendar event is.
+
+    The scheduler infers a class from attendee count, but that guess is wrong
+    often enough to need an override: a solo block can be immovable, and a
+    six-person meeting can be trivially rescheduled.
+    """
+
+    __tablename__ = "event_constraints"
+
+    id = Column(Integer, primary_key=True, index=True)
+    # Google Calendar event id.
+    event_id = Column(String(256), nullable=False, index=True)
+    # hard_fixed | soft_fixed | flexible
+    event_class = Column(String(16), nullable=False)
+    note = Column(String(512), nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+
+    def __repr__(self) -> str:
+        return f"<EventConstraint(event={self.event_id}, class={self.event_class})>"
+
+
 class RepoWebhook(Base):
     """
     Per-repo webhook registration.
