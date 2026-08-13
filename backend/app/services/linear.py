@@ -11,8 +11,12 @@ import requests
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, Field
 
+from app.services.credential_context import CredentialProxy
+
 # Store credentials at module level for tool access
-_linear_config: dict = {}
+# Task-local so concurrent users cannot see each other's credentials.
+# See app/services/credential_context.py.
+_linear_config = CredentialProxy("linear")
 LINEAR_API_URL = "https://api.linear.app/graphql"
 
 
@@ -572,8 +576,7 @@ def get_linear_tools(api_key: str) -> list[BaseTool]:
     Returns:
         List of Linear tools
     """
-    global _linear_config
-    _linear_config = {"api_key": api_key}
+    _linear_config.set({"api_key": api_key})
     
     return [
         # Team tools

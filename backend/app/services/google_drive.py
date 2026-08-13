@@ -11,8 +11,12 @@ import httpx
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, Field
 
+from app.services.credential_context import CredentialProxy
+
 # Store credentials at module level for tool access
-_drive_config: dict = {}
+# Task-local so concurrent users cannot see each other's credentials.
+# See app/services/credential_context.py.
+_drive_config = CredentialProxy("google_drive")
 
 # Google Drive API base URL
 DRIVE_API_BASE = "https://www.googleapis.com/drive/v3"
@@ -294,14 +298,13 @@ def get_drive_tools(credentials: dict[str, Any] = None) -> list[BaseTool]:
     Returns:
         List of Google Drive tools
     """
-    global _drive_config
     
     import os
-    _drive_config = {
+    _drive_config.set({
         "credentials": credentials,
         "client_id": os.getenv("GOOGLE_CLIENT_ID", ""),
         "client_secret": os.getenv("GOOGLE_CLIENT_SECRET", ""),
-    }
+    })
     
     return [
         drive_upload_file,

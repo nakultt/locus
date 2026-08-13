@@ -10,8 +10,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app import crud, schemas
+from app import crud, models, schemas
 from app.database import get_db
+from app.dependencies import get_current_user, get_integration_configs
 from app.services.agent import process_chat_message, process_chat_message_streaming
 from app.services.llm import check_llm_available
 
@@ -27,7 +28,8 @@ router = APIRouter()
 )
 async def chat(
     request: schemas.ChatRequest,
-    db: Session = Depends(get_db)
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> schemas.ChatResponse:
     """
     Process a natural language message and execute actions across integrated tools.
@@ -45,14 +47,6 @@ async def chat(
     3. Execute actions using connected tools
     4. Return structured results
     """
-    # Validate user exists
-    user = crud.get_user_by_id(db, request.user_id)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
-    
     # Get or create conversation
     conversation_id = request.conversation_id
     if conversation_id:
@@ -63,15 +57,16 @@ async def chat(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Conversation not found"
             )
-        if conversation.owner_id != request.user_id:
+        if conversation.owner_id != current_user.id:
+            # 404 rather than 403: a 403 confirms the id exists.
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Conversation does not belong to user"
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Conversation not found"
             )
     else:
         # Create new conversation with first few words of message as title
         title = request.message[:50] + "..." if len(request.message) > 50 else request.message
-        conversation = crud.create_conversation(db, request.user_id, title)
+        conversation = crud.create_conversation(db, current_user.id, title)
         conversation_id = conversation.id
     
     # Load prior turns BEFORE saving the current one, otherwise the new message
@@ -90,7 +85,7 @@ async def chat(
     )
     
     # Get user's connected integrations
-    integrations = crud.get_user_integrations(db, request.user_id)
+    integrations = crud.get_user_integrations(db, current_user.id)
     if not integrations:
         # Save error as assistant message
         error_msg = "No integrations connected. Please connect at least one service first."
@@ -105,23 +100,7 @@ async def chat(
             detail=error_msg
         )
     
-    # Build integration credentials map
-    integration_configs: dict[str, dict] = {}
-    for integration in integrations:
-        config = {}
-        
-        # Get decrypted API key
-        api_key = crud.get_integration_key(db, request.user_id, integration.service_name)
-        if api_key:
-            config["api_key"] = api_key
-        
-        # Get decrypted credentials
-        credentials = crud.get_integration_credentials(db, request.user_id, integration.service_name)
-        if credentials:
-            config["credentials"] = credentials
-        
-        if config:
-            integration_configs[integration.service_name] = config
+    integration_configs = get_integration_configs(db, current_user.id)
     
     # Verify the local model server is up with a model loaded
     llm_ready, llm_message = await check_llm_available()
@@ -170,7 +149,7 @@ async def chat(
         # General error
         # Log the detail server-side; upstream API errors can carry internals
         # that should not be returned to the client.
-        logger.exception("Chat processing failed for user %s", request.user_id)
+        logger.exception("Chat processing failed for user %s", current_user.id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error processing request. Check server logs for details."
@@ -183,7 +162,8 @@ async def chat(
 )
 async def chat_stream(
     request: schemas.ChatRequest,
-    db: Session = Depends(get_db)
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """
     Process a natural language message with streaming task updates.
@@ -198,7 +178,7 @@ async def chat_stream(
     - error: If something goes wrong
     """
     # Validate user exists
-    user = crud.get_user_by_id(db, request.user_id)
+    user = crud.get_user_by_id(db, current_user.id)
     if not user:
         async def error_generator():
             yield f"data: {json.dumps({'event_type': 'error', 'data': {'message': 'User not found'}})}\n\n"
@@ -219,7 +199,7 @@ async def chat_stream(
                 error_generator(),
                 media_type="text/event-stream"
             )
-        if conversation.owner_id != request.user_id:
+        if conversation.owner_id != current_user.id:
             async def error_generator():
                 yield f"data: {json.dumps({'event_type': 'error', 'data': {'message': 'Conversation does not belong to user'}})}\n\n"
             return StreamingResponse(
@@ -229,7 +209,7 @@ async def chat_stream(
     else:
         # Create new conversation with first few words of message as title
         title = request.message[:50] + "..." if len(request.message) > 50 else request.message
-        conversation = crud.create_conversation(db, request.user_id, title)
+        conversation = crud.create_conversation(db, current_user.id, title)
         conversation_id = conversation.id
     
     # Load prior turns BEFORE saving the current one, otherwise the new message
@@ -248,7 +228,7 @@ async def chat_stream(
     )
     
     # Get user's connected integrations
-    integrations = crud.get_user_integrations(db, request.user_id)
+    integrations = crud.get_user_integrations(db, current_user.id)
     if not integrations:
         # Save error as assistant message
         error_msg = "No integrations connected. Please connect at least one service first."
@@ -265,23 +245,7 @@ async def chat_stream(
             media_type="text/event-stream"
         )
     
-    # Build integration credentials map
-    integration_configs: dict[str, dict] = {}
-    for integration in integrations:
-        config = {}
-        
-        # Get decrypted API key
-        api_key = crud.get_integration_key(db, request.user_id, integration.service_name)
-        if api_key:
-            config["api_key"] = api_key
-        
-        # Get decrypted credentials
-        credentials = crud.get_integration_credentials(db, request.user_id, integration.service_name)
-        if credentials:
-            config["credentials"] = credentials
-        
-        if config:
-            integration_configs[integration.service_name] = config
+    integration_configs = get_integration_configs(db, current_user.id)
     
     # Verify the local model server is up with a model loaded
     llm_ready, llm_message = await check_llm_available()

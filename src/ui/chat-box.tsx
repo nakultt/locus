@@ -355,7 +355,6 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
 
     // Use streaming API for live updates
     const abort = streamChatMessage(
-      user.id,
       userMessage.content,
       // onEvent
       (event: StreamEvent) => {

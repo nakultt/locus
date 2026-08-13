@@ -13,8 +13,12 @@ Scopes used:
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, Field
 
+from app.services.credential_context import CredentialProxy
+
 # Store credentials at module level for tool access
-_jira_config: dict = {}
+# Task-local so concurrent users cannot see each other's credentials.
+# See app/services/credential_context.py.
+_jira_config = CredentialProxy("jira")
 
 
 # ============================================================================
@@ -686,12 +690,11 @@ def get_jira_tools(
     Returns:
         List of Jira tools
     """
-    global _jira_config
-    _jira_config = {
+    _jira_config.set({
         "api_token": api_token,
         "email": email,
         "url": url
-    }
+    })
     
     return [
         # Issue management

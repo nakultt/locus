@@ -45,7 +45,10 @@ def client(tmp_path):
     webhooks.PUBLIC_BASE_URL = "https://demo.example.com"
 
     with TestClient(main.app) as c:
-        c.post("/auth/signup", json={"email": "r@r.com", "password": "secret123"})
+        signup = c.post(
+            "/auth/signup", json={"email": "r@r.com", "password": "secret123"}
+        ).json()
+        c.headers["Authorization"] = f"Bearer {signup['token']}"
         yield c
 
     main.app.dependency_overrides.clear()
@@ -56,9 +59,7 @@ def sign(body: bytes, secret: str) -> str:
 
 
 def test_registration_returns_usable_webhook_secret(client):
-    r = client.post("/webhooks/repos", json={
-        "user_id": 1, "repo": "acme/api", "slack_channel": "#dev",
-    })
+    r = client.post("/webhooks/repos", json={"repo": "acme/api", "slack_channel": "#dev"})
     assert r.status_code == 201
     reg = r.json()
     assert reg["webhook_url"].endswith("/webhooks/github")
@@ -81,18 +82,16 @@ def test_registration_returns_usable_webhook_secret(client):
 
 
 def test_secret_is_not_returned_when_listing(client):
-    client.post("/webhooks/repos", json={"user_id": 1, "repo": "acme/api"})
-    listing = client.get("/webhooks/repos/1").json()
+    client.post("/webhooks/repos", json={"repo": "acme/api"})
+    listing = client.get("/webhooks/repos").json()
 
     assert listing["total"] == 1
     assert listing["repos"][0]["webhook_secret"] is None
 
 
 def test_reregistering_rotates_the_secret(client):
-    first = client.post("/webhooks/repos", json={
-        "user_id": 1, "repo": "acme/api"}).json()["webhook_secret"]
-    second = client.post("/webhooks/repos", json={
-        "user_id": 1, "repo": "acme/api"}).json()["webhook_secret"]
+    first = client.post("/webhooks/repos", json={"repo": "acme/api"}).json()["webhook_secret"]
+    second = client.post("/webhooks/repos", json={"repo": "acme/api"}).json()["webhook_secret"]
 
     assert first != second
 
@@ -111,27 +110,54 @@ def test_reregistering_rotates_the_secret(client):
 
 
 def test_malformed_repo_slug_is_rejected(client):
-    r = client.post("/webhooks/repos", json={"user_id": 1, "repo": "notaslug"})
+    r = client.post("/webhooks/repos", json={"repo": "notaslug"})
     assert r.status_code == 422
 
 
-def test_unknown_user_is_rejected(client):
-    r = client.post("/webhooks/repos", json={"user_id": 999, "repo": "acme/api"})
-    assert r.status_code == 404
+def test_unauthenticated_registration_is_rejected(client):
+    """
+    Identity comes from the token, so there is no user_id left to forge. A
+    caller without a valid token cannot register a repo at all.
+    """
+    r = client.post(
+        "/webhooks/repos",
+        json={"repo": "acme/api"},
+        headers={"Authorization": "Bearer not-a-real-token"},
+    )
+    assert r.status_code == 401
+
+
+def test_a_user_only_sees_their_own_repos(client):
+    """Registrations are scoped to the owner."""
+    import main
+    from app.database import get_db
+
+    client.post("/webhooks/repos", json={"repo": "acme/api"})
+
+    # A second account, sharing the same overridden database.
+    override = main.app.dependency_overrides[get_db]
+    with TestClient(main.app) as other:
+        main.app.dependency_overrides[get_db] = override
+        signup = other.post(
+            "/auth/signup", json={"email": "other@r.com", "password": "secret123"}
+        ).json()
+        other.headers["Authorization"] = f"Bearer {signup['token']}"
+
+        assert other.get("/webhooks/repos").json()["total"] == 0
+        assert client.get("/webhooks/repos").json()["total"] == 1
 
 
 def test_manual_trigger_queues_a_job(client):
-    r = client.post("/webhooks/analyze/1/acme/api/42")
+    r = client.post("/webhooks/analyze/acme/api/42")
     assert r.status_code == 202
     assert r.json()["pr_number"] == 42
     assert r.json()["status"] == "queued"
 
 
 def test_unregistering_revokes_the_secret(client):
-    secret = client.post("/webhooks/repos", json={
-        "user_id": 1, "repo": "acme/api"}).json()["webhook_secret"]
+    secret = client.post("/webhooks/repos", json={"repo": "acme/api"}).json()["webhook_secret"]
 
-    assert client.delete("/webhooks/repos/1/acme/api").status_code == 204
+    assert client.delete("/webhooks/repos/acme/api").status_code == 204
 
     body = json.dumps({
         "action": "opened",

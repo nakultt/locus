@@ -10,8 +10,12 @@ import httpx
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, Field
 
+from app.services.credential_context import CredentialProxy
+
 # Store credentials at module level for tool access
-_calendar_config: dict = {}
+# Task-local so concurrent users cannot see each other's credentials.
+# See app/services/credential_context.py.
+_calendar_config = CredentialProxy("calendar")
 
 # Google Calendar API base URL
 CALENDAR_API_BASE = "https://www.googleapis.com/calendar/v3/calendars/primary"
@@ -330,14 +334,13 @@ def get_calendar_tools(credentials: dict[str, Any] = None) -> list[BaseTool]:
     Returns:
         List of Calendar tools
     """
-    global _calendar_config
     
     import os
-    _calendar_config = {
+    _calendar_config.set({
         "credentials": credentials,
         "client_id": os.getenv("GOOGLE_CLIENT_ID", ""),
         "client_secret": os.getenv("GOOGLE_CLIENT_SECRET", ""),
-    }
+    })
     
     return [
         calendar_create_event,

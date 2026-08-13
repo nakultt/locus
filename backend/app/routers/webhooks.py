@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from app import crud, models, schemas, security
 from app.database import SessionLocal, get_db
+from app.dependencies import get_current_user, get_integration_configs
 from app.services.capabilities import build_readiness
 from app.services.google_docs_context import extract_document_id
 from app.services.merge_actions import run_merge_actions
@@ -162,6 +163,7 @@ async def github_webhook(
 )
 async def register_repo(
     request: schemas.RepoRegister,
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> schemas.RepoRegistration:
     """
@@ -170,12 +172,6 @@ async def register_repo(
     The secret is returned exactly once, here. It is stored encrypted and there
     is no endpoint that reads it back -- re-register to rotate.
     """
-    user = crud.get_user_by_id(db, request.user_id)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
-        )
-
     secret = secrets.token_urlsafe(32)
 
     # Accept full Docs URLs or bare ids; store ids only.
@@ -192,7 +188,7 @@ async def register_repo(
 
     existing = db.query(models.RepoWebhook).filter(
         models.RepoWebhook.repo == request.repo,
-        models.RepoWebhook.owner_id == request.user_id,
+        models.RepoWebhook.owner_id == current_user.id,
     ).first()
 
     if existing:
@@ -217,7 +213,7 @@ async def register_repo(
             jira_done_status=request.jira_done_status,
             close_issues_on_merge=1 if request.close_issues_on_merge else 0,
             enabled=1,
-            owner_id=request.user_id,
+            owner_id=current_user.id,
         )
         db.add(registration)
 
@@ -240,17 +236,17 @@ async def register_repo(
 
 
 @router.get(
-    "/repos/{user_id}",
+    "/repos",
     response_model=schemas.RepoRegistrationList,
     summary="List registered repositories",
 )
 async def list_repos(
-    user_id: int,
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> schemas.RepoRegistrationList:
     """List a user's registered repos. Secrets are never returned."""
     rows = db.query(models.RepoWebhook).filter(
-        models.RepoWebhook.owner_id == user_id
+        models.RepoWebhook.owner_id == current_user.id
     ).all()
 
     return schemas.RepoRegistrationList(
@@ -273,20 +269,20 @@ async def list_repos(
 
 
 @router.delete(
-    "/repos/{user_id}/{owner}/{name}",
+    "/repos/{owner}/{name}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Unregister a repository",
 )
 async def unregister_repo(
-    user_id: int,
     owner: str,
     name: str,
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> None:
     """Remove a repo registration. Its webhook secret stops being accepted."""
     registration = db.query(models.RepoWebhook).filter(
         models.RepoWebhook.repo == f"{owner}/{name}",
-        models.RepoWebhook.owner_id == user_id,
+        models.RepoWebhook.owner_id == current_user.id,
     ).first()
 
     if not registration:
@@ -299,16 +295,16 @@ async def unregister_repo(
 
 
 @router.post(
-    "/analyze/{user_id}/{owner}/{name}/{pr_number}",
+    "/analyze/{owner}/{name}/{pr_number}",
     response_model=schemas.PRJobResponse,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Analyze a pull request now",
 )
 async def trigger_analysis(
-    user_id: int,
     owner: str,
     name: str,
     pr_number: int,
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> schemas.PRJobResponse:
     """
@@ -317,18 +313,12 @@ async def trigger_analysis(
     Useful for testing the pipeline, re-running after fixing a credential, and
     demoing against a PR that is already open.
     """
-    user = crud.get_user_by_id(db, user_id)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
-        )
-
     job = models.PRJob(
         repo=f"{owner}/{name}",
         pr_number=pr_number,
         action="manual",
         status=schemas.PRJobStatus.queued.value,
-        owner_id=user_id,
+        owner_id=current_user.id,
     )
     db.add(job)
     db.commit()
@@ -338,19 +328,19 @@ async def trigger_analysis(
 
 
 @router.get(
-    "/jobs/{user_id}",
+    "/jobs",
     response_model=list[schemas.PRJobResponse],
     summary="Recent PR analysis jobs",
 )
 async def list_jobs(
-    user_id: int,
     limit: int = 20,
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[schemas.PRJobResponse]:
     """List recent jobs, newest first -- the place to look when a run fails."""
     jobs = (
         db.query(models.PRJob)
-        .filter(models.PRJob.owner_id == user_id)
+        .filter(models.PRJob.owner_id == current_user.id)
         .order_by(models.PRJob.created_at.desc())
         .limit(min(limit, 100))
         .all()
@@ -377,19 +367,19 @@ async def list_jobs(
 
 
 @router.get(
-    "/jobs/{user_id}/{job_id}",
+    "/jobs/{job_id}",
     response_model=schemas.PRJobDetail,
     summary="One job with its full analysis result",
 )
 async def get_job(
-    user_id: int,
     job_id: int,
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> schemas.PRJobDetail:
     """Fetch a job including the gathered context and security findings."""
     job = db.query(models.PRJob).filter(
         models.PRJob.id == job_id,
-        models.PRJob.owner_id == user_id,
+        models.PRJob.owner_id == current_user.id,
     ).first()
 
     if not job:
@@ -411,12 +401,12 @@ async def get_job(
 
 
 @router.get(
-    "/summary/{user_id}",
+    "/summary",
     response_model=schemas.PRAgentSummary,
     summary="PR agent dashboard summary",
 )
 async def agent_summary(
-    user_id: int,
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> schemas.PRAgentSummary:
     """
@@ -425,7 +415,7 @@ async def agent_summary(
     The dashboard uses this to explain why a run produced thin results -- a
     missing Slack user token or an absent scanner is invisible otherwise.
     """
-    jobs = db.query(models.PRJob).filter(models.PRJob.owner_id == user_id).all()
+    jobs = db.query(models.PRJob).filter(models.PRJob.owner_id == current_user.id).all()
 
     confirmed = unverified = 0
     for job in jobs:
@@ -442,17 +432,17 @@ async def agent_summary(
     for job in jobs:
         by_status[job.status] = by_status.get(job.status, 0) + 1
 
-    slack_credentials = crud.get_integration_credentials(db, user_id, "slack") or {}
+    slack_credentials = crud.get_integration_credentials(db, current_user.id, "slack") or {}
 
     # Build the per-capability view from the same credential shape the pipeline
     # sees, so the dashboard cannot disagree with what a run would actually do.
     configs: dict[str, dict] = {}
-    for integration in crud.get_user_integrations(db, user_id):
+    for integration in crud.get_user_integrations(db, current_user.id):
         entry: dict = {}
-        key = crud.get_integration_key(db, user_id, integration.service_name)
+        key = crud.get_integration_key(db, current_user.id, integration.service_name)
         if key:
             entry["api_key"] = key
-        creds = crud.get_integration_credentials(db, user_id, integration.service_name)
+        creds = crud.get_integration_credentials(db, current_user.id, integration.service_name)
         if creds:
             entry["credentials"] = creds
         if entry:
@@ -482,15 +472,15 @@ async def agent_summary(
         running=by_status.get("running", 0),
         queued=by_status.get("queued", 0),
         repos_registered=db.query(models.RepoWebhook).filter(
-            models.RepoWebhook.owner_id == user_id
+            models.RepoWebhook.owner_id == current_user.id
         ).count(),
         confirmed_findings=confirmed,
         unverified_findings=unverified,
-        github_connected=crud.get_integration(db, user_id, "github") is not None,
-        jira_connected=crud.get_integration(db, user_id, "jira") is not None,
-        slack_connected=crud.get_integration(db, user_id, "slack") is not None,
+        github_connected=crud.get_integration(db, current_user.id, "github") is not None,
+        jira_connected=crud.get_integration(db, current_user.id, "jira") is not None,
+        slack_connected=crud.get_integration(db, current_user.id, "slack") is not None,
         slack_search_enabled=bool(slack_credentials.get("user_token")),
-        docs_connected=crud.get_integration(db, user_id, "docs") is not None,
+        docs_connected=crud.get_integration(db, current_user.id, "docs") is not None,
         semgrep_available=semgrep_available(),
         gitleaks_available=gitleaks_available(),
         services=services,
@@ -518,21 +508,9 @@ async def run_pr_job(job_id: int) -> None:
             models.RepoWebhook.owner_id == job.owner_id,
         ).first()
 
-        # Load this user's credentials directly. Only safe because the service
-        # tools take credentials per call rather than through module globals.
-        integration_configs: dict[str, dict] = {}
-        for integration in crud.get_user_integrations(db, job.owner_id):
-            config: dict = {}
-            api_key = crud.get_integration_key(db, job.owner_id, integration.service_name)
-            if api_key:
-                config["api_key"] = api_key
-            credentials = crud.get_integration_credentials(
-                db, job.owner_id, integration.service_name
-            )
-            if credentials:
-                config["credentials"] = credentials
-            if config:
-                integration_configs[integration.service_name] = config
+        # Safe to load credentials outside a request because the service
+        # tools take them per call rather than through module globals.
+        integration_configs = get_integration_configs(db, job.owner_id)
 
         is_merge = job.action == MERGE_ACTION
 

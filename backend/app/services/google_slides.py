@@ -10,8 +10,12 @@ import httpx
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, Field
 
+from app.services.credential_context import CredentialProxy
+
 # Store credentials at module level for tool access
-_slides_config: dict = {}
+# Task-local so concurrent users cannot see each other's credentials.
+# See app/services/credential_context.py.
+_slides_config = CredentialProxy("google_slides")
 
 # Google Slides API base URL
 SLIDES_API_BASE = "https://slides.googleapis.com/v1/presentations"
@@ -222,14 +226,13 @@ def get_slides_tools(credentials: dict[str, Any] = None) -> list[BaseTool]:
     Returns:
         List of Google Slides tools
     """
-    global _slides_config
     
     import os
-    _slides_config = {
+    _slides_config.set({
         "credentials": credentials,
         "client_id": os.getenv("GOOGLE_CLIENT_ID", ""),
         "client_secret": os.getenv("GOOGLE_CLIENT_SECRET", ""),
-    }
+    })
     
     return [
         slides_create_presentation,

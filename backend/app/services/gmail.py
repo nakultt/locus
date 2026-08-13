@@ -12,8 +12,12 @@ import httpx
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, Field
 
+from app.services.credential_context import CredentialProxy
+
 # Store credentials at module level for tool access
-_gmail_config: dict = {}
+# Task-local so concurrent users cannot see each other's credentials.
+# See app/services/credential_context.py.
+_gmail_config = CredentialProxy("gmail")
 
 # Gmail API base URL
 GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
@@ -223,14 +227,13 @@ def get_gmail_tools(credentials: dict[str, Any] = None, api_key: str = "") -> li
     Returns:
         List of Gmail tools
     """
-    global _gmail_config
     
     import os
-    _gmail_config = {
+    _gmail_config.set({
         "credentials": credentials,
         "client_id": os.getenv("GOOGLE_CLIENT_ID", ""),
         "client_secret": os.getenv("GOOGLE_CLIENT_SECRET", ""),
-    }
+    })
     
     return [
         gmail_send_email,

@@ -6,8 +6,12 @@ LangChain tools for Notion documentation
 from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, Field
 
+from app.services.credential_context import CredentialProxy
+
 # Store credentials at module level for tool access
-_notion_config: dict = {}
+# Task-local so concurrent users cannot see each other's credentials.
+# See app/services/credential_context.py.
+_notion_config = CredentialProxy("notion")
 
 
 class SearchNotionInput(BaseModel):
@@ -461,8 +465,7 @@ def get_notion_tools(integration_token: str) -> list[BaseTool]:
     Returns:
         List of Notion tools
     """
-    global _notion_config
-    _notion_config = {"integration_token": integration_token}
+    _notion_config.set({"integration_token": integration_token})
     
     return [
         notion_search,
