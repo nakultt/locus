@@ -52,6 +52,14 @@ const INTEGRATIONS = [
         placeholder: "https://company.atlassian.net",
         isCredential: true,
       },
+      {
+        name: "default_project_key",
+        label: "Default Project Key (optional)",
+        placeholder: "KAN",
+        isCredential: true,
+        optional: true,
+        help: "Where new tickets go when you don't name a project. Without it the assistant has to look your projects up first.",
+      },
     ],
   },
   {
@@ -492,7 +500,10 @@ export default function IntegrationsSection() {
     if (config.oauthProvider === "linear") {
       window.location.href = `${apiBaseUrl}/auth/linear?user_id=${user.id}`;
     } else {
-      window.location.href = `${apiBaseUrl}/auth/google?user_id=${user.id}&service=${config.id}`;
+      // "google" rather than the individual card id: one consent screen
+      // grants every Google scope anyway, so connecting Gmail should light up
+      // Calendar, Docs, Drive and the rest instead of leaving them greyed out.
+      window.location.href = `${apiBaseUrl}/auth/google?user_id=${user.id}&service=google`;
     }
   };
 

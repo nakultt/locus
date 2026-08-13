@@ -234,6 +234,37 @@ class SecurityFinding(BaseModel):
     # by location only; echoing them into a PR comment widens the exposure.
 
 
+class ReviewPriority(str, Enum):
+    """
+    How much a review finding should block the merge.
+
+    Kept separate from SecuritySeverity: a P1 is "do not merge this", which is
+    a judgement about this change, not a CVSS-style severity rating.
+    """
+    p1 = "p1"  # Breaks something, or contradicts a stated requirement.
+    p2 = "p2"  # Should be fixed, but does not block the merge.
+    p3 = "p3"  # Style, naming, nits.
+
+
+class ReviewFinding(BaseModel):
+    """
+    A non-security code review finding.
+
+    Security issues go through SecurityFinding, which has a scanner backing it.
+    These are model judgements about correctness, requirements, and quality --
+    always reported as the reviewer's opinion, never as confirmed defects.
+    """
+    priority: ReviewPriority
+    title: str
+    file_path: str
+    line: int | None = None
+    description: str
+    category: str = Field(
+        "correctness",
+        description="correctness, requirements, quality, or testing",
+    )
+
+
 class RelatedTicket(BaseModel):
     """A ticket linked to a PR."""
     key: str
@@ -308,6 +339,14 @@ class ToolInvocation(BaseModel):
     succeeded: bool = True
     detail: str | None = None
     duration_ms: int | None = None
+    matches: list[str] = Field(
+        default_factory=list,
+        description=(
+            "What the search actually matched, one short line each. A count "
+            "alone cannot be sanity-checked; these let a reader see whether "
+            "the query found the right thing."
+        ),
+    )
 
 
 class StageState(str, Enum):
@@ -344,6 +383,13 @@ class MergeActionResult(BaseModel):
     qa_thread_ts: str | None = Field(
         None, description="Slack thread timestamp; ties later replies to this PR"
     )
+    qa_channel_id: str | None = Field(
+        None,
+        description=(
+            "Channel id Slack resolved the post to. Inbound events identify "
+            "channels by id, never by the '#name' typed at registration."
+        ),
+    )
     qa_email_message_id: str | None = Field(
         None, description="RFC Message-ID; matched against In-Reply-To on replies"
     )
@@ -355,6 +401,10 @@ class PRAnalysisResult(BaseModel):
     context: PRContext
     confirmed_findings: list[SecurityFinding] = []
     unverified_findings: list[SecurityFinding] = []
+    review_findings: list[ReviewFinding] = Field(
+        default_factory=list,
+        description="Non-security review findings, ordered P1 first",
+    )
     summary: str = ""
     pr_comment_posted: bool = False
     slack_posted: bool = False
@@ -406,6 +456,44 @@ class RepoRegister(BaseModel):
     )
 
 
+class PRAgentDefaultsUpdate(BaseModel):
+    """
+    Account-wide fallbacks applied to every repo that does not override them.
+
+    These exist so a repo nobody registered still exports its report and
+    emails the test team, instead of quietly doing neither.
+    """
+    slack_channel: str | None = Field(
+        None, description="Default channel for PR summaries, e.g. #dev-updates"
+    )
+    export_to_docs: bool = Field(
+        False, description="Write every analysis to a Google Doc by default"
+    )
+    qa_emails: list[str] = Field(
+        default_factory=list,
+        description="Test team addresses notified on merge, for every repo",
+    )
+    jira_done_status: str = Field(
+        "Done", description="Jira status to move tickets to on merge"
+    )
+    close_issues_on_merge: bool = Field(
+        True, description="Close linked GitHub issues when a PR merges"
+    )
+
+
+class PRAgentDefaults(PRAgentDefaultsUpdate):
+    """Stored account-wide fallbacks."""
+    model_config = ConfigDict(from_attributes=True)
+
+
+class EffectiveSetting(BaseModel):
+    """One resolved setting and which layer supplied it."""
+    value: object = None
+    source: str = Field(
+        "unset", description='"repo", "defaults", or "unset"'
+    )
+
+
 class RepoRegistration(BaseModel):
     """A registered repository."""
     id: int
@@ -446,6 +534,9 @@ class PRJobResponse(BaseModel):
     # Carried on the list response too, so the run list can show which steps
     # ran without expanding each row.
     stages: list[PipelineStage] = []
+    # The searches behind those steps. A count like "2 thread(s)" cannot be
+    # sanity-checked without seeing the query and what it matched.
+    tool_calls: list[ToolInvocation] = []
 
     model_config = ConfigDict(from_attributes=True)
 

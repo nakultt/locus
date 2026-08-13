@@ -29,7 +29,15 @@ class CreateIssueInput(BaseModel):
     """Input schema for creating a Jira issue."""
     summary: str = Field(description="Brief title/summary of the issue")
     description: str = Field(default="", description="Detailed description of the issue")
-    project_key: str = Field(description="Jira project key (e.g., 'PROJ')")
+    project_key: str = Field(
+        default="",
+        description=(
+            "Jira project key (e.g., 'KAN'). Leave empty to use the default "
+            "project configured on the integration. Never invent a key -- if "
+            "there is no default and the user did not name one, call "
+            "jira_list_projects first."
+        ),
+    )
     issue_type: str = Field(default="Task", description="Issue type: Task, Bug, Story, Epic, etc.")
     priority: str = Field(default="Medium", description="Priority: Highest, High, Medium, Low, Lowest")
     assignee: str = Field(default="", description="Account ID or email of assignee (optional)")
@@ -113,14 +121,78 @@ def _get_jira_client():
         return None, "DEMO_MODE"
 
 
+def _fetch_projects() -> tuple[list[dict], str | None]:
+    """Return (projects, error). Each project is {"key", "name"}."""
+    jira, error = _get_jira_client()
+    if error == "DEMO_MODE":
+        return [], "DEMO_MODE"
+    if error:
+        return [], error
+
+    try:
+        raw = jira.projects()
+    except Exception as exc:
+        return [], f"Error listing projects: {exc}"
+
+    # `projects()` returns a bare list on Jira Cloud but a paginated dict on
+    # some Server versions.
+    if isinstance(raw, dict):
+        raw = raw.get("values", [])
+
+    return [
+        {"key": p.get("key", ""), "name": p.get("name", "")}
+        for p in raw or []
+        if p.get("key")
+    ], None
+
+
+def _describe_projects(hint: str) -> str:
+    """Render the available projects, for use in an error the model reads."""
+    projects, error = _fetch_projects()
+    if error == "DEMO_MODE":
+        return hint
+    if error:
+        return f"Could not list projects to suggest one: {error}"
+    if not projects:
+        return "No projects exist in this Jira instance yet -- create one first."
+
+    listing = "\n".join(f"• {p['key']} — {p['name']}" for p in projects[:25])
+    return f"Available projects:\n{listing}\n\n{hint}"
+
+
 # ============================================================================
 # ISSUE MANAGEMENT TOOLS
 # ============================================================================
 
+@tool("jira_list_projects")
+def jira_list_projects() -> str:
+    """
+    List the Jira projects this account can see, with their keys.
+
+    Use this before creating an issue when no project key is known, rather
+    than guessing a key that may not exist.
+    """
+    projects, error = _fetch_projects()
+
+    if error == "DEMO_MODE":
+        return "📁 Demo mode - atlassian-python-api not installed."
+    if error:
+        return f"❌ {error}"
+    if not projects:
+        return "📁 No projects found in this Jira instance."
+
+    default = _jira_config.get("default_project_key", "")
+    lines = []
+    for project in projects:
+        marker = "  (default)" if project["key"] == default else ""
+        lines.append(f"• **{project['key']}** — {project['name']}{marker}")
+
+    return f"📁 Found {len(projects)} projects:\n\n" + "\n".join(lines)
+
 @tool("jira_create_issue", args_schema=CreateIssueInput)
 def jira_create_issue(
     summary: str,
-    project_key: str,
+    project_key: str = "",
     description: str = "",
     issue_type: str = "Task",
     priority: str = "Medium",
@@ -129,10 +201,26 @@ def jira_create_issue(
 ) -> str:
     """
     Create a new Jira issue/ticket.
-    
+
     Use this when the user wants to create a new ticket, issue, bug report, or task in Jira.
+
+    Omit project_key to use the project configured on the integration. Do not
+    guess a key: if none is configured, this returns the list of real projects
+    to choose from.
     """
     try:
+        project_key = (project_key or _jira_config.get("default_project_key", "")).strip()
+        if not project_key:
+            return (
+                "❌ No project key given and no default project is configured "
+                "on the Jira integration.\n\n"
+                + _describe_projects(
+                    "Pass one of these as project_key, or set a default project "
+                    "in Settings → Integrations → Jira."
+                )
+            )
+        project_key = project_key.upper()
+
         jira, error = _get_jira_client()
         
         if error == "DEMO_MODE":
@@ -677,26 +765,32 @@ def jira_assign_permission_scheme(project_key: str, permission_scheme_id: str) -
 def get_jira_tools(
     api_token: str,
     email: str = "",
-    url: str = ""
+    url: str = "",
+    default_project_key: str = ""
 ) -> list[BaseTool]:
     """
     Get LangChain tools for Jira integration.
-    
+
     Args:
         api_token: Jira API token
         email: User email for Jira Cloud
         url: Jira instance URL (e.g., https://company.atlassian.net)
-        
+        default_project_key: Project new issues land in when the user does not
+            name one. Without it the model has to guess a key, and a wrong
+            guess costs a failed round trip against the live API.
+
     Returns:
         List of Jira tools
     """
     _jira_config.set({
         "api_token": api_token,
         "email": email,
-        "url": url
+        "url": url,
+        "default_project_key": (default_project_key or "").strip().upper(),
     })
-    
+
     return [
+        jira_list_projects,
         # Issue management
         jira_create_issue,
         jira_update_issue,

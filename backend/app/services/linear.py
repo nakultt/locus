@@ -301,15 +301,15 @@ def linear_get_issue(issue_id: str) -> str:
     priority = priority_map.get(issue.get("priority", 0), "Unknown")
     assignee = issue.get("assignee", {})
     assignee_str = assignee.get("name", "Unassigned") if assignee else "Unassigned"
-    labels = [l["name"] for l in issue.get("labels", {}).get("nodes", [])]
+    labels = [l["name"] for l in (issue.get("labels") or {}).get("nodes") or []]
     
     output = f"""📋 Issue: **[{issue['identifier']}] {issue['title']}**
 
-📊 State: {issue.get('state', {}).get('name', 'Unknown')}
+📊 State: {(issue.get('state') or {}).get('name') or 'Unknown'}
 ⚡ Priority: {priority}
 👤 Assignee: {assignee_str}
-🏷️ Team: {issue.get('team', {}).get('name', 'None')}
-📁 Project: {issue.get('project', {}).get('name', 'None') if issue.get('project') else 'None'}
+🏷️ Team: {(issue.get('team') or {}).get('name') or 'None'}
+📁 Project: {(issue.get('project') or {}).get('name') or 'None'}
 🔗 URL: {issue.get('url', 'N/A')}
 """
     
@@ -326,8 +326,11 @@ def linear_get_issue(issue_id: str) -> str:
     if comments:
         output += f"\n💬 Comments ({len(comments)}):\n"
         for c in comments[:3]:
-            user = c.get("user", {}).get("name", "Unknown")
-            body = c.get("body", "")[:100]
+            # GraphQL returns explicit nulls rather than omitting fields, so
+            # the `.get` defaults never fire: comments posted by integrations
+            # have no user, and a body can come back null.
+            user = (c.get("user") or {}).get("name") or "Unknown"
+            body = (c.get("body") or "")[:100]
             output += f"• **{user}**: {body}\n"
     
     return output

@@ -14,6 +14,7 @@ import json
 import os
 import secrets
 from datetime import UTC, datetime
+from urllib.parse import parse_qs
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy.orm import Session
@@ -21,6 +22,7 @@ from sqlalchemy.orm import Session
 from app import crud, models, schemas, security
 from app.database import SessionLocal, get_db
 from app.dependencies import get_current_user, get_integration_configs
+from app.services.agent_settings import resolve_settings
 from app.services.capabilities import build_readiness
 from app.services.google_docs_context import extract_document_id
 from app.services.merge_actions import run_merge_actions
@@ -65,6 +67,31 @@ def verify_github_signature(payload: bytes, signature: str, secret: str) -> bool
     return hmac.compare_digest(expected, signature)
 
 
+def _parse_webhook_body(raw_body: bytes, content_type: str) -> dict | None:
+    """
+    Decode a webhook body under either content type GitHub offers.
+
+    The hook's "Content type" setting picks between raw JSON and a form post
+    carrying the JSON in a `payload` field. Both are legitimate; a repo with
+    two hooks configured differently sends both. Returns None if undecodable.
+
+    Signature verification still runs over the raw bytes, so accepting the
+    form encoding does not widen what we trust.
+    """
+    if "x-www-form-urlencoded" in content_type.lower():
+        encoded = parse_qs(raw_body.decode("utf-8", errors="replace")).get("payload")
+        if not encoded:
+            return None
+        raw_body = encoded[0].encode("utf-8")
+
+    try:
+        parsed = json.loads(raw_body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+    return parsed if isinstance(parsed, dict) else None
+
+
 @router.post(
     "/github",
     status_code=status.HTTP_202_ACCEPTED,
@@ -91,13 +118,12 @@ async def github_webhook(
     if x_github_event != "pull_request":
         return {"message": f"Ignoring event: {x_github_event}"}
 
-    try:
-        payload = json.loads(raw_body)
-    except json.JSONDecodeError as e:
+    payload = _parse_webhook_body(raw_body, request.headers.get("content-type", ""))
+    if payload is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Malformed JSON payload"
-        ) from e
+        )
 
     repo_full_name = payload.get("repository", {}).get("full_name")
     if not repo_full_name:
@@ -294,6 +320,78 @@ async def unregister_repo(
     db.commit()
 
 
+@router.get(
+    "/defaults",
+    response_model=schemas.PRAgentDefaults,
+    summary="Read account-wide PR agent defaults",
+)
+async def get_defaults(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> schemas.PRAgentDefaults:
+    """
+    Fallbacks applied to any repo that does not set its own.
+
+    Returns the schema defaults when nothing has been saved yet, so the client
+    never has to special-case a missing row.
+    """
+    row = db.query(models.PRAgentDefaults).filter(
+        models.PRAgentDefaults.owner_id == current_user.id
+    ).first()
+
+    if not row:
+        return schemas.PRAgentDefaults()
+
+    return schemas.PRAgentDefaults(
+        slack_channel=row.slack_channel,
+        export_to_docs=bool(row.export_to_docs),
+        qa_emails=[e for e in (row.qa_emails or "").splitlines() if e.strip()],
+        jira_done_status=row.jira_done_status,
+        close_issues_on_merge=bool(row.close_issues_on_merge),
+    )
+
+
+@router.put(
+    "/defaults",
+    response_model=schemas.PRAgentDefaults,
+    summary="Save account-wide PR agent defaults",
+)
+async def save_defaults(
+    request: schemas.PRAgentDefaultsUpdate,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> schemas.PRAgentDefaults:
+    """Create or replace this account's defaults. One row per user."""
+    # Same leniency as repo registration: a malformed address surfaces as a
+    # send failure rather than blocking the whole save.
+    emails = [e.strip() for e in request.qa_emails if e.strip() and "@" in e]
+
+    row = db.query(models.PRAgentDefaults).filter(
+        models.PRAgentDefaults.owner_id == current_user.id
+    ).first()
+
+    if not row:
+        row = models.PRAgentDefaults(owner_id=current_user.id)
+        db.add(row)
+
+    row.slack_channel = (request.slack_channel or "").strip() or None
+    row.export_to_docs = 1 if request.export_to_docs else 0
+    row.qa_emails = "\n".join(emails) if emails else None
+    row.jira_done_status = request.jira_done_status or "Done"
+    row.close_issues_on_merge = 1 if request.close_issues_on_merge else 0
+
+    db.commit()
+    db.refresh(row)
+
+    return schemas.PRAgentDefaults(
+        slack_channel=row.slack_channel,
+        export_to_docs=bool(row.export_to_docs),
+        qa_emails=emails,
+        jira_done_status=row.jira_done_status,
+        close_issues_on_merge=bool(row.close_issues_on_merge),
+    )
+
+
 @router.post(
     "/analyze/{owner}/{name}/{pr_number}",
     response_model=schemas.PRJobResponse,
@@ -349,14 +447,19 @@ async def list_jobs(
     for job in jobs:
         response = schemas.PRJobResponse.model_validate(job)
 
-        # Lift the stage list out of the stored result so the run list can show
-        # which steps ran without a request per row.
+        # Lift the stage list and the searches out of the stored result so the
+        # run list can show which steps ran, what was queried and what matched,
+        # without a request per row.
         if job.result_json:
             try:
                 stored = json.loads(job.result_json)
                 response.stages = [
                     schemas.PipelineStage.model_validate(s)
                     for s in stored.get("stages", [])
+                ]
+                response.tool_calls = [
+                    schemas.ToolInvocation.model_validate(c)
+                    for c in stored.get("tool_calls", [])
                 ]
             except (json.JSONDecodeError, ValueError):
                 pass
@@ -514,6 +617,11 @@ async def run_pr_job(job_id: int) -> None:
 
         is_merge = job.action == MERGE_ACTION
 
+        # Per-repo settings win; the account defaults fill the rest. A repo
+        # that was never registered still gets the user's global behaviour
+        # rather than silently doing nothing.
+        settings = resolve_settings(db, job.owner_id, registration)
+
         result = await analyze_pull_request(
             repo=job.repo,
             pr_number=job.pr_number,
@@ -521,29 +629,19 @@ async def run_pr_job(job_id: int) -> None:
             # A merged PR is closed; re-commenting on it adds noise. The merge
             # actions and the QA email carry the outcome instead.
             post_comment=not is_merge,
-            slack_channel=registration.slack_channel if registration else None,
-            export_to_docs=bool(registration.export_to_docs) if registration else False,
-            context_doc_ids=(
-                (registration.context_doc_ids or "").splitlines()
-                if registration and registration.context_doc_ids else []
-            ),
+            slack_channel=settings.slack_channel,
+            export_to_docs=settings.export_to_docs,
+            context_doc_ids=settings.context_doc_ids,
         )
 
         if is_merge:
             result.merge_actions = await run_merge_actions(
                 result,
                 integration_configs,
-                jira_done_status=(
-                    registration.jira_done_status if registration else "Done"
-                ),
-                qa_recipients=(
-                    (registration.qa_emails or "").splitlines()
-                    if registration and registration.qa_emails else []
-                ),
-                close_issues=(
-                    bool(registration.close_issues_on_merge) if registration else True
-                ),
-                qa_slack_channel=registration.slack_channel if registration else None,
+                jira_done_status=settings.jira_done_status,
+                qa_recipients=settings.qa_emails,
+                close_issues=settings.close_issues_on_merge,
+                qa_slack_channel=settings.slack_channel,
             )
 
             # Surface merge outcomes in the same stage timeline as the reads.
@@ -584,7 +682,13 @@ async def run_pr_job(job_id: int) -> None:
                     repo=job.repo,
                     pr_number=job.pr_number,
                     pr_url=result.context.url,
-                    slack_channel=registration.slack_channel if registration else None,
+                    # Prefer the id Slack resolved the post to; an inbound
+                    # event never carries the "#web" name typed at
+                    # registration, so storing that name matches nothing.
+                    slack_channel=(
+                        merge.qa_channel_id
+                        or settings.slack_channel
+                    ),
                     slack_thread_ts=merge.qa_thread_ts,
                     email_message_id=merge.qa_email_message_id,
                     ticket_keys_json=json.dumps([t.key for t in result.context.tickets]),

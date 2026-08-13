@@ -157,7 +157,8 @@ def build_tools(
         jira_tools = get_jira_tools(
             api_token=config.get("api_key", ""),
             email=config.get("credentials", {}).get("email", ""),
-            url=config.get("credentials", {}).get("url", "")
+            url=config.get("credentials", {}).get("url", ""),
+            default_project_key=config.get("credentials", {}).get("default_project_key", "")
         )
         tools.extend(jira_tools)
     

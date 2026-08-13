@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import {
   AlertTriangle,
   Check,
   ChevronDown,
   ChevronRight,
+  ClipboardList,
   Copy,
   ExternalLink,
   FileText,
@@ -22,18 +23,24 @@ import {
 import { useAuth } from "@/context/AuthContext";
 import {
   analyzePR,
+  getPRAgentDefaults,
   getPRAgentSummary,
+  savePRAgentDefaults,
   getPRJob,
   listPRJobs,
   listRepos,
   registerRepo,
   unregisterRepo,
+  type PRAgentDefaults,
   type PRAgentSummary,
   type PRJob,
   type PRJobDetail,
   type RepoRegistration,
   type PipelineStage,
+  type ReviewFinding,
+  type ReviewPriority,
   type SecurityFinding,
+  type ToolInvocation,
   type ServiceStatus,
   type StageState,
   type SecuritySeverity,
@@ -47,6 +54,13 @@ const SEVERITY_STYLE: Record<SecuritySeverity, string> = {
   medium: "bg-yellow-500/10 text-yellow-700 dark:text-yellow-400 border-yellow-500/30",
   low: "bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/30",
   info: "bg-muted text-muted-foreground border-border",
+};
+
+// P1 shares the red of a critical finding: both mean "do not merge".
+const PRIORITY_STYLE: Record<ReviewPriority, string> = {
+  p1: "bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/30",
+  p2: "bg-orange-500/10 text-orange-600 dark:text-orange-400 border-orange-500/30",
+  p3: "bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/30",
 };
 
 const STATUS_STYLE: Record<string, string> = {
@@ -195,6 +209,24 @@ const FindingRow = ({ finding }: { finding: SecurityFinding }) => (
       <span className="text-xs font-medium">{finding.title}</span>
       <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wide opacity-70">
         {finding.severity}
+      </span>
+    </div>
+    <code className="mt-1 block font-mono text-[11px] opacity-80">
+      {finding.file_path}
+      {finding.line ? `:${finding.line}` : ""}
+    </code>
+    {finding.description && (
+      <p className="mt-1 text-[11px] leading-relaxed opacity-90">{finding.description}</p>
+    )}
+  </div>
+);
+
+const ReviewRow = ({ finding }: { finding: ReviewFinding }) => (
+  <div className={`rounded-lg border px-3 py-2 ${PRIORITY_STYLE[finding.priority]}`}>
+    <div className="flex items-start justify-between gap-3">
+      <span className="text-xs font-medium">{finding.title}</span>
+      <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wide opacity-70">
+        {finding.priority} · {finding.category}
       </span>
     </div>
     <code className="mt-1 block font-mono text-[11px] opacity-80">
@@ -391,6 +423,29 @@ const JobDetail = ({ detail }: { detail: PRJobDetail }) => {
         </div>
       )}
 
+      {/* Code review, kept visually apart from security: a clean scan on a
+          change that ignores the agreed requirement is not an approval. */}
+      {result.review_findings?.length > 0 ? (
+        <section>
+          <h4 className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-foreground">
+            <ClipboardList size={13} className="text-muted-foreground" />
+            Code review
+            <span className="font-normal text-muted-foreground">
+              — reviewer's judgement, not a scanner result
+            </span>
+          </h4>
+          <div className="space-y-1.5">
+            {result.review_findings.map((f, i) => (
+              <ReviewRow key={i} finding={f} />
+            ))}
+          </div>
+        </section>
+      ) : (
+        <div className="flex items-center gap-1.5 rounded-lg bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
+          <ClipboardList size={13} /> Code review raised no issues
+        </div>
+      )}
+
       {/* What ran. Distinguishes "searched and found nothing" from
           "never searched" -- indistinguishable in the output otherwise. */}
       {result.tool_calls.length > 0 && (
@@ -408,25 +463,47 @@ const JobDetail = ({ detail }: { detail: PRJobDetail }) => {
               </thead>
               <tbody>
                 {result.tool_calls.map((call, i) => (
-                  <tr key={i} className="border-t border-border">
-                    <td className="py-1 pr-3 text-muted-foreground">{call.service}</td>
-                    <td className="py-1 pr-3 font-mono text-foreground">{call.tool}</td>
-                    <td className="py-1 pr-3 font-mono text-muted-foreground">
-                      {call.succeeded ? (
-                        <span title={call.query ?? ""}>
-                          {(call.query ?? "—").slice(0, 60)}
-                          {(call.query?.length ?? 0) > 60 ? "…" : ""}
-                        </span>
-                      ) : (
-                        <span className="text-yellow-600 dark:text-yellow-400">
-                          {call.detail ?? "skipped"}
-                        </span>
-                      )}
-                    </td>
-                    <td className="py-1 text-right text-foreground">
-                      {call.succeeded ? call.result_count : "—"}
-                    </td>
-                  </tr>
+                  <Fragment key={i}>
+                    <tr className="border-t border-border">
+                      <td className="py-1 pr-3 text-muted-foreground">{call.service}</td>
+                      <td className="py-1 pr-3 font-mono text-foreground">{call.tool}</td>
+                      <td className="py-1 pr-3 font-mono text-muted-foreground">
+                        {call.succeeded ? (
+                          <span title={call.query ?? ""}>
+                            {(call.query ?? "—").slice(0, 60)}
+                            {(call.query?.length ?? 0) > 60 ? "…" : ""}
+                          </span>
+                        ) : (
+                          <span className="text-yellow-600 dark:text-yellow-400">
+                            {call.detail ?? "skipped"}
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-1 text-right text-foreground">
+                        {call.succeeded ? call.result_count : "—"}
+                      </td>
+                    </tr>
+                    {/* What the query actually matched. A bare count cannot be
+                        sanity-checked -- "1 thread" could be the wrong thread. */}
+                    {call.matches?.length > 0 && (
+                      <tr>
+                        <td />
+                        <td colSpan={3} className="pb-1.5 pl-0 pr-3">
+                          <ul className="space-y-0.5">
+                            {call.matches.map((match, m) => (
+                              <li
+                                key={m}
+                                className="truncate text-[10px] text-muted-foreground"
+                                title={match}
+                              >
+                                ↳ {match}
+                              </li>
+                            ))}
+                          </ul>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 ))}
               </tbody>
             </table>
@@ -513,7 +590,23 @@ const JobDetail = ({ detail }: { detail: PRJobDetail }) => {
  * Every step is listed even when skipped: a run that gathered nothing should
  * read as "Jira was not connected", not as an empty result.
  */
-const StageChecklist = ({ stages }: { stages: PipelineStage[] }) => {
+/** Which tool calls belong under which pipeline stage. */
+const STAGE_TOOLS: Record<string, string[]> = {
+  slack_search: ["search_messages"],
+  jira: ["issue_lookup", "search"],
+  docs_read: ["find_related_documents"],
+  issues: ["get_linked_issues"],
+  scan: ["semgrep", "gitleaks", "llm_review"],
+  review: ["code_review"],
+};
+
+const StageChecklist = ({
+  stages,
+  toolCalls = [],
+}: {
+  stages: PipelineStage[];
+  toolCalls?: ToolInvocation[];
+}) => {
   if (stages.length === 0) return null;
 
   const reads = stages.filter((s) => s.kind === "read");
@@ -528,31 +621,56 @@ const StageChecklist = ({ stages }: { stages: PipelineStage[] }) => {
         <ul className="space-y-0.5">
           {items.map((stage) => {
             const icon = STAGE_ICON[stage.state] ?? STAGE_ICON.pending;
+            // The searches behind this step, so "2 thread(s)" can be checked
+            // against what was actually queried and found.
+            const calls = toolCalls.filter((c) =>
+              (STAGE_TOOLS[stage.key] ?? []).includes(c.tool)
+            );
             return (
-              <li
-                key={stage.key}
-                title={stage.detail ?? ""}
-                className="flex items-start gap-1.5 text-[11px]"
-              >
-                <span className={`mt-px shrink-0 font-mono ${icon.tone}`}>
-                  {icon.glyph}
-                </span>
-                <span
-                  className={
-                    stage.state === "skipped"
-                      ? "truncate text-muted-foreground line-through"
-                      : "truncate text-foreground"
-                  }
-                >
-                  {stage.label}
-                </span>
-                {stage.detail && stage.state !== "skipped" && (
-                  <span className="shrink-0 text-muted-foreground">
-                    {stage.detail.length > 28
-                      ? `${stage.detail.slice(0, 28)}…`
-                      : stage.detail}
+              <li key={stage.key} className="text-[11px]">
+                <div className="flex items-start gap-1.5">
+                  <span className={`mt-px shrink-0 font-mono ${icon.tone}`}>
+                    {icon.glyph}
                   </span>
-                )}
+                  <span
+                    className={
+                      stage.state === "skipped"
+                        ? "truncate text-muted-foreground line-through"
+                        : "truncate text-foreground"
+                    }
+                  >
+                    {stage.label}
+                  </span>
+                  {stage.detail && stage.state !== "skipped" && (
+                    <span className="shrink-0 text-muted-foreground">
+                      {stage.detail.length > 28
+                        ? `${stage.detail.slice(0, 28)}…`
+                        : stage.detail}
+                    </span>
+                  )}
+                </div>
+                {stage.state !== "skipped" &&
+                  calls.map((call, i) => (
+                    <div key={i} className="ml-4 mt-0.5">
+                      {call.query && (
+                        <p
+                          className="truncate font-mono text-[10px] text-muted-foreground"
+                          title={call.query}
+                        >
+                          ⌕ {call.query}
+                        </p>
+                      )}
+                      {call.matches?.map((match, m) => (
+                        <p
+                          key={m}
+                          className="truncate text-[10px] text-muted-foreground"
+                          title={match}
+                        >
+                          ↳ {match}
+                        </p>
+                      ))}
+                    </div>
+                  ))}
               </li>
             );
           })}
@@ -564,6 +682,136 @@ const StageChecklist = ({ stages }: { stages: PipelineStage[] }) => {
     <div className="flex gap-6 border-t border-border bg-muted/20 px-4 py-2.5">
       {column("Gathered", reads)}
       {column("Actions taken", writes)}
+    </div>
+  );
+};
+
+/**
+ * Account-wide settings applied to every repo that does not override them.
+ *
+ * Without these, a repo nobody registered silently skips the Google Doc and
+ * the QA email -- which reads as the feature being broken rather than
+ * unconfigured.
+ */
+const GlobalDefaults = ({ docsConnected }: { docsConnected: boolean }) => {
+  const [values, setValues] = useState<PRAgentDefaults | null>(null);
+  const [emailsInput, setEmailsInput] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    getPRAgentDefaults()
+      .then((d) => {
+        setValues(d);
+        setEmailsInput(d.qa_emails.join(", "));
+      })
+      .catch(() => setValues(null));
+  }, []);
+
+  if (!values) return null;
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const next = await savePRAgentDefaults({
+        ...values,
+        qa_emails: emailsInput
+          .split(/[,\n]/)
+          .map((e) => e.trim())
+          .filter((e) => e.includes("@")),
+      });
+      setValues(next);
+      setEmailsInput(next.qa_emails.join(", "));
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not save");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="mb-6 rounded-xl border border-border bg-card p-4">
+      <h2 className="text-sm font-semibold text-foreground">Default settings</h2>
+      <p className="mt-0.5 text-xs text-muted-foreground">
+        Applied to every repository that does not set its own. A repo's own
+        settings always win.
+      </p>
+
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        <div>
+          <label className="mb-1 block text-xs text-muted-foreground">
+            Slack channel for summaries
+          </label>
+          <input
+            value={values.slack_channel ?? ""}
+            onChange={(e) =>
+              setValues({ ...values, slack_channel: e.target.value })
+            }
+            placeholder="#dev-updates"
+            className="w-full rounded-lg border border-border bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs text-muted-foreground">
+            Test team emails, notified on every merge
+          </label>
+          <input
+            value={emailsInput}
+            onChange={(e) => setEmailsInput(e.target.value)}
+            placeholder="qa@company.com, lead@company.com"
+            className="w-full rounded-lg border border-border bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+          />
+        </div>
+      </div>
+
+      <div className="mt-3 space-y-2">
+        <label className="flex items-center gap-2 text-xs text-foreground">
+          <input
+            type="checkbox"
+            checked={values.export_to_docs}
+            onChange={(e) =>
+              setValues({ ...values, export_to_docs: e.target.checked })
+            }
+            disabled={!docsConnected}
+            className="rounded border-border"
+          />
+          Write every analysis to a Google Doc
+          {!docsConnected && " (connect Google Docs first)"}
+        </label>
+        <label className="flex items-center gap-2 text-xs text-foreground">
+          <input
+            type="checkbox"
+            checked={values.close_issues_on_merge}
+            onChange={(e) =>
+              setValues({ ...values, close_issues_on_merge: e.target.checked })
+            }
+            className="rounded border-border"
+          />
+          Close linked GitHub issues on merge
+        </label>
+      </div>
+
+      {error && <p className="mt-2 text-xs text-red-500">{error}</p>}
+
+      <div className="mt-3 flex items-center gap-3">
+        <button
+          onClick={save}
+          disabled={saving}
+          className="flex items-center justify-center gap-1.5 rounded-lg bg-primary px-4 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+        >
+          {saving ? <Loader2 className="animate-spin" size={13} /> : null}
+          Save defaults
+        </button>
+        {saved && (
+          <span className="flex items-center gap-1 text-xs text-green-600 dark:text-green-400">
+            <Check size={12} /> Saved
+          </span>
+        )}
+      </div>
     </div>
   );
 };
@@ -612,7 +860,9 @@ const JobRow = ({ job }: { job: PRJob }) => {
         </span>
       </button>
 
-      {!open && <StageChecklist stages={job.stages ?? []} />}
+      {!open && (
+        <StageChecklist stages={job.stages ?? []} toolCalls={job.tool_calls ?? []} />
+      )}
 
       {open && (
         <div className="border-t border-border px-4 py-3">
@@ -652,6 +902,41 @@ export default function PRAgentDashboard() {
   const [error, setError] = useState<string | null>(null);
   const [justRegistered, setJustRegistered] = useState<RepoRegistration | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+
+  /**
+   * The saved registration for whatever repo is typed, if there is one.
+   *
+   * Without this the form shows unsaved local state: a ticked "export to
+   * Docs" box on a repo registered before it was ticked reads as configured
+   * when the merge run will not do it.
+   */
+  const savedForInput = repos.find(
+    (r) => r.repo.toLowerCase() === repoInput.trim().toLowerCase()
+  );
+
+  const settingsDiffer = Boolean(
+    savedForInput &&
+      (savedForInput.export_to_docs !== exportDocs ||
+        (savedForInput.qa_emails ?? []).join(",") !==
+          qaEmailsInput
+            .split(/[,\n]/)
+            .map((e) => e.trim())
+            .filter((e) => e.includes("@"))
+            .join(",") ||
+        (savedForInput.slack_channel ?? "") !== channelInput.trim() ||
+        (savedForInput.close_issues_on_merge ?? true) !== closeIssues)
+  );
+
+  /** Load a registered repo's real settings into the form. */
+  const loadSaved = useCallback((reg: RepoRegistration) => {
+    setRepoInput(reg.repo);
+    setChannelInput(reg.slack_channel ?? "");
+    setExportDocs(reg.export_to_docs ?? false);
+    setContextDocsInput((reg.context_docs ?? []).join("\n"));
+    setQaEmailsInput((reg.qa_emails ?? []).join(", "));
+    setJiraDoneStatus(reg.jira_done_status ?? "Done");
+    setCloseIssues(reg.close_issues_on_merge ?? true);
+  }, []);
 
   const refresh = useCallback(async () => {
     if (!userId) return;
@@ -925,6 +1210,33 @@ export default function PRAgentDashboard() {
             Registering enables automatic analysis on every PR. "Analyze now" works without it.
           </p>
 
+          {/* Automatic runs read the saved registration, not this form. Say so
+              when they disagree, rather than letting the preview below imply
+              settings that a merge will not actually apply. */}
+          {settingsDiffer && (
+            <div className="mt-3 flex items-start gap-2 rounded-lg border border-yellow-500/40 bg-yellow-500/5 px-3 py-2">
+              <AlertTriangle size={13} className="mt-0.5 shrink-0 text-yellow-600" />
+              <div className="text-xs">
+                <p className="text-foreground">
+                  These settings are not saved for{" "}
+                  <span className="font-medium">{savedForInput?.repo}</span>.
+                  Automatic runs on merge use the saved ones.
+                </p>
+                <div className="mt-1 flex gap-3">
+                  <button
+                    onClick={() => savedForInput && loadSaved(savedForInput)}
+                    className="text-muted-foreground underline hover:text-foreground"
+                  >
+                    Show saved settings
+                  </button>
+                  <span className="text-muted-foreground">
+                    or press Register to save these
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* What this configuration will actually do, so the effect of each
               toggle is visible before a run rather than after. */}
           <div className="mt-3 grid gap-3 rounded-lg border border-border bg-muted/20 p-3 sm:grid-cols-2">
@@ -1023,6 +1335,9 @@ export default function PRAgentDashboard() {
           </motion.div>
         )}
 
+        {/* Account-wide fallbacks */}
+        <GlobalDefaults docsConnected={!!summary?.docs_connected} />
+
         {/* Registered repos */}
         {repos.length > 0 && (
           <div className="mb-6">
@@ -1033,7 +1348,13 @@ export default function PRAgentDashboard() {
                   key={repo.id}
                   className="flex items-center gap-3 rounded-xl border border-border bg-card px-4 py-2.5"
                 >
-                  <span className="text-sm text-foreground">{repo.repo}</span>
+                  <button
+                    onClick={() => loadSaved(repo)}
+                    className="text-sm text-foreground underline-offset-2 hover:underline"
+                    title="Load these saved settings into the form"
+                  >
+                    {repo.repo}
+                  </button>
                   {repo.slack_channel && (
                     <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
                       {repo.slack_channel}
@@ -1050,6 +1371,12 @@ export default function PRAgentDashboard() {
                       <FileText size={10} />
                       {repo.context_docs?.length} doc
                       {(repo.context_docs?.length ?? 0) > 1 ? "s" : ""}
+                    </span>
+                  )}
+                  {repo.export_to_docs && (
+                    <span className="flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+                      <FileText size={10} />
+                      exports
                     </span>
                   )}
                   <button

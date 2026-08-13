@@ -196,7 +196,10 @@ def docs_append_content(document_id: str, content: str) -> str:
                 return f"❌ Failed to access document: {error_detail}"
             
             doc = get_response.json()
-            end_index = doc.get("body", {}).get("content", [{}])[-1].get("endIndex", 1) - 1
+            # An empty document can report a null body or content list, and
+            # the `.get` defaults only cover a missing key, not a null value.
+            content = (doc.get("body") or {}).get("content") or [{}]
+            end_index = (content[-1] or {}).get("endIndex", 1) - 1
             
             # Append content
             update_response = client.post(

@@ -255,3 +255,39 @@ class RepoWebhook(Base):
 
     def __repr__(self) -> str:
         return f"<RepoWebhook(repo={self.repo}, owner_id={self.owner_id})>"
+
+
+class PRAgentDefaults(Base):
+    """
+    Account-wide fallbacks for the PR agent, one row per user.
+
+    Every setting here also exists per repo. A repo that sets a value wins;
+    otherwise this fills in. Without it, a repo that was never registered --
+    or registered before a setting existed -- silently does nothing on merge,
+    which reads as the feature being broken rather than unconfigured.
+
+    Nullable columns mean "not set", which is what lets a per-repo blank fall
+    through to here rather than overriding with emptiness.
+    """
+
+    __tablename__ = "pr_agent_defaults"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    slack_channel = Column(String(255), nullable=True)
+    export_to_docs = Column(Integer, nullable=False, default=0)
+    qa_emails = Column(Text, nullable=True)  # newline-separated
+    jira_done_status = Column(String(64), nullable=False, default="Done")
+    close_issues_on_merge = Column(Integer, nullable=False, default=1)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    # One row per user; the unique constraint is what makes "upsert by owner"
+    # safe rather than silently accumulating rows.
+    owner_id = Column(
+        Integer, ForeignKey("users.id"), nullable=False, unique=True, index=True
+    )
+
+    def __repr__(self) -> str:
+        return f"<PRAgentDefaults(owner_id={self.owner_id})>"
