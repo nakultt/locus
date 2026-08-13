@@ -16,6 +16,10 @@ class UserCreate(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=6, description="Password must be at least 6 characters")
     name: str | None = Field(None, description="User's display name")
+    timezone: str | None = Field(
+        None,
+        description="IANA timezone, e.g. Asia/Kolkata. Defaults to Asia/Kolkata.",
+    )
 
 
 class UserUpdate(BaseModel):
@@ -23,6 +27,7 @@ class UserUpdate(BaseModel):
     email: EmailStr | None = None
     password: str | None = Field(None, min_length=6, description="New password")
     name: str | None = None
+    timezone: str | None = None
 
 
 class UserResponse(BaseModel):
@@ -31,6 +36,7 @@ class UserResponse(BaseModel):
     email: str
     name: str | None = None
     created_at: datetime | None = None
+    timezone: str | None = None
     token: str | None = Field(None, description="JWT access token")
 
     model_config = ConfigDict(from_attributes=True)
@@ -496,3 +502,85 @@ class ErrorResponse(BaseModel):
     """Schema for error responses."""
     detail: str
     error_code: str | None = None
+
+
+# ============== Adaptive Scheduler ==============
+
+class EventClass(str, Enum):
+    """
+    How movable a calendar event is.
+
+    Drives the solver: flexible time moves before a team meeting, and a
+    hard-fixed event never moves at all.
+    """
+    HARD_FIXED = "hard_fixed"
+    SOFT_FIXED = "soft_fixed"
+    FLEXIBLE = "flexible"
+
+
+class ScheduledEvent(BaseModel):
+    """One event on the calendar, as the solver sees it."""
+    event_id: str
+    title: str
+    start: datetime
+    end: datetime
+    attendee_count: int = 1
+    has_external_attendees: bool = False
+    event_class: EventClass | None = Field(
+        None, description="Explicit classification; inferred when absent"
+    )
+
+    @property
+    def duration_minutes(self) -> int:
+        return int((self.end - self.start).total_seconds() // 60)
+
+
+class ScheduleMove(BaseModel):
+    """A proposed change to one event."""
+    event_id: str
+    title: str
+    from_start: datetime | None = Field(
+        None, description="Current start; absent for a newly added block"
+    )
+    to_start: datetime
+    duration_minutes: int
+    event_class: EventClass
+    attendee_count: int = 1
+    reason: str = ""
+
+
+class ScheduleProposal(BaseModel):
+    """
+    A plan the user must approve before anything changes.
+
+    Never applied automatically for events with other attendees: moving one
+    sends invite updates to everyone on it.
+    """
+    trigger: str = Field(..., description="What prompted the plan")
+    timezone: str
+    moves: list[ScheduleMove] = []
+    additions: list[ScheduleMove] = []
+    blocked: list[str] = Field(
+        default_factory=list,
+        description="Conflicts the solver could not resolve, and why",
+    )
+    summary: str = ""
+
+    @property
+    def requires_approval(self) -> bool:
+        """Any move touching another person needs a human decision."""
+        return any(m.attendee_count > 1 for m in self.moves)
+
+
+class SchedulePlanRequest(BaseModel):
+    """Ask for a plan without applying it."""
+    title: str = Field(..., description="What is being scheduled")
+    start: str = Field(..., description="Natural language, e.g. 'tomorrow at 3pm'")
+    duration_minutes: int = Field(60, ge=5, le=720)
+    attendees: int = Field(1, ge=1, description="How many people are invited")
+
+
+class ScheduleApplyRequest(BaseModel):
+    """Apply a previously reviewed plan."""
+    moves: list[ScheduleMove]
+    additions: list[ScheduleMove] = []

@@ -8,6 +8,14 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app import models, schemas, security
+from app.services.datetimes import DEFAULT_TIMEZONE, resolve_timezone
+
+
+def _valid_timezone(name: str | None) -> str:
+    """Normalize a timezone, falling back to the default if unrecognized."""
+    if not name:
+        return DEFAULT_TIMEZONE
+    return str(resolve_timezone(name))
 
 # ============== User Operations ==============
 
@@ -36,7 +44,9 @@ def create_user(db: Session, user: schemas.UserCreate) -> models.User:
     db_user = models.User(
         email=user.email,
         name=user.name,
-        hashed_password=hashed_password
+        hashed_password=hashed_password,
+        # Times are parsed and scheduled in this zone; IST is the default.
+        timezone=_valid_timezone(user.timezone),
     )
     db.add(db_user)
     db.commit()
@@ -78,6 +88,9 @@ def update_user(db: Session, user_id: int, user_update: schemas.UserUpdate) -> m
         
     if user_update.password is not None:
         db_user.hashed_password = security.get_password_hash(user_update.password)
+
+    if user_update.timezone is not None:
+        db_user.timezone = _valid_timezone(user_update.timezone)
         
     db.commit()
     db.refresh(db_user)

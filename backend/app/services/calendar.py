@@ -11,6 +11,14 @@ from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, Field
 
 from app.services.credential_context import CredentialProxy
+from app.services.datetimes import (
+    DEFAULT_TIMEZONE,
+    next_working_slot,
+    now_in,
+    parse_datetime,
+    resolve_timezone,
+    to_google_datetime,
+)
 
 # Store credentials at module level for tool access
 # Task-local so concurrent users cannot see each other's credentials.
@@ -122,39 +130,166 @@ def _get_auth_headers() -> dict | None:
 
 
 def _parse_datetime(dt_string: str) -> datetime:
-    """Parse datetime string to datetime object."""
-    dt_string = dt_string.strip()
-    
-    # Handle natural language
-    if "tomorrow" in dt_string.lower():
-        base = datetime.now() + timedelta(days=1)
-        if "2pm" in dt_string.lower() or "14:00" in dt_string:
-            return base.replace(hour=14, minute=0, second=0, microsecond=0)
-        elif "3pm" in dt_string.lower() or "15:00" in dt_string:
-            return base.replace(hour=15, minute=0, second=0, microsecond=0)
-        elif "10am" in dt_string.lower() or "10:00" in dt_string:
-            return base.replace(hour=10, minute=0, second=0, microsecond=0)
-        else:
-            return base.replace(hour=9, minute=0, second=0, microsecond=0)
-    
-    if "today" in dt_string.lower():
-        base = datetime.now()
-        if "2pm" in dt_string.lower() or "14:00" in dt_string:
-            return base.replace(hour=14, minute=0, second=0, microsecond=0)
-        elif "3pm" in dt_string.lower() or "15:00" in dt_string:
-            return base.replace(hour=15, minute=0, second=0, microsecond=0)
-        else:
-            return base.replace(hour=9, minute=0, second=0, microsecond=0)
-    
-    # Try ISO format
-    for fmt in ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"]:
+    """
+    Parse a datetime in the connected user's timezone.
+
+    Delegates to app.services.datetimes, which understands full natural
+    language. The old implementation recognised only "2pm", "3pm" and "10am"
+    and silently returned 9am for everything else.
+
+    Falls back to the next working slot when no time can be read, rather than
+    inventing 9am today.
+    """
+    tz_name = _calendar_config.get("timezone") or DEFAULT_TIMEZONE
+
+    parsed = parse_datetime(dt_string, tz_name)
+    if parsed is not None:
+        return parsed
+
+    return next_working_slot(now_in(tz_name) + timedelta(hours=1))
+
+
+class ListEventsInput(BaseModel):
+    """Input schema for listing calendar events."""
+    start: str = Field(default="today", description="Start of the range, e.g. 'today' or 'monday'")
+    end: str = Field(default="in 7 days", description="End of the range")
+
+
+class MoveEventInput(BaseModel):
+    """Input schema for moving an event."""
+    event_id: str = Field(description="Google Calendar event id")
+    new_start: str = Field(description="New start time, e.g. 'tomorrow at 3pm'")
+    duration_minutes: int = Field(default=0, description="New duration; 0 keeps the current one")
+
+
+@tool("calendar_list_events", args_schema=ListEventsInput)
+def calendar_list_events(start: str = "today", end: str = "in 7 days") -> str:
+    """
+    List calendar events in a time range.
+
+    Use this before scheduling anything, to see what is already booked.
+    """
+    events, error = fetch_events(start, end)
+    if error:
+        return f"Error: {error}"
+    if not events:
+        return f"No events between {start} and {end}."
+
+    tz_name = _calendar_config.get("timezone") or DEFAULT_TIMEZONE
+    lines = []
+    for event in events:
+        begins = event.get("start", {}).get("dateTime") or event.get("start", {}).get("date", "")
         try:
-            return datetime.strptime(dt_string, fmt)
+            moment = datetime.fromisoformat(begins).astimezone(resolve_timezone(tz_name))
+            when = moment.strftime("%a %d %b %H:%M")
         except ValueError:
-            continue
-    
-    # Default: 1 hour from now
-    return datetime.now() + timedelta(hours=1)
+            when = begins
+
+        attendees = len(event.get("attendees", []) or [])
+        lines.append(
+            f"{when} - {event.get('summary', '(no title)')}"
+            f"{f' ({attendees} attendees)' if attendees else ''}"
+            f" [id: {event.get('id')}]"
+        )
+
+    return f"Events between {start} and {end}:\n" + "\n".join(lines)
+
+
+@tool("calendar_move_event", args_schema=MoveEventInput)
+def calendar_move_event(event_id: str, new_start: str, duration_minutes: int = 0) -> str:
+    """
+    Move an event to a new time, keeping its attendees and details.
+
+    Use this to resolve a scheduling conflict. Attendees are notified by Google.
+    """
+    headers = _get_auth_headers()
+    if not headers:
+        return "Error: Google Calendar is not configured or the token expired."
+
+    tz_name = _calendar_config.get("timezone") or DEFAULT_TIMEZONE
+    start_dt = parse_datetime(new_start, tz_name)
+    if start_dt is None:
+        return f"Error: could not understand the time '{new_start}'."
+
+    try:
+        existing = httpx.get(
+            f"{CALENDAR_API_BASE}/events/{event_id}",
+            headers=headers,
+            timeout=30,
+        )
+        if existing.status_code != 200:
+            return f"Error: event {event_id} not found."
+
+        event = existing.json()
+
+        if duration_minutes <= 0:
+            # Preserve the original length rather than assuming an hour.
+            try:
+                old_start = datetime.fromisoformat(event["start"]["dateTime"])
+                old_end = datetime.fromisoformat(event["end"]["dateTime"])
+                duration_minutes = int((old_end - old_start).total_seconds() // 60) or 60
+            except (KeyError, ValueError):
+                duration_minutes = 60
+
+        end_dt = start_dt + timedelta(minutes=duration_minutes)
+        event["start"] = to_google_datetime(start_dt, tz_name)
+        event["end"] = to_google_datetime(end_dt, tz_name)
+
+        updated = httpx.put(
+            f"{CALENDAR_API_BASE}/events/{event_id}",
+            headers=headers,
+            json=event,
+            timeout=30,
+        )
+        if updated.status_code != 200:
+            return f"Error moving event: {updated.status_code}"
+
+        return (
+            f"Moved '{event.get('summary', 'event')}' to "
+            f"{start_dt.strftime('%a %d %b %H:%M')} ({tz_name})."
+        )
+    except Exception as e:
+        return f"Error moving event: {e}"
+
+
+def fetch_events(start: str, end: str) -> tuple[list[dict], str | None]:
+    """
+    Fetch events in a range.
+
+    Shared by the tool above and the scheduler, which needs the raw objects
+    rather than formatted text.
+
+    Returns:
+        (events, error message or None)
+    """
+    headers = _get_auth_headers()
+    if not headers:
+        return [], "Google Calendar is not configured or the token expired"
+
+    tz_name = _calendar_config.get("timezone") or DEFAULT_TIMEZONE
+    now = now_in(tz_name)
+
+    start_dt = parse_datetime(start, tz_name) or now
+    end_dt = parse_datetime(end, tz_name) or (start_dt + timedelta(days=7))
+
+    try:
+        response = httpx.get(
+            f"{CALENDAR_API_BASE}/events",
+            headers=headers,
+            params={
+                "timeMin": start_dt.isoformat(),
+                "timeMax": end_dt.isoformat(),
+                "singleEvents": "true",
+                "orderBy": "startTime",
+                "maxResults": 100,
+            },
+            timeout=30,
+        )
+        if response.status_code != 200:
+            return [], f"Calendar API returned {response.status_code}"
+        return response.json().get("items", []), None
+    except Exception as e:
+        return [], str(e)
 
 
 @tool("calendar_create_event", args_schema=CreateEventInput)
@@ -188,11 +323,11 @@ def calendar_create_event(
             "summary": title,
             "start": {
                 "dateTime": start_dt.isoformat(),
-                "timeZone": "UTC"
+                "timeZone": _calendar_config.get("timezone") or DEFAULT_TIMEZONE
             },
             "end": {
                 "dateTime": end_dt.isoformat(),
-                "timeZone": "UTC"
+                "timeZone": _calendar_config.get("timezone") or DEFAULT_TIMEZONE
             }
         }
         
@@ -255,14 +390,14 @@ def calendar_update_event(
             start_dt = _parse_datetime(start_datetime)
             update_data["start"] = {
                 "dateTime": start_dt.isoformat(),
-                "timeZone": "UTC"
+                "timeZone": _calendar_config.get("timezone") or DEFAULT_TIMEZONE
             }
         
         if end_datetime:
             end_dt = _parse_datetime(end_datetime)
             update_data["end"] = {
                 "dateTime": end_dt.isoformat(),
-                "timeZone": "UTC"
+                "timeZone": _calendar_config.get("timezone") or DEFAULT_TIMEZONE
             }
         
         if not update_data:
@@ -324,25 +459,33 @@ def calendar_delete_event(event_id: str) -> str:
         return f"❌ Error deleting event: {str(e)}"
 
 
-def get_calendar_tools(credentials: dict[str, Any] = None) -> list[BaseTool]:
+def get_calendar_tools(
+    credentials: dict[str, Any] = None,
+    timezone: str | None = None,
+) -> list[BaseTool]:
     """
     Get LangChain tools for Google Calendar integration.
-    
+
     Args:
-        credentials: OAuth credentials dict containing access_token, refresh_token, etc.
-        
+        credentials: OAuth credentials dict containing access_token, refresh_token
+        timezone: The user's IANA timezone. Times are parsed and sent in this
+            zone; without it every event lands at the server's UTC offset.
+
     Returns:
         List of Calendar tools
     """
     
     import os
     _calendar_config.set({
+        "timezone": timezone or DEFAULT_TIMEZONE,
         "credentials": credentials,
         "client_id": os.getenv("GOOGLE_CLIENT_ID", ""),
         "client_secret": os.getenv("GOOGLE_CLIENT_SECRET", ""),
     })
     
     return [
+        calendar_list_events,
+        calendar_move_event,
         calendar_create_event,
         calendar_update_event,
         calendar_delete_event,

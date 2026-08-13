@@ -150,7 +150,7 @@ class TestStreaming:
         )
         monkeypatch.setattr(
             agent_module, "build_tools",
-            lambda cfg: [slack_send_message, jira_create_issue],
+            lambda cfg, timezone=None: [slack_send_message, jira_create_issue],
         )
         monkeypatch.setattr(
             agent_module, "parse_tasks_from_message",
@@ -180,7 +180,7 @@ class TestStreaming:
 
     @pytest.mark.asyncio
     async def test_no_tools_emits_error(self, monkeypatch):
-        monkeypatch.setattr(agent_module, "build_tools", lambda cfg: [])
+        monkeypatch.setattr(agent_module, "build_tools", lambda cfg, timezone=None: [])
         events = [
             e async for e in agent_module.process_chat_message_streaming("hi", {})
         ]

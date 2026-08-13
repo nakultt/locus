@@ -138,9 +138,16 @@ EXAMPLE: If user says "send a Slack message to #general, create a Jira ticket, a
 NEVER stop after just 1-2 actions if the user requested more. ALWAYS complete ALL requested tasks."""
 
 
-def build_tools(integration_configs: dict[str, dict]) -> list[BaseTool]:
+def build_tools(
+    integration_configs: dict[str, dict],
+    timezone: str | None = None,
+) -> list[BaseTool]:
     """
-    Build list of available tools based on user's connected integrations.
+    Build the tools available for one user's connected integrations.
+
+    Args:
+        integration_configs: Decrypted credentials by service
+        timezone: The user's IANA timezone, needed for calendar scheduling
     """
     tools: list[BaseTool] = []
     
@@ -167,7 +174,8 @@ def build_tools(integration_configs: dict[str, dict]) -> list[BaseTool]:
     if "calendar" in integration_configs:
         config = integration_configs["calendar"]
         calendar_tools = get_calendar_tools(
-            credentials=config.get("credentials", {})
+            credentials=config.get("credentials", {}),
+            timezone=timezone,
         )
         tools.extend(calendar_tools)
     
@@ -418,6 +426,7 @@ async def process_chat_message(
     integration_configs: dict[str, dict],
     smart_mode: bool = False,
     history: list[tuple[str, str]] | None = None,
+    timezone: str | None = None,
 ) -> ChatResponse:
     """
     Process a natural language message through the LangChain agent.
@@ -428,8 +437,7 @@ async def process_chat_message(
         smart_mode: Use higher intelligence model when True
         history: Prior (role, content) turns in this conversation, oldest first
     """
-    # Build tools based on available integrations
-    tools = build_tools(integration_configs)
+    tools = build_tools(integration_configs, timezone=timezone)
 
     if not tools:
         return ChatResponse(
@@ -514,6 +522,7 @@ async def process_chat_message_streaming(
     message: str,
     integration_configs: dict[str, dict],
     history: list[tuple[str, str]] | None = None,
+    timezone: str | None = None,
 ) -> AsyncGenerator[dict, None]:
     """
     Process a chat message with streaming task updates.
@@ -527,8 +536,7 @@ async def process_chat_message_streaming(
     - complete: Final response with all results
     - error: If something goes wrong
     """
-    # Build tools based on available integrations
-    tools = build_tools(integration_configs)
+    tools = build_tools(integration_configs, timezone=timezone)
     available_services = list(integration_configs.keys())
     
     if not tools:
@@ -556,7 +564,7 @@ async def process_chat_message_streaming(
         # Use regular agent for single/unclear requests
         try:
             result = await process_chat_message(
-                message, integration_configs, history=history
+                message, integration_configs, history=history, timezone=timezone
             )
             yield {
                 "event_type": "complete",
