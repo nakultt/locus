@@ -28,7 +28,15 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET", "")
+def _signing_secret() -> str:
+    """
+    Read the secret per request rather than binding it at import.
+
+    Setting up the subscription is an edit-env-then-retry loop, and a value
+    captured at import means the retry keeps failing until the server is
+    restarted -- with nothing on screen explaining why.
+    """
+    return os.getenv("SLACK_SIGNING_SECRET", "")
 
 # Slack rejects its own replays after 5 minutes; matching that window stops a
 # captured request being replayed later.
@@ -83,20 +91,7 @@ async def slack_events(
     immediately.
     """
     raw_body = await request.body()
-
-    if not SLACK_SIGNING_SECRET:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="SLACK_SIGNING_SECRET is not configured",
-        )
-
-    if not verify_slack_signature(
-        raw_body, x_slack_request_timestamp or "", x_slack_signature or "",
-        SLACK_SIGNING_SECRET,
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid signature"
-        )
+    secret = _signing_secret()
 
     try:
         payload = json.loads(raw_body)
@@ -105,9 +100,33 @@ async def slack_events(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Malformed payload"
         ) from e
 
-    # Slack verifies a new endpoint by asking it to echo a challenge.
+    # Slack verifies a new endpoint by asking it to echo a challenge, and it
+    # does so before the app is fully configured. Answer it ahead of the
+    # signature gate: the challenge carries no data and grants no access, so
+    # echoing it is safe, and refusing it makes the subscription unsavable --
+    # which is the state that blocks every signed event that would follow.
     if payload.get("type") == "url_verification":
+        if not secret:
+            logger.warning(
+                "Answering a Slack url_verification challenge while "
+                "SLACK_SIGNING_SECRET is unset. Set it before real events "
+                "arrive; they will be rejected until it is."
+            )
         return {"challenge": payload.get("challenge", "")}
+
+    if not secret:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="SLACK_SIGNING_SECRET is not configured",
+        )
+
+    if not verify_slack_signature(
+        raw_body, x_slack_request_timestamp or "", x_slack_signature or "",
+        secret,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid signature"
+        )
 
     event = payload.get("event", {})
 
@@ -124,13 +143,26 @@ async def slack_events(
     if not thread_ts or not channel:
         return {"ok": True}
 
-    thread = db.query(models.QAThread).filter(
+    # The timestamp alone is effectively unique -- it is a per-message clock
+    # value, not a per-channel counter -- so match on it and use the channel
+    # only to disambiguate. Rows written before the resolved channel id was
+    # stored hold a "#web" style name that no inbound event will ever equal.
+    candidates = db.query(models.QAThread).filter(
         models.QAThread.slack_thread_ts == thread_ts,
-        models.QAThread.slack_channel == channel,
-    ).first()
+    ).all()
+
+    thread = next(
+        (t for t in candidates if t.slack_channel == channel),
+        candidates[0] if candidates else None,
+    )
 
     if not thread:
         return {"ok": True}
+
+    # Backfill the id so the exact match works from here on.
+    if thread.slack_channel != channel:
+        thread.slack_channel = channel
+        db.commit()
 
     integration_configs: dict[str, dict] = {}
     for integration in crud.get_user_integrations(db, thread.owner_id):

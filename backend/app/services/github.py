@@ -195,7 +195,10 @@ def github_list_repos(
         output += f"• {visibility_icon} **{repo['full_name']}**"
         if stars > 0:
             output += f" ⭐{stars}"
-        output += f"\n  {repo.get('description', 'No description')[:60]}\n"
+        # A repo with no description comes back as an explicit null, so the
+        # `.get` default never fires -- guard the value, not the key.
+        description = repo.get("description") or "No description"
+        output += f"\n  {description[:60]}\n"
     
     return output
 

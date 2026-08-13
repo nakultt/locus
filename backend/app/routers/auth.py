@@ -134,7 +134,8 @@ async def connect_integration(
     Store encrypted credentials for a third-party service.
 
     Supported services:
-    - **jira**: `api_key` (API token) plus credentials with `email` and `url`
+    - **jira**: `api_key` (API token) plus credentials with `email`, `url`, and
+      optionally `default_project_key` (where new issues go by default)
     - **slack**: credentials with `bot_token` and optionally `user_token`
     - **github**, **notion**, **bugasura**, **linear**: `api_key`
     - **gmail**, **calendar**, Google Workspace: OAuth credentials

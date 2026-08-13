@@ -305,20 +305,25 @@ async def post_qa_thread(
     channel: str,
     result: PRAnalysisResult,
     brief: str,
-) -> str | None:
+) -> tuple[str | None, str | None]:
     """
-    Post the QA notification to Slack and return its thread timestamp.
+    Post the QA notification to Slack and return (thread_ts, channel_id).
 
     The timestamp is what later ties a tester's reply back to this PR -- a
     reply carries only a channel and thread_ts, nothing about the work items.
 
+    The resolved channel id comes back with the post and must be the value we
+    store: an inbound event identifies its channel by id ("C09..."), never by
+    the "#web" name a user typed at registration, so storing the name means no
+    reply ever matches.
+
     Returns:
-        The parent message ts, or None if posting failed.
+        (ts, channel_id), or (None, None) if posting failed.
     """
     credentials = slack_config.get("credentials", {}) or {}
     bot_token = credentials.get("bot_token") or slack_config.get("api_key", "")
     if not bot_token:
-        return None
+        return None, None
 
     ctx = result.context
     text = (
@@ -338,9 +343,9 @@ async def post_qa_thread(
 
     if not payload.get("ok"):
         logger.warning("QA thread post rejected: %s", payload.get("error"))
-        return None
+        return None, None
 
-    return payload.get("ts")
+    return payload.get("ts"), payload.get("channel")
 
 
 async def run_merge_actions(
@@ -392,7 +397,7 @@ async def run_merge_actions(
         try:
             brief = outcome.qa_brief or await draft_qa_brief(result)
             outcome.qa_brief = brief
-            outcome.qa_thread_ts = await post_qa_thread(
+            outcome.qa_thread_ts, outcome.qa_channel_id = await post_qa_thread(
                 integration_configs["slack"], qa_slack_channel, result, brief
             )
             if outcome.qa_thread_ts:

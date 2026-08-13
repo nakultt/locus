@@ -514,6 +514,8 @@ export interface PRAnalysisResult {
   confirmed_findings: SecurityFinding[];
   /** Model-generated. Must never be presented as confirmed. */
   unverified_findings: SecurityFinding[];
+  /** Non-security review findings, P1 first. */
+  review_findings: ReviewFinding[];
   summary: string;
   pr_comment_posted: boolean;
   slack_posted: boolean;
@@ -535,6 +537,8 @@ export interface PRJob {
   error?: string;
   /** Present on the list response so rows show progress without expanding. */
   stages: PipelineStage[];
+  /** The searches behind those stages, so a count can be checked against them. */
+  tool_calls?: ToolInvocation[];
 }
 
 export interface PRJobDetail extends PRJob {
@@ -573,6 +577,17 @@ export interface ServiceStatus {
   capabilities: CapabilityStatus[];
 }
 
+export type ReviewPriority = "p1" | "p2" | "p3";
+
+export interface ReviewFinding {
+  priority: ReviewPriority;
+  title: string;
+  file_path: string;
+  line?: number;
+  description: string;
+  category: string;
+}
+
 export interface ToolInvocation {
   service: string;
   tool: string;
@@ -581,6 +596,8 @@ export interface ToolInvocation {
   succeeded: boolean;
   detail?: string;
   duration_ms?: number;
+  /** What the search matched, so a count can be sanity-checked. */
+  matches: string[];
 }
 
 export type StageState = "pending" | "running" | "done" | "skipped" | "failed";
@@ -661,6 +678,28 @@ export async function registerRepo(
       jira_done_status: jiraDoneStatus,
       close_issues_on_merge: closeIssuesOnMerge,
     }),
+  });
+}
+
+export interface PRAgentDefaults {
+  slack_channel?: string | null;
+  export_to_docs: boolean;
+  qa_emails: string[];
+  jira_done_status: string;
+  close_issues_on_merge: boolean;
+}
+
+/** Account-wide fallbacks used by any repo that does not set its own. */
+export async function getPRAgentDefaults(): Promise<PRAgentDefaults> {
+  return apiRequest<PRAgentDefaults>("/webhooks/defaults");
+}
+
+export async function savePRAgentDefaults(
+  defaults: PRAgentDefaults
+): Promise<PRAgentDefaults> {
+  return apiRequest<PRAgentDefaults>("/webhooks/defaults", {
+    method: "PUT",
+    body: JSON.stringify(defaults),
   });
 }
 
