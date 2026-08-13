@@ -14,6 +14,10 @@ No cloud LLM. No API keys. Your source diffs and private Slack threads never lea
 
 The agent runs on **LangChain 1.x `create_agent`**, which compiles to a LangGraph. Task events are emitted from the graph stream as work happens, and a tool that raises becomes a failed task rather than an aborted run — a request touching five integrations keeps the four that succeeded.
 
+**Adaptive Scheduler.** When a new meeting or deadline lands, works out which existing events must move so the deadline still holds — then shows you the plan before touching anything. The solver is plain Python: a model asked to rearrange a calendar produces plausible-looking schedules with overlaps and missed deadlines.
+
+Events are classified by how movable they are — flexible solo time, soft-fixed internal meetings, hard-fixed anything with external attendees — and conflicts resolve least-disruptive-first. A meeting with external attendees is never moved automatically; the plan reports it as blocked.
+
 **PR Context Agent.** Open a pull request and Locus automatically:
 
 1. Extracts ticket keys from the title, branch, body, and commits
@@ -94,8 +98,10 @@ uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_
 Upgrading an existing database:
 
 ```bash
-uv run python migrations/002_local_first_and_pr_agent.py
+for m in migrations/0*.py; do uv run python "$m"; done
 ```
+
+Each migration is idempotent, so running the whole set is safe.
 
 Run it:
 
@@ -117,6 +123,24 @@ cd backend && uv run pytest tests/ -q && uv run ruff check .
 ```bash
 npm run build
 ```
+
+---
+
+## Authentication
+
+Every user-scoped route requires `Authorization: Bearer <jwt>`, issued by `/auth/signup` and
+`/auth/login`. Identity comes from the token — no endpoint accepts a `user_id`, so one account
+cannot read or modify another's data by changing an integer.
+
+Requests to another user's conversation return **404 rather than 403**: a 403 would confirm
+the id exists, which is enough to enumerate other people's chats.
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8000/auth/login -H "Content-Type: application/json" -d '{"email":"you@example.com","password":"..."}' | python -c "import json,sys;print(json.load(sys.stdin)['token'])")
+```
+
+Service credentials are held in a `ContextVar` per asyncio task, so two users running agents
+concurrently cannot see each other's tokens.
 
 ---
 
@@ -168,7 +192,7 @@ Put the URL it prints in `backend/.env` as `PUBLIC_BASE_URL` and restart the bac
 **3. Register the repo.** This mints the webhook secret:
 
 ```bash
-curl -X POST http://localhost:8000/webhooks/repos -H "Content-Type: application/json" -d '{"user_id":1,"repo":"owner/name","slack_channel":"#dev-updates"}'
+curl -X POST http://localhost:8000/webhooks/repos -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"repo":"owner/name","slack_channel":"#dev-updates"}'
 ```
 
 The response carries `webhook_url` and `webhook_secret`. **The secret is shown once** — it is stored encrypted and no endpoint reads it back. Re-registering the same repo rotates it and invalidates the old one.
@@ -191,7 +215,7 @@ The response carries `webhook_url` and `webhook_secret`. **The secret is shown o
 To test the pipeline, re-run after fixing a credential, or demo against an already-open PR:
 
 ```bash
-curl -X POST http://localhost:8000/webhooks/analyze/1/owner/name/42
+curl -X POST http://localhost:8000/webhooks/analyze/owner/name/42 -H "Authorization: Bearer $TOKEN"
 ```
 
 This needs neither a tunnel nor a registration — only a connected GitHub token. A registered repo additionally supplies the Slack channel for the summary.
@@ -199,7 +223,7 @@ This needs neither a tunnel nor a registration — only a connected GitHub token
 Check results:
 
 ```bash
-curl http://localhost:8000/webhooks/jobs/1
+curl http://localhost:8000/webhooks/jobs -H "Authorization: Bearer $TOKEN"
 ```
 
 A `failed` job carries the reason in its `error` field; that is the first place to look.
@@ -302,22 +326,25 @@ classifier has no tools bound — it returns a verdict and nothing else.
 |---|---|---|
 | `POST` | `/auth/signup` · `/auth/login` | Authentication |
 | `POST` | `/auth/connect` | Store integration credentials |
-| `GET` | `/auth/integrations/{user_id}` | List connections |
-| `DELETE` | `/auth/disconnect/{user_id}/{service}` | Remove a connection |
+| `GET` | `/auth/integrations` | List connections |
+| `DELETE` | `/auth/disconnect/{service_name}` | Remove a connection |
 | `GET` | `/auth/google` · `/auth/linear` | Start OAuth |
 | `POST` | `/api/chat` | Natural-language command |
 | `POST` | `/api/chat/stream` | Same, with SSE task updates |
-| `GET` | `/api/conversations/{user_id}` | Conversation list |
+| `GET` | `/api/conversations` | Conversation list |
 | `GET` | `/api/settings/llm` | Local model readiness |
+| `GET` | `/api/schedule/conflicts` | Double-bookings in the next two weeks |
+| `POST` | `/api/schedule/plan` | What would move to fit a new event (writes nothing) |
+| `POST` | `/api/schedule/apply` | Apply a reviewed plan |
 | `POST` | `/webhooks/github` | GitHub events (HMAC-authenticated) |
 | `POST` | `/webhooks/slack` | Slack events — QA replies (HMAC-authenticated) |
 | `POST` | `/webhooks/repos` | Register a repo; returns the webhook secret once |
-| `GET` | `/webhooks/repos/{user_id}` | List registered repos |
-| `DELETE` | `/webhooks/repos/{user_id}/{owner}/{name}` | Unregister |
-| `POST` | `/webhooks/analyze/{user_id}/{owner}/{name}/{pr}` | Analyze a PR now, no webhook needed |
-| `GET` | `/webhooks/jobs/{user_id}` | Recent analysis jobs and their errors |
-| `GET` | `/webhooks/jobs/{user_id}/{job_id}` | One run with findings, context, and tools used |
-| `GET` | `/webhooks/summary/{user_id}` | Per-capability pipeline readiness |
+| `GET` | `/webhooks/repos` | List registered repos |
+| `DELETE` | `/webhooks/repos/{owner}/{name}` | Unregister |
+| `POST` | `/webhooks/analyze/{owner}/{name}/{pr_number}` | Analyze a PR now, no webhook needed |
+| `GET` | `/webhooks/jobs` | Recent analysis jobs and their errors |
+| `GET` | `/webhooks/jobs/{job_id}` | One run with findings, context, and tools used |
+| `GET` | `/webhooks/summary` | Per-capability pipeline readiness |
 
 ### Checking model readiness
 
@@ -340,7 +367,11 @@ curl http://localhost:8000/api/settings/llm
 
 ## Timezone
 
-Locus defaults to **`Asia/Kolkata`** (IST, UTC+05:30) and stores an IANA timezone per user, set at signup. The half-hour offset breaks naive hour arithmetic, so all scheduling goes through a real timezone library rather than integer offsets.
+Locus defaults to **`Asia/Kolkata`** (IST, UTC+05:30) and stores an IANA timezone per user, captured at signup from the browser. The half-hour offset breaks naive hour arithmetic, so all scheduling goes through a real timezone library rather than integer offsets.
+
+Times are parsed in the user's zone and sent to Google with that zone attached, rather than converted to UTC — which keeps recurring events correct across a DST shift. Working hours default to 09:30–18:30, Monday to Friday.
+
+Natural language is handled by `dateparser`: "next Tuesday 10:30", "Friday morning", "in 90 minutes". When no time can be read the parser returns nothing rather than guessing, so a typo surfaces as an error instead of an event at the wrong hour.
 
 ---
 
@@ -348,10 +379,8 @@ Locus defaults to **`Asia/Kolkata`** (IST, UTC+05:30) and stores an IANA timezon
 
 These are tracked in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) and are worth reading before deploying anywhere real.
 
-- **Authentication is not enforced.** `verify_token()` exists but no endpoint calls it; routes trust a client-supplied `user_id`. **Do not expose this to untrusted users.** — Plan §0.1
-- **Most service credentials use module-level globals.** Concurrent requests can cross-contaminate tokens between users, and it prevents safe multi-instance deployment. `slack.py` has been converted to closures; the other 13 have not. — Plan §0.2
-- **Calendar date parsing is minimal.** Only "2pm", "3pm", and "10am" are recognized; everything else silently becomes 9am, and events are written as UTC regardless of the user's timezone. `User.timezone` exists but is not yet used. — Plan §0.4
 - **Repo registration is API-only.** There is no UI for it yet; use `POST /webhooks/repos` as described above.
+- **The scheduler reads only the primary calendar.** Secondary and shared calendars are ignored, so a conflict on one of those will not be seen.
 - The PR agent has not been run end to end against a live GitHub webhook. Component logic is unit-tested; the Jira and Slack response-shape handling is written against the documented APIs but unverified with real credentials.
 - The worker is single-instance; multi-instance needs row locking or a real queue.
 - Gitleaks is optional and not bundled. Install with `go install github.com/zricethezav/gitleaks/v8@latest`; without it, committed-secret detection is skipped.

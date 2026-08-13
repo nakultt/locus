@@ -1,8 +1,8 @@
 # Locus Implementation Plan
 
-> **Status.** Feature A (PR Context Agent) is implemented, along with the local-first LLM
-> swap and §0.3. Still outstanding and blocking production use: **§0.1 auth enforcement**
-> and **§0.2 credential globals**. See "Shipped" at the bottom.
+> **Status.** Phase 0 is complete. Feature A (PR Context Agent) and Feature B (Adaptive
+> Scheduler) are both implemented. 152 tests pass. Nothing has been exercised against live
+> third-party services -- see "Not yet verified" at the bottom.
 
 Two flagship features, plus the foundation they both require.
 
@@ -21,7 +21,7 @@ architectural break from what exists today, and it drives the ordering below.
 Nothing below Phase 0 can ship without these. They are not optional cleanup; each one
 directly blocks a flagship feature.
 
-### 0.1 Enforce authentication
+### 0.1 Enforce authentication - DONE
 
 `verify_token()` in `app/security.py:63` is defined and never called. Every endpoint trusts a
 client-supplied `user_id`.
@@ -36,7 +36,7 @@ client-supplied `user_id`.
 discussions, internal ticket contents, source diffs) keyed by user. Today any caller can read
 another user's data by changing an integer.
 
-### 0.2 Kill the credential globals — 1 of 14 done
+### 0.2 Kill the credential globals - DONE
 
 All 14 services use a module-level `_x_config` dict mutated by `get_*_tools()`. Tool objects
 are module singletons, so concurrent requests overwrite each other's tokens.
@@ -59,11 +59,11 @@ Resolved by the local-first swap: `parse_tasks_from_message` now calls the share
 `app/services/llm.get_llm()` like every other call site. There is no per-user key left to
 thread, so the failure mode is gone rather than fixed.
 
-### 0.4 Calendar correctness
+### 0.4 Calendar correctness - DONE
 
 `_parse_datetime` (`calendar.py:119`) understands only "2pm", "3pm", "10am" — everything else
-silently becomes 9am. It builds naive server-local times and labels them `"timeZone": "IST"`
-(`calendar.py:186`), so every event is wrong by the user's IST offset.
+silently becomes 9am. It builds naive server-local times and labels them `"timeZone": "UTC"`,
+so every event is wrong by the user's UTC offset.
 
 - Replace with `dateparser` (handles "next Tuesday at 4", "in 2 hours").
 - Add `timezone` column to `User`, populated at signup from
@@ -162,7 +162,7 @@ hallucinates findings.
 
 - Never post secrets found by Gitleaks into a PR comment or Slack — say "credential detected in
   `file:line`", nothing more. Posting the secret widens the exposure.
-- Diff content goes to Gemini. Make this explicit at connect time; some orgs cannot allow it.
+- Diff content reaches the local model. Inference is on-machine, so nothing leaves the host.
 - **Prompt injection is a live risk**: PR descriptions and Slack messages are attacker-influenced
   and flow into a prompt whose agent holds write access to Jira, GitHub, and Gmail. Treat all
   fetched content as data, never instruction. Keep the scanner on a *separate* LLM call with no
@@ -353,3 +353,84 @@ likely place for a field-name mismatch on first real use.
 3. Repo-registration endpoint — webhook secrets are inserted by hand today, so the PR agent
    cannot be set up through the UI
 4. Frontend view for PR job history
+
+
+---
+
+## Phase 0 and Feature B: what was built
+
+### 0.1 Authentication
+
+`app/dependencies.py` holds a single `get_current_user`. Every user-scoped route derives its
+user from the verified JWT, and `user_id` was removed from `IntegrationCreate`, `ChatRequest`,
+`ConversationCreate`, and `RepoRegister` so it cannot be supplied at all. Routes carrying it in
+the path lost it too: `/auth/integrations/{id}` became `/auth/integrations`, and the same for
+conversations, jobs, repos, and the agent summary.
+
+Conversation lookups return **404 rather than 403** for another user's id. A 403 confirms the
+row exists, which is enough to enumerate other people's chats.
+
+Verified: unauthenticated requests get 401; one user cannot read, rename, or delete another's
+conversations; integrations list per-user; and a profile update touches only the caller. The
+last of those was the account-takeover hole -- `PUT /auth/user/{id}` previously let anyone set
+any password.
+
+### 0.2 Credential isolation
+
+All 13 remaining services kept credentials in a module-level dict that the `@tool` functions
+read at call time. Tool objects are module singletons, so two users running agents at once
+overwrote each other's tokens.
+
+`app/services/credential_context.py` provides a `CredentialProxy` backed by a `ContextVar`.
+Each service's module-level name is rebound to one, so `_github_config.get("token")` now
+resolves against the calling task's value. All 54 tool bodies work unchanged.
+
+A ContextVar rather than closures because it fixes every service uniformly without rewriting
+54 functions, and it covers the background worker, which runs outside any request.
+
+Verified with two concurrent tasks interleaving at the exact point that used to corrupt
+tokens. The same test against the old pattern shows Alice receiving Bob's token.
+
+### 0.4 Calendar correctness
+
+`app/services/datetimes.py` replaces the parser that understood "2pm", "3pm", and "10am" and
+silently returned 9am for anything else. It handles "next Tuesday 10:30", "Friday morning",
+"in 90 minutes", and ISO strings, and returns `None` when no time is named -- forcing the
+caller to decide rather than inventing one.
+
+Two phrasings needed normalising: dateparser fails outright on a "next" prefix, and does not
+map "morning"/"afternoon" to hours.
+
+Timezone now flows from `User.timezone` through the agent into the calendar service, and
+events are sent with an IANA zone attached instead of a hardcoded `"UTC"` label on
+server-local times. On a UTC host every IST event was previously 5h30m off, silently.
+
+### Feature B: Adaptive Scheduler
+
+| Piece | File |
+|---|---|
+| Calendar read/move tools | `app/services/calendar.py` |
+| Constraint solver | `app/services/scheduler.py` |
+| Plan / apply / conflicts API | `app/routers/schedule.py` |
+| Dashboard | `src/pages/scheduler.tsx` |
+
+The solver is plain Python. Constraint satisfaction is what language models are worst at:
+asked to rearrange a calendar they produce plausible-looking schedules with overlaps and
+missed deadlines, and the error is hard to spot precisely because the output reads well.
+
+Events are classified by how movable they are -- flexible solo time, soft-fixed internal
+meetings, hard-fixed anything with external attendees -- and conflicts are resolved
+least-disruptive-first. Hard-fixed events are never moved; when one blocks the way the
+proposal says so rather than dropping the conflict.
+
+Planning and applying are separate endpoints. `POST /api/schedule/plan` writes nothing, and
+the response flags whether approval is needed because other attendees are involved.
+
+Two invariants are tested directly: proposed moves never overlap each other, and a plan that
+would move an external meeting reports it as blocked instead.
+
+### Not yet verified
+
+No part of this has run against live Google Calendar, Jira, Slack, or GitHub. Response shapes
+are written against the documented APIs. The solver and parser are exercised directly and are
+independent of those services, but everything that reads or writes to them is unproven.

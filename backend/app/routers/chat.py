@@ -117,6 +117,7 @@ async def chat(
             integration_configs=integration_configs,
             smart_mode=request.smart_mode,
             history=history,
+            timezone=current_user.timezone,
         )
         
         # Save assistant response to database
@@ -267,6 +268,7 @@ async def chat_stream(
                 message=request.message,
                 integration_configs=integration_configs,
                 history=history,
+                timezone=current_user.timezone,
             ):
                 # Capture final message and actions from complete event
                 if event.get("event_type") == "complete":

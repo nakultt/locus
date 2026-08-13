@@ -12,6 +12,7 @@ export interface User {
   id: number;
   email: string;
   name?: string;
+  timezone?: string;
   token?: string;
   created_at?: string;
 }
@@ -143,7 +144,14 @@ export async function signup(
 ): Promise<User> {
   return apiRequest<User>("/auth/signup", {
     method: "POST",
-    body: JSON.stringify({ email, password, name }),
+    body: JSON.stringify({
+      email,
+      password,
+      name,
+      // Captured at signup so scheduling uses the user's own clock rather
+      // than the server's. Falls back to IST server-side if unavailable.
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    }),
   });
 }
 
@@ -162,6 +170,7 @@ export interface UserUpdate {
   email?: string;
   password?: string;
   name?: string;
+  timezone?: string;
 }
 
 export async function updateUser(data: UserUpdate): Promise<User> {
@@ -664,6 +673,72 @@ export async function unregisterRepo(repo: string): Promise<void> {
 export async function analyzePR(repo: string, prNumber: number): Promise<PRJob> {
   return apiRequest<PRJob>(`/webhooks/analyze/${repo}/${prNumber}`, {
     method: "POST",
+  });
+}
+
+// ============== Adaptive Scheduler ==============
+
+export type EventClass = "hard_fixed" | "soft_fixed" | "flexible";
+
+export interface ScheduleMove {
+  event_id: string;
+  title: string;
+  from_start?: string;
+  to_start: string;
+  duration_minutes: number;
+  event_class: EventClass;
+  attendee_count: number;
+  reason: string;
+}
+
+export interface ScheduleProposal {
+  trigger: string;
+  timezone: string;
+  moves: ScheduleMove[];
+  additions: ScheduleMove[];
+  /** Conflicts the solver could not resolve, and why. */
+  blocked: string[];
+  summary: string;
+}
+
+export interface CalendarConflict {
+  first: { title: string; start: string; id: string };
+  second: { title: string; start: string; id: string };
+}
+
+export async function getScheduleConflicts(days = 14): Promise<{
+  total_events: number;
+  conflicts: CalendarConflict[];
+  total_conflicts: number;
+}> {
+  return apiRequest(`/api/schedule/conflicts?days=${days}`);
+}
+
+export async function planSchedule(
+  title: string,
+  start: string,
+  durationMinutes = 60,
+  attendees = 1
+): Promise<ScheduleProposal> {
+  return apiRequest<ScheduleProposal>("/api/schedule/plan", {
+    method: "POST",
+    body: JSON.stringify({
+      title,
+      start,
+      duration_minutes: durationMinutes,
+      attendees,
+    }),
+  });
+}
+
+/** Applies a plan the user has reviewed. Planning never writes. */
+export async function applySchedule(
+  moves: ScheduleMove[],
+  additions: ScheduleMove[] = []
+): Promise<{ applied: string[]; failed: string[] }> {
+  return apiRequest("/api/schedule/apply", {
+    method: "POST",
+    body: JSON.stringify({ moves, additions }),
   });
 }
 

@@ -11,6 +11,7 @@ import { AuthProvider, useAuth } from "@/context/AuthContext";
 const Chatbot = lazy(() => import("@/pages/chatbot"));
 const Settings = lazy(() => import("@/pages/settings"));
 const PRAgentDashboard = lazy(() => import("@/pages/pr-agent"));
+const SchedulerPage = lazy(() => import("@/pages/scheduler"));
 const IntegrationsSection = lazy(() => import("@/ui/integrations/integration-components"));
 
 const RouteFallback = () => (
@@ -71,6 +72,16 @@ export default function App() {
             <ProtectedRoute>
               <WithLayout>
                 <PRAgentDashboard />
+              </WithLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/scheduler"
+          element={
+            <ProtectedRoute>
+              <WithLayout>
+                <SchedulerPage />
               </WithLayout>
             </ProtectedRoute>
           }

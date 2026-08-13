@@ -17,6 +17,7 @@ from app.routers import (
     conversations,
     google_oauth,
     linear_oauth,
+    schedule,
     settings,
     slack_events,
     webhooks,
@@ -90,6 +91,7 @@ app.include_router(linear_oauth.router, prefix="/auth", tags=["Linear OAuth"])
 app.include_router(chat.router, prefix="/api", tags=["Chat"])
 app.include_router(conversations.router, prefix="/api", tags=["Conversations"])
 app.include_router(settings.router, prefix="/api/settings", tags=["Settings"])
+app.include_router(schedule.router, prefix="/api/schedule", tags=["Scheduler"])
 app.include_router(webhooks.router, prefix="/webhooks", tags=["Webhooks"])
 app.include_router(slack_events.router, prefix="/webhooks", tags=["Webhooks"])
 

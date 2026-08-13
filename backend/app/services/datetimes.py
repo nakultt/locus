@@ -14,6 +14,7 @@ zone attached, so the API applies the correct offset rather than guessing.
 """
 
 import logging
+import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -54,6 +55,37 @@ def now_in(timezone_name: str | None) -> datetime:
     return datetime.now(resolve_timezone(timezone_name))
 
 
+# dateparser fails outright on "next Tuesday 10:30" but handles "Tuesday
+# 10:30" fine, and PREFER_DATES_FROM=future already means the upcoming one.
+# Dropping the redundant prefix turns a None into a correct answer.
+_REDUNDANT_PREFIX = re.compile(r"^\s*(next|this|coming|upcoming)\s+", re.I)
+
+# "Friday morning" / "Monday evening" carry a time humans understand but
+# dateparser does not; map them onto the hour they mean.
+_TIME_OF_DAY = {
+    "morning": "9am",
+    "afternoon": "2pm",
+    "evening": "6pm",
+    "night": "8pm",
+    "noon": "12pm",
+    "midday": "12pm",
+}
+
+
+def _normalize(text: str) -> str:
+    """Rewrite phrasings dateparser mishandles into ones it understands."""
+    cleaned = _REDUNDANT_PREFIX.sub("", text.strip())
+
+    for word, replacement in _TIME_OF_DAY.items():
+        boundary = r"\b"
+        pattern = re.compile(boundary + word + boundary, re.I)
+        if pattern.search(cleaned):
+            cleaned = pattern.sub(replacement, cleaned)
+            break
+
+    return cleaned
+
+
 def parse_datetime(
     text: str | None,
     timezone_name: str | None = None,
@@ -82,7 +114,7 @@ def parse_datetime(
     reference = base or datetime.now(tz)
 
     parsed = dateparser.parse(
-        text.strip(),
+        _normalize(text),
         settings={
             "TIMEZONE": str(tz),
             "RETURN_AS_TIMEZONE_AWARE": True,
@@ -110,8 +142,6 @@ def parse_duration_minutes(text: str | None, default: int = 60) -> int:
         return default
 
     cleaned = text.strip().lower()
-
-    import re
 
     match = re.search(r"(\d+(?:\.\d+)?)\s*(h|hr|hour|hours|m|min|minute|minutes)", cleaned)
     if not match:
