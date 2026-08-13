@@ -7,6 +7,11 @@ modified any account -- including changing another user's password.
 """
 
 import asyncio
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -187,3 +192,37 @@ class TestCredentialIsolation:
         proxy.set({"token": "ghp_supersecret"})
         assert "ghp_supersecret" not in repr(proxy)
         assert "token" in repr(proxy)
+
+
+class TestRequiredSecrets:
+    """
+    Both keys must be set explicitly. A generated ENCRYPTION_KEY changes on
+    every restart and silently makes stored credentials undecryptable; a
+    default SECRET_KEY was committed to a public repo, so anyone could mint a
+    token for any user.
+    """
+
+    def _import_without(self, *missing: str) -> subprocess.CompletedProcess:
+        backend = Path(__file__).resolve().parent.parent
+        env = {k: v for k, v in os.environ.items() if k not in missing}
+        env["PYTHONPATH"] = str(backend)
+
+        # An empty cwd, because load_dotenv() walks up from wherever the
+        # process starts and both the repo root and backend/ hold a .env.
+        with tempfile.TemporaryDirectory() as empty:
+            return subprocess.run(
+                [sys.executable, "-c", "import app.security"],
+                env=env,
+                capture_output=True,
+                text=True,
+                cwd=empty,
+            )
+
+    def test_missing_encryption_key_fails_at_import(self):
+        result = self._import_without("ENCRYPTION_KEY", "SECRET_KEY")
+        assert result.returncode != 0
+        assert "ENCRYPTION_KEY" in result.stderr
+
+    def test_error_says_how_to_generate_one(self):
+        result = self._import_without("ENCRYPTION_KEY", "SECRET_KEY")
+        assert "Fernet.generate_key" in result.stderr

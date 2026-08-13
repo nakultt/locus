@@ -18,7 +18,12 @@ from app.database import get_db
 from app.dependencies import get_current_user, get_integration_configs
 from app.services import calendar as calendar_service
 from app.services.datetimes import parse_datetime, resolve_timezone
-from app.services.scheduler import SchedulingContext, find_conflicts, plan_for_new_event
+from app.services.scheduler import (
+    SchedulingContext,
+    find_conflicts,
+    plan_for_deadline,
+    plan_for_new_event,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +64,14 @@ def _load_calendar(
     tz = resolve_timezone(user.timezone)
     own_domain = user.email.split("@")[-1].lower() if user.email else ""
 
+    # A stored override always beats the attendee-count heuristic.
+    overrides = {
+        c.event_id: schemas.EventClass(c.event_class)
+        for c in db.query(models.EventConstraint).filter(
+            models.EventConstraint.owner_id == user.id
+        ).all()
+    }
+
     events: list[schemas.ScheduledEvent] = []
     for item in raw:
         start_raw = (item.get("start") or {}).get("dateTime")
@@ -87,6 +100,7 @@ def _load_calendar(
             end=end,
             attendee_count=max(1, len(attendees)),
             has_external_attendees=external,
+            event_class=overrides.get(item.get("id", "")),
         ))
 
     return events
@@ -154,6 +168,185 @@ async def plan_event(
     return plan_for_new_event(
         new_event,
         SchedulingContext(timezone=current_user.timezone, events=events),
+    )
+
+
+@router.get(
+    "/deadlines",
+    response_model=list[schemas.DeadlineResponse],
+    summary="Deadlines the scheduler protects",
+)
+async def list_deadlines(
+    include_completed: bool = False,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[schemas.DeadlineResponse]:
+    """List the caller's tracked deadlines, soonest first."""
+    query = db.query(models.Deadline).filter(
+        models.Deadline.owner_id == current_user.id
+    )
+    if not include_completed:
+        query = query.filter(models.Deadline.completed == 0)
+
+    rows = query.order_by(models.Deadline.due_at).all()
+    return [
+        schemas.DeadlineResponse(
+            id=r.id, key=r.key, title=r.title, due_at=r.due_at,
+            estimated_minutes=r.estimated_minutes, source=r.source,
+            url=r.url, completed=bool(r.completed),
+        )
+        for r in rows
+    ]
+
+
+@router.post(
+    "/deadlines",
+    response_model=schemas.DeadlineResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Track a deadline",
+)
+async def create_deadline(
+    request: schemas.DeadlineCreate,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> schemas.DeadlineResponse:
+    """
+    Register a due date. Re-registering the same key updates it rather than
+    creating a duplicate, so a Jira sync can run repeatedly.
+    """
+    existing = db.query(models.Deadline).filter(
+        models.Deadline.owner_id == current_user.id,
+        models.Deadline.key == request.key,
+    ).first()
+
+    if existing:
+        existing.title = request.title
+        existing.due_at = request.due_at
+        existing.estimated_minutes = request.estimated_minutes
+        existing.source = request.source
+        existing.url = request.url
+        existing.completed = 0
+        deadline = existing
+    else:
+        deadline = models.Deadline(
+            key=request.key,
+            title=request.title,
+            due_at=request.due_at,
+            estimated_minutes=request.estimated_minutes,
+            source=request.source,
+            url=request.url,
+            owner_id=current_user.id,
+        )
+        db.add(deadline)
+
+    db.commit()
+    db.refresh(deadline)
+
+    return schemas.DeadlineResponse(
+        id=deadline.id, key=deadline.key, title=deadline.title,
+        due_at=deadline.due_at, estimated_minutes=deadline.estimated_minutes,
+        source=deadline.source, url=deadline.url,
+        completed=bool(deadline.completed),
+    )
+
+
+@router.delete(
+    "/deadlines/{deadline_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Stop tracking a deadline",
+)
+async def delete_deadline(
+    deadline_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> None:
+    """Remove one of the caller's deadlines."""
+    deadline = db.query(models.Deadline).filter(
+        models.Deadline.id == deadline_id,
+        models.Deadline.owner_id == current_user.id,
+    ).first()
+
+    if not deadline:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Deadline not found"
+        )
+
+    db.delete(deadline)
+    db.commit()
+
+
+@router.post(
+    "/constraints",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Override how movable an event is",
+)
+async def set_constraint(
+    request: schemas.EventConstraintSet,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> None:
+    """
+    Pin an event as fixed or flexible.
+
+    The solver infers a class from attendee count, but that is wrong often
+    enough to need an override: a solo block can be immovable, and a large
+    meeting can be trivial to reschedule.
+    """
+    existing = db.query(models.EventConstraint).filter(
+        models.EventConstraint.owner_id == current_user.id,
+        models.EventConstraint.event_id == request.event_id,
+    ).first()
+
+    if existing:
+        existing.event_class = request.event_class.value
+        existing.note = request.note
+    else:
+        db.add(models.EventConstraint(
+            event_id=request.event_id,
+            event_class=request.event_class.value,
+            note=request.note,
+            owner_id=current_user.id,
+        ))
+
+    db.commit()
+
+
+@router.post(
+    "/plan-deadline/{deadline_id}",
+    response_model=schemas.ScheduleProposal,
+    summary="Reserve working time before a deadline",
+)
+async def plan_deadline(
+    deadline_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> schemas.ScheduleProposal:
+    """
+    Find room to do the work before a deadline falls due.
+
+    Changes nothing; the returned plan must be applied explicitly.
+    """
+    deadline = db.query(models.Deadline).filter(
+        models.Deadline.id == deadline_id,
+        models.Deadline.owner_id == current_user.id,
+    ).first()
+
+    if not deadline:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Deadline not found"
+        )
+
+    events = _load_calendar(db, current_user)
+    due = deadline.due_at
+    if due.tzinfo is None:
+        due = due.replace(tzinfo=resolve_timezone(current_user.timezone))
+
+    return plan_for_deadline(
+        SchedulingContext(timezone=current_user.timezone, events=events),
+        deadline_key=deadline.key,
+        deadline=due,
+        required_minutes=deadline.estimated_minutes,
+        title=f"Work on {deadline.key}",
     )
 
 

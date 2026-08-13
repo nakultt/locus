@@ -26,22 +26,38 @@ BCRYPT_ROUNDS = 12
 # anything longer so long passwords stay usable and distinguishable.
 _MAX_BCRYPT_BYTES = 72
 
-# Encryption key for API tokens
-ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
+# Both keys fail loudly when unset rather than falling back.
+#
+# A generated ENCRYPTION_KEY changes on every restart, so every credential
+# stored under the previous one becomes permanently undecryptable -- and the
+# failure surfaces later as an opaque error during a chat, not at startup.
+#
+# A default SECRET_KEY is worse: the literal was committed to a public repo,
+# so anyone could mint a token for any user and walk straight past
+# authentication.
+#
+# Tests set throwaway values via the environment.
 
-if not ENCRYPTION_KEY:
-    # Generate a key for development (in production, always use env var)
-    ENCRYPTION_KEY = Fernet.generate_key().decode()
-    print("WARNING: Using generated ENCRYPTION_KEY. Set this in .env for production!")
+def _require(name: str, generate_hint: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"{name} is not set. Generate one with:\n    {generate_hint}\n"
+            f"and add it to backend/.env. It must stay the same across restarts."
+        )
+    return value
 
-# Ensure key is bytes
-if isinstance(ENCRYPTION_KEY, str):
-    ENCRYPTION_KEY = ENCRYPTION_KEY.encode()
+
+ENCRYPTION_KEY = _require(
+    "ENCRYPTION_KEY",
+    'uv run python -c "from cryptography.fernet import Fernet; '
+    'print(Fernet.generate_key().decode())"',
+).encode()
 
 fernet = Fernet(ENCRYPTION_KEY)
 
 # JWT Configuration
-SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-for-jwt-here")
+SECRET_KEY = _require("SECRET_KEY", "openssl rand -hex 32")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
 
