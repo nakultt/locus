@@ -107,6 +107,46 @@ a 422 and a range running past the diff would overwrite code the PR never
 touched. Nits get no suggestion: the Apply button invites a click at any
 priority. `tests/test_suggested_fixes.py` pins all of it.
 
+**A job is claimed atomically, and an orphaned one is rescued.** The claim is a conditional
+UPDATE moving `queued` -> `running`; only the worker whose UPDATE reported a row proceeds, so
+two workers racing produce one winner rather than two analyses posting the same comment twice.
+A job left `running` by a process that died used to be abandoned in place — the webhook that
+queued it was answered long ago, so nothing re-queues it and the pull request is silently never
+analyzed. `worker.recover_stale_jobs` requeues them on startup and on a timer, bounded by
+`attempts`: recovery rescues work a crash dropped, and a job that reliably kills the worker is
+failed with a reason rather than rescued into an unkillable loop. `STALE_JOB_MINUTES` must stay
+well clear of the slowest legitimate run, because reclaiming a live job double-posts its comment.
+
+**The findings diff is keyed by file and title, never line.** `finding_diff` answers "did they
+fix what I flagged last round" by comparing against the previous *completed* run on the same
+pull request. An edit anywhere above a finding shifts its line, so a line-keyed diff would
+report every surviving finding as resolved and immediately reintroduced — worse than reporting
+nothing. Resolved is worded "no longer reported" rather than "fixed": deleting the file resolves
+a finding too, and the tool knows what it stopped seeing, not what anyone did about it. Nothing
+renders on a first run or when nothing moved, because a "0 resolved, 0 new" line on every push
+trains people to skip the section that matters.
+
+**A dismissed finding stays dismissed, and the dismissal is disclosed.** Without suppression a
+false positive is permanent — it returns on every push, and the only way to silence it is to stop
+reading the comment, which silences the true positives too. `@locus ignore <title>` records one.
+Three rules: the command text is untrusted, so parsing is a regex over a fixed vocabulary with no
+model involved and the widest reachable effect is hiding a finding on the pull request the comment
+was posted on; Locus ignores comments carrying its own markers, because the comment it posts ends
+with an `@locus ignore` hint and acting on that would make the bot instruct itself; and the count
+of withheld findings is printed in the comment, because a scanner that quietly stops mentioning
+things is worse than one that never mentioned them — the silence reads as a clean run. An
+ambiguous target matches nothing rather than guessing, since silencing the wrong finding is
+invisible.
+
+**A swallowed integration failure is recorded.** The loops swallow their own errors so one dead
+integration cannot stop the others, which leaves a persistently broken one invisible — a Gmail
+token that expired on Monday shows up only as QA replies no longer arriving, which reads as
+nobody replying. `integration_health` stores last success, last failure and the streak per
+(user, service). Recording never fails the work it describes, the same rule `comms_log` follows.
+A service is called unhealthy only after `UNHEALTHY_AFTER` consecutive failures, because one
+failed poll is ordinary; and a service never attempted is absent from the list rather than
+reported healthy, which would be a claim nothing supports.
+
 **Models that read attacker-influenced text have no tools bound.** Diff text, Slack messages,
 QA replies, and review bodies are controlled by anyone who can open a PR, post in a channel,
 or review. The security scanner, the code reviewer, the QA classifier, and the review-asks
@@ -350,12 +390,14 @@ gets rewritten on every checkout and shows as modified in a fresh clone.
   are invisible to it.
 - Tests do not cover live calls to GitHub, Jira, or Slack. Response-shape handling for those
   is written against the documented APIs.
-- The worker and the Gmail poller are both single-instance; multi-instance deployment would
-  double-process without row locking.
+- Multi-instance deployment is guarded but not proven. The job claim is an atomic conditional
+  UPDATE, and the two sweeps take Postgres advisory locks (`app/services/locks.py`), so
+  duplicate outward messages are prevented by construction rather than by there being one
+  process. It has not been run multi-instance in anger.
 - Gitleaks is optional and not bundled, so committed-secret detection is skipped when it is
   absent.
 
 **README.md's "Known limitations" is stale on one point:** it says repo registration is
-API-only with no UI. `src/pages/pr-agent.tsx` now calls `registerRepo`/`unregisterRepo`, so
+API-only with no UI. `src/pages/tasks.tsx` now calls `registerRepo`/`unregisterRepo`, so
 that gap is closed. Verify against the code before repeating a limitation from either
 document.

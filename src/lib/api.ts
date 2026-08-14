@@ -473,6 +473,30 @@ export async function checkLLMStatus(): Promise<LLMStatus> {
   return apiRequest<LLMStatus>("/api/settings/llm");
 }
 
+/**
+ * Whether each integration is actually working.
+ *
+ * The background loops swallow their own failures so one dead integration
+ * cannot stop the others. This is where that silence surfaces — a Gmail token
+ * that expired days ago otherwise shows up only as QA replies no longer
+ * arriving, which reads as nobody replying.
+ *
+ * Only services with a recorded attempt appear; one never called is absent
+ * rather than reported healthy.
+ */
+export interface IntegrationHealthEntry {
+  service: string;
+  healthy: boolean;
+  consecutive_failures: number;
+  last_success_at?: string | null;
+  last_failure_at?: string | null;
+  last_error?: string | null;
+}
+
+export async function fetchIntegrationHealth(): Promise<IntegrationHealthEntry[]> {
+  return apiRequest<IntegrationHealthEntry[]>("/api/settings/integration-health");
+}
+
 // ============== PR Context Agent ==============
 
 export type PRJobStatus = "queued" | "running" | "completed" | "failed";

@@ -1,9 +1,41 @@
 import { useState, useEffect } from "react";
-import { Moon, Sun, User, Bell, Palette, Grid, Cpu, Check, X, Loader2, AlertTriangle, LogOut } from "lucide-react";
+import { Moon, Sun, User, Bell, Palette, Grid, Cpu, Check, X, Loader2, AlertTriangle, LogOut, Activity } from "lucide-react";
 import { motion } from "framer-motion";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
-import { checkLLMStatus, type LLMStatus } from "@/lib/api";
+import {
+  checkLLMStatus,
+  fetchIntegrationHealth,
+  type IntegrationHealthEntry,
+  type LLMStatus,
+} from "@/lib/api";
+
+/**
+ * "3 minutes ago" — enough to tell a live poller from one that stopped.
+ *
+ * "never" is a real answer here, not a missing value: a service with a
+ * failure streak and no successful call has never worked.
+ */
+const timeAgo = (iso?: string | null): string => {
+  if (!iso) return "never";
+
+  const seconds = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (!Number.isFinite(seconds)) return "unknown";
+  if (seconds < 60) return "just now";
+
+  const scales: [number, string][] = [
+    [86400, "day"],
+    [3600, "hour"],
+    [60, "minute"],
+  ];
+  for (const [size, label] of scales) {
+    if (seconds >= size) {
+      const n = Math.round(seconds / size);
+      return `${n} ${label}${n === 1 ? "" : "s"} ago`;
+    }
+  }
+  return "just now";
+};
 
 const Settings = () => {
   const [isDark, setIsDark] = useState(false);
@@ -13,6 +45,9 @@ const Settings = () => {
   // Local model backend status
   const [llmStatus, setLlmStatus] = useState<LLMStatus | null>(null);
   const [isLoadingLlm, setIsLoadingLlm] = useState(true);
+
+  // Whether the background loops are actually reaching each integration.
+  const [health, setHealth] = useState<IntegrationHealthEntry[]>([]);
 
   // Edit Profile State
   const [isEditProfileOpen, setIsEditProfileOpen] = useState(false);
@@ -45,8 +80,20 @@ const Settings = () => {
     }
   };
 
+  // Health changes on the poller's schedule (minutes), not the model's, so it
+  // is fetched once rather than on the 15s model-status interval.
+  const refreshHealth = async () => {
+    try {
+      setHealth(await fetchIntegrationHealth());
+    } catch (err) {
+      // A failure here must not blank the page; the section simply stays empty.
+      console.error("Failed to fetch integration health:", err);
+    }
+  };
+
   useEffect(() => {
     refreshLlmStatus();
+    refreshHealth();
     const interval = setInterval(refreshLlmStatus, 15000);
     return () => clearInterval(interval);
   }, []);
@@ -282,6 +329,88 @@ const Settings = () => {
               )}
             </div>
           </motion.div>
+
+          {/* Integration health.
+              The background loops swallow their own failures so one dead
+              integration cannot stop the others. This is where that silence
+              surfaces — a Gmail token that expired days ago otherwise shows
+              up only as QA replies no longer arriving.
+
+              Rendered only when there is something to report: a service is
+              listed once it has been attempted, and "never attempted" is not
+              a state worth a row. */}
+          {health.length > 0 && (
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="bg-card border border-border rounded-xl overflow-hidden"
+            >
+              <div className="flex items-center gap-3 p-4 border-b border-border bg-muted/30">
+                <Activity size={20} className="text-muted-foreground" />
+                <div className="flex-1">
+                  <h2 className="font-semibold text-foreground">
+                    Integration health
+                  </h2>
+                  <p className="text-xs text-muted-foreground">
+                    What the background loops last saw
+                  </p>
+                </div>
+                <button
+                  onClick={refreshHealth}
+                  className="text-xs text-primary hover:underline"
+                >
+                  Refresh
+                </button>
+              </div>
+
+              <div className="divide-y divide-border">
+                {health.map((entry) => (
+                  <div key={entry.service} className="p-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-2">
+                        {entry.healthy ? (
+                          <Check
+                            size={14}
+                            className="text-green-600 dark:text-green-400 shrink-0"
+                          />
+                        ) : (
+                          <AlertTriangle
+                            size={14}
+                            className="text-yellow-600 dark:text-yellow-400 shrink-0"
+                          />
+                        )}
+                        <span className="font-medium text-foreground capitalize">
+                          {entry.service}
+                        </span>
+                      </div>
+                      <span className="text-xs text-muted-foreground">
+                        last worked {timeAgo(entry.last_success_at)}
+                      </span>
+                    </div>
+
+                    {/* The error is shown only while it is the current state.
+                        A message from a failure that has since recovered
+                        would read as a live problem. */}
+                    {!entry.healthy && (
+                      <div className="mt-2 rounded-lg bg-yellow-500/10 px-2.5 py-2">
+                        <p className="text-xs text-foreground">
+                          {entry.consecutive_failures} failed attempt
+                          {entry.consecutive_failures === 1 ? "" : "s"} in a
+                          row, most recently{" "}
+                          {timeAgo(entry.last_failure_at)}.
+                        </p>
+                        {entry.last_error && (
+                          <p className="mt-1 font-mono text-[11px] text-muted-foreground break-words">
+                            {entry.last_error}
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </motion.div>
+          )}
 
           {/* Other Settings Sections */}
           {settingsSections.map((section) => (

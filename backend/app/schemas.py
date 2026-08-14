@@ -441,6 +441,37 @@ class MergeActionResult(BaseModel):
     errors: list[str] = []
 
 
+class IntegrationHealthEntry(BaseModel):
+    """
+    Whether one integration is working, as far as the loops can tell.
+
+    `healthy` is a streak judgement, not a live probe: one failed poll is
+    ordinary (a token refresh races, a request times out), and only a run of
+    them is a condition someone has to act on.
+    """
+    service: str
+    healthy: bool
+    consecutive_failures: int = 0
+    last_success_at: datetime | None = None
+    last_failure_at: datetime | None = None
+    last_error: str | None = None
+
+
+class FindingDeltaSummary(BaseModel):
+    """
+    What moved between the previous analysis of a pull request and this one.
+
+    Findings are identified by file and title rather than line number: an edit
+    above a finding shifts it, and a shifted finding is the same finding.
+
+    "Resolved" means the finding is no longer reported, which is not the same
+    as fixed -- deleting the file resolves one too. The rendering says so.
+    """
+    resolved: list[str] = []
+    persisting: list[str] = []
+    introduced: list[str] = []
+
+
 class PRAnalysisResult(BaseModel):
     """Result of the full PR analysis pipeline."""
     context: PRContext
@@ -465,6 +496,14 @@ class PRAnalysisResult(BaseModel):
         description="Each pipeline step and whether it ran, was skipped, or failed",
     )
     merge_actions: MergeActionResult | None = None
+    # How this run's findings compare with the previous run's on the same pull
+    # request. Rendered into the comment so a re-review can start from what
+    # moved. Empty on a first analysis, which has nothing to compare against.
+    delta: FindingDeltaSummary | None = None
+    # How many findings were withheld because someone dismissed them. Reported
+    # in the comment rather than silently applied: a scanner that quietly stops
+    # mentioning things is worse than one that never mentioned them.
+    suppressed_count: int = 0
     errors: list[str] = []
 
 

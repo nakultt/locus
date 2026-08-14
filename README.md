@@ -213,6 +213,8 @@ The response carries `webhook_url` and `webhook_secret`. **The secret is shown o
 
 To also track the senior-dev review loop, add the **Pull request reviews** event to the same webhook alongside **Pull requests**. Without it the queue stays empty — GitHub sends review verdicts as a separate event type.
 
+To dismiss a false positive with `@locus ignore <finding title>`, add the **Issue comments** event as well. GitHub delivers pull request comments under that event, so without it the commands are never received. The comment body is parsed by a fixed regex, not a model, and the widest thing a command can do is hide a finding on the pull request it was posted on.
+
 **6. Merge it.** On merge Locus transitions the Jira ticket, closes linked GitHub issues, and emails the test team a brief of what to verify. Configure the target status, QA addresses, and pinned context docs when registering the repo.
 
 ### Triggering without a webhook

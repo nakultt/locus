@@ -127,13 +127,106 @@ class PRJob(Base):
     error = Column(Text, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    # When the worker picked this job up. Without it a job that has been
+    # running for five seconds is indistinguishable from one orphaned an hour
+    # ago by a restart, and recovery cannot tell which to reclaim.
+    started_at = Column(DateTime(timezone=True), nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)
+    # How many times this job has been picked up. A job that kills the worker
+    # would otherwise be reclaimed, crash, and be reclaimed again forever --
+    # recovery turns one dropped job into an unkillable loop without this.
+    attempts = Column(Integer, nullable=False, default=0)
 
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     owner = relationship("User", back_populates="pr_jobs")
 
     def __repr__(self) -> str:
         return f"<PRJob(id={self.id}, repo={self.repo}, pr=#{self.pr_number}, status={self.status})>"
+
+
+class IntegrationHealth(Base):
+    """
+    Whether one service is actually working, per user.
+
+    The background loops swallow their own failures on purpose -- a dead Jira
+    must not stop the analysis -- which leaves a persistently broken
+    integration invisible. A Gmail token that expired on Monday is still
+    failing on Friday, and the only symptom is that QA replies stopped
+    arriving, which reads as nobody replying.
+
+    One row per (user, service). Rewritten in place rather than appended to:
+    the question is "is this working now", and a full attempt history would
+    grow without bound for a poller that runs every few minutes.
+    """
+
+    __tablename__ = "integration_health"
+
+    id = Column(Integer, primary_key=True, index=True)
+    service_name = Column(String(64), nullable=False, index=True)
+
+    last_success_at = Column(DateTime(timezone=True), nullable=True)
+    last_failure_at = Column(DateTime(timezone=True), nullable=True)
+    # Reset to zero on any success. One failure is normal; a streak is a
+    # condition someone has to act on.
+    consecutive_failures = Column(Integer, nullable=False, default=0)
+    last_error = Column(Text, nullable=True)
+
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+
+    def __repr__(self) -> str:
+        return (
+            f"<IntegrationHealth(service={self.service_name}, "
+            f"failures={self.consecutive_failures})>"
+        )
+
+
+class SuppressedFinding(Base):
+    """
+    A finding someone dismissed as not worth reporting.
+
+    Without this a false positive is permanent: the scan re-runs on every
+    push, the finding comes back, and the only way to silence it is to stop
+    reading the comment. That is the failure the confirmed/unverified split
+    exists to avoid, arrived at from the other direction.
+
+    Keyed by file and title rather than line, for the same reason
+    `finding_diff` is: an edit above a finding shifts it, and a suppression
+    keyed to a line would silently lapse the next time anyone touched the
+    file. Normalised on write so matching is a plain equality check.
+
+    Scoped to one pull request by default. A finding dismissed on someone
+    else's PR says nothing about this one, and a repo-wide suppression is a
+    bigger claim than "this instance is wrong" -- `scope` records which was
+    meant.
+    """
+
+    __tablename__ = "suppressed_findings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    repo = Column(String(255), nullable=False, index=True)
+    # Null for a repo-wide suppression, which applies to every pull request.
+    pr_number = Column(Integer, nullable=True, index=True)
+
+    # Normalised identity: lowercased, whitespace-collapsed.
+    file_path = Column(String(512), nullable=False)
+    title = Column(String(512), nullable=False)
+
+    # "pr" or "repo" -- what the person dismissing it meant to silence.
+    scope = Column(String(16), nullable=False, default="pr")
+    # GitHub login of whoever dismissed it, and why. Both are for the audit
+    # trail: a suppression with no author is indistinguishable from a bug.
+    suppressed_by = Column(String(255), nullable=True)
+    reason = Column(Text, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+
+    def __repr__(self) -> str:
+        return (
+            f"<SuppressedFinding(repo={self.repo}, pr=#{self.pr_number}, "
+            f"title={self.title!r})>"
+        )
 
 
 class QAThread(Base):

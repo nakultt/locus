@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 import httpx
 
 from app.schemas import (
+    FindingDeltaSummary,
     FindingSource,
     LinkedIssue,
     PipelineStage,
@@ -32,7 +33,14 @@ from app.schemas import (
     StageState,
     ToolInvocation,
 )
-from app.services import github_pr, google_docs_context, linking, search_terms
+from app.services import (
+    finding_diff,
+    github_pr,
+    google_docs_context,
+    linking,
+    search_terms,
+    suppression,
+)
 from app.services.security_scan import (
     FIX_WORTHY_PRIORITIES,
     FIX_WORTHY_SEVERITIES,
@@ -691,6 +699,19 @@ def render_pr_comment(result: PRAnalysisResult) -> str:
     ctx = result.context
     parts: list[str] = ["## 🧭 Locus PR Context", ""]
 
+    # What moved since the last run, first: on a re-review this is the only
+    # part someone needs, and burying it under context they already read on
+    # round one is what makes a long comment go unread.
+    if result.delta is not None:
+        movement = finding_diff.render(finding_diff.FindingDelta(
+            resolved=result.delta.resolved,
+            persisting=result.delta.persisting,
+            introduced=result.delta.introduced,
+            has_baseline=True,
+        ))
+        if movement:
+            parts.append(movement)
+
     # Related tickets
     if ctx.tickets:
         parts.append("### Related tickets")
@@ -781,8 +802,21 @@ def render_pr_comment(result: PRAnalysisResult) -> str:
             parts.append(f"- {error}")
         parts.append("\n</details>\n")
 
+    # Dismissed findings are disclosed, never silently dropped. A scanner that
+    # quietly stops mentioning things is worse than one that never mentioned
+    # them, because the silence is indistinguishable from a clean run.
+    if result.suppressed_count:
+        parts.append(
+            f"<sub>{result.suppressed_count} finding(s) hidden by "
+            f"`@locus ignore`.</sub>\n"
+        )
+
     parts.append("---")
-    parts.append("<sub>Posted by Locus. Updated in place on each push.</sub>")
+    parts.append(
+        "<sub>Posted by Locus. Updated in place on each push. "
+        "Reply `@locus ignore <finding title>` to dismiss a false positive."
+        "</sub>"
+    )
 
     return "\n".join(parts)
 
@@ -844,6 +878,8 @@ async def analyze_pull_request(
     accumulated_context: str | None = None,
     cached_slack: list[dict] | None = None,
     slack_searched_at: datetime | None = None,
+    previous_findings: dict | None = None,
+    suppressed: set[tuple[str, str]] | None = None,
 ) -> PRAnalysisResult:
     """
     Run the full PR analysis pipeline.
@@ -1270,6 +1306,31 @@ async def analyze_pull_request(
         stages=stages,
         errors=errors,
     )
+    # Findings someone has already dismissed. Applied before the delta is
+    # computed, so a suppression does not read as "no longer reported" -- it
+    # was reported and rejected, which is a different thing.
+    if suppressed:
+        withheld = suppression.apply(result, suppressed)
+        result.suppressed_count = withheld
+        if withheld:
+            _stage(stages, "suppression", "Apply dismissed findings", "read",
+                   StageState.done, f"{withheld} finding(s) withheld")
+
+    # What moved since the previous run on this pull request. Computed before
+    # the comment is rendered, because the comment leads with it.
+    if previous_findings is not None:
+        try:
+            movement = finding_diff.compare(result, previous_findings)
+            if movement.has_baseline and not movement.is_empty:
+                result.delta = FindingDeltaSummary(
+                    resolved=movement.resolved,
+                    persisting=movement.persisting,
+                    introduced=movement.introduced,
+                )
+        except Exception as e:
+            # A comparison that fails must not cost the findings it annotates.
+            errors.append(f"Could not compare with the previous run: {e}")
+
     result.summary = render_slack_summary(result)
 
     # 6. Write back to the PR
