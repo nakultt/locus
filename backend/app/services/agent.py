@@ -253,7 +253,8 @@ def build_tools(
     if "meet" in integration_configs:
         config = integration_configs["meet"]
         meet_tools = get_meet_tools(
-            credentials=config.get("credentials", {})
+            credentials=config.get("credentials", {}),
+            timezone=timezone,
         )
         tools.extend(meet_tools)
     

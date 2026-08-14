@@ -9,33 +9,8 @@ import {
   type IntegrationHealthEntry,
   type LLMStatus,
 } from "@/lib/api";
+import { timeAgo } from "@/lib/datetime";
 
-/**
- * "3 minutes ago" — enough to tell a live poller from one that stopped.
- *
- * "never" is a real answer here, not a missing value: a service with a
- * failure streak and no successful call has never worked.
- */
-const timeAgo = (iso?: string | null): string => {
-  if (!iso) return "never";
-
-  const seconds = (Date.now() - new Date(iso).getTime()) / 1000;
-  if (!Number.isFinite(seconds)) return "unknown";
-  if (seconds < 60) return "just now";
-
-  const scales: [number, string][] = [
-    [86400, "day"],
-    [3600, "hour"],
-    [60, "minute"],
-  ];
-  for (const [size, label] of scales) {
-    if (seconds >= size) {
-      const n = Math.round(seconds / size);
-      return `${n} ${label}${n === 1 ? "" : "s"} ago`;
-    }
-  }
-  return "just now";
-};
 
 const Settings = () => {
   const [isDark, setIsDark] = useState(false);

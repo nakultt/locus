@@ -12,6 +12,12 @@ from langchain_core.tools import BaseTool, tool
 from pydantic import BaseModel, Field
 
 from app.services.credential_context import CredentialProxy
+from app.services.datetimes import (
+    DEFAULT_TIMEZONE,
+    now_in,
+    parse_datetime,
+    to_google_datetime,
+)
 
 # Store credentials at module level for tool access
 # Task-local so concurrent users cannot see each other's credentials.
@@ -109,40 +115,31 @@ def _get_auth_headers() -> dict | None:
     }
 
 
+def _meeting_timezone() -> str:
+    """The zone this user's meetings are booked in."""
+    return _meet_config.get("timezone") or DEFAULT_TIMEZONE
+
+
 def _parse_datetime(dt_string: str) -> datetime:
-    """Parse datetime string to datetime object."""
-    dt_string = dt_string.strip()
-    
-    # Handle natural language
-    if "tomorrow" in dt_string.lower():
-        base = datetime.now() + timedelta(days=1)
-        if "2pm" in dt_string.lower() or "14:00" in dt_string:
-            return base.replace(hour=14, minute=0, second=0, microsecond=0)
-        elif "3pm" in dt_string.lower() or "15:00" in dt_string:
-            return base.replace(hour=15, minute=0, second=0, microsecond=0)
-        elif "10am" in dt_string.lower() or "10:00" in dt_string:
-            return base.replace(hour=10, minute=0, second=0, microsecond=0)
-        else:
-            return base.replace(hour=9, minute=0, second=0, microsecond=0)
-    
-    if "today" in dt_string.lower():
-        base = datetime.now()
-        if "2pm" in dt_string.lower() or "14:00" in dt_string:
-            return base.replace(hour=14, minute=0, second=0, microsecond=0)
-        elif "3pm" in dt_string.lower() or "15:00" in dt_string:
-            return base.replace(hour=15, minute=0, second=0, microsecond=0)
-        else:
-            return base.replace(hour=9, minute=0, second=0, microsecond=0)
-    
-    # Try ISO format
-    for fmt in ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"]:
-        try:
-            return datetime.strptime(dt_string, fmt)
-        except ValueError:
-            continue
-    
-    # Default: 1 hour from now
-    return datetime.now() + timedelta(hours=1)
+    """
+    Parse a start time into an aware datetime in the user's timezone.
+
+    This used to be a hand-rolled parser that recognised exactly three times
+    -- "2pm", "3pm", "10am" -- and silently defaulted everything else to 9am,
+    building naive datetimes from the server clock which were then labelled
+    UTC. On a UTC host every meeting an IST user booked landed 5h30m off, and
+    nothing failed: the event was created and only the wall clock disagreed.
+
+    `datetimes.parse_datetime` is the tested implementation of the same job.
+    It returns None rather than guessing when no time can be read, so the
+    fallback here is explicit -- an hour from now, in the user's zone.
+    """
+    tz = _meeting_timezone()
+    parsed = parse_datetime(dt_string, timezone_name=tz)
+    if parsed is not None:
+        return parsed
+
+    return now_in(tz) + timedelta(hours=1)
 
 
 @tool("meet_create_meeting", args_schema=CreateMeetingInput)
@@ -175,14 +172,11 @@ def meet_create_meeting(
         event = {
             "summary": title,
             "description": description,
-            "start": {
-                "dateTime": start_dt.isoformat(),
-                "timeZone": "UTC"
-            },
-            "end": {
-                "dateTime": end_dt.isoformat(),
-                "timeZone": "UTC"
-            },
+            # The zone travels with the timestamp rather than being converted
+            # to UTC, so Google applies the correct offset and a recurring
+            # event stays correct across a DST shift.
+            "start": to_google_datetime(start_dt, _meeting_timezone()),
+            "end": to_google_datetime(end_dt, _meeting_timezone()),
             "conferenceData": {
                 "createRequest": {
                     "requestId": str(uuid.uuid4()),
@@ -228,7 +222,7 @@ def meet_create_meeting(
                 
                 output = f"""✅ Meeting created successfully!
 🎥 Title: {title}
-🕐 {start_dt.strftime('%B %d, %Y at %I:%M %p')} - {end_dt.strftime('%I:%M %p')} UTC
+🕐 {start_dt.strftime('%B %d, %Y at %I:%M %p')} - {end_dt.strftime('%I:%M %p')} ({_meeting_timezone()})
 👥 Attendees: {attendee_list}
 🆔 Event ID: {event_id}"""
                 
@@ -246,19 +240,26 @@ def meet_create_meeting(
         return f"❌ Error creating meeting: {str(e)}"
 
 
-def get_meet_tools(credentials: dict[str, Any] = None) -> list[BaseTool]:
+def get_meet_tools(
+    credentials: dict[str, Any] = None,
+    timezone: str | None = None,
+) -> list[BaseTool]:
     """
     Get LangChain tools for Google Meet integration.
-    
+
     Args:
         credentials: OAuth credentials dict containing access_token, refresh_token, etc.
-        
+        timezone: The user's IANA timezone. Times are parsed and sent in this
+            zone; without it a meeting is booked at the server's offset, which
+            put every IST user's meeting 5h30m out on a UTC host.
+
     Returns:
         List of Google Meet tools
     """
-    
+
     import os
     _meet_config.set({
+        "timezone": timezone or DEFAULT_TIMEZONE,
         "credentials": credentials,
         "client_id": os.getenv("GOOGLE_CLIENT_ID", ""),
         "client_secret": os.getenv("GOOGLE_CLIENT_SECRET", ""),
