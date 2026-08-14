@@ -575,11 +575,106 @@ change and a noise filter, and the value is lower than the delta message.
 
 ---
 
-## Phase 6 — Before charging money
+## Phase 6 — Task dashboard
+
+The dashboard today is a **record**, not a **worklist**. It answers "what
+happened on PR #42" — you pick a pull request and expand it. The question a
+developer actually has is the inverse: "across everything I have open, what is
+waiting on me?" Nothing answers that. Finding the two PRs that need action
+means expanding six.
+
+Everything needed is already stored. This phase is aggregation and
+presentation, not new plumbing.
+
+### 6.0 Task-level, not PR-level — and why it depends on 5.2
+
+The unit a developer thinks in is the **task** — the Jira ticket or GitHub
+issue — not the pull request. One task routinely spans several PRs: the
+feature, the fix after QA rejected it, the follow-up.
+
+Everything in the system today is keyed by `(repo, pr_number)`. A task-level
+dashboard is therefore **blocked on 5.2** (ticket keying); without it, the same
+piece of work appears as three unrelated rows with no way to tell they are one
+thing.
+
+Build 5.2 first. A PR-level version is possible sooner and is strictly worse:
+it shows a task that has been round-tripping for two weeks as three separate
+young items.
+
+### 6.1 The organizing principle: who is blocked
+
+Sort by **whether the ball is with you**, not by PR, repo, or recency.
+
+Two sections. *Needs you* is the whole point of the page. *Waiting on someone
+else* is collapsed by default — visible so nothing feels lost, but not
+competing for attention with things that can be acted on.
+
+Within *needs you*, escalate by **staleness rather than severity**. A task on
+round five for three days is a conversation that is not converging, which is
+precisely the signal nobody sees today. That is what the round counter was
+built for and where it earns its keep.
+
+### 6.2 Sources — start narrow
+
+Every item must be something a person can act on now:
+
+| Source | Item | Where it comes from |
+|---|---|---|
+| Review loop | Reviewer requested changes | `PRReview.pending_asks` + the round's verbatim body |
+| Testing loop | QA reported broken | `CommunicationEvent` with `outcome='broken'` |
+| Auto-merge | Held on something a human must fix | Gate blockers: conflict, red CI, confirmed finding, P1 |
+| Delivery | A message failed to send | `CommunicationEvent.succeeded = 0` |
+
+Nothing else, initially. The risk in this phase is **precision, not
+complexity**: a list that shows things which do not actually need you is
+ignored within a week, and once ignored it is very hard to win back. Add
+sources only when someone asks for one.
+
+### 6.3 Show the words, not just the label
+
+Each item carries the asker's own sentence, not only the model-written
+checklist. The checklist is for scanning; the quote is for acting.
+
+Rank **humans above the bot**. "@senior-dev: add a test" and "P1 finding:
+possible null deref" are not the same weight — a person asked, a model
+guessed. Styling them identically teaches people to skim both.
+
+### 6.4 One endpoint
+
+`GET /webhooks/worklist` returning the aggregated items across all repos for
+the authenticated user, already ordered. Ordering is a server concern: the
+client should not be able to disagree with the API about what is most urgent.
+
+Reuses the existing per-resource 404 rule and `owner_id` scoping.
+
+### 6.5 What is deliberately not built
+
+Recorded because this is where dashboards usually go wrong, and the reasons
+are easy to lose.
+
+**No mark-as-done checkbox.** It duplicates state GitHub already owns and goes
+stale within minutes. Derive an item's presence instead: the developer pushes,
+the round advances, the item disappears on its own. Derived state beats tracked
+state.
+
+**No read/unread.** A second state machine to keep in sync with the first, and
+it will drift.
+
+**No new notification channel.** Slack already pings. This page's job is the
+*durable* view — Slack scrollback loses things, and "what is still outstanding"
+must survive scrolling past it.
+
+**No cross-user view.** One person's worklist. A team view is a different
+product with different access questions, and building it early would force
+those questions before there is a reason to answer them.
+
+---
+
+## Phase 7 — Before charging money
 
 Ordered by what would lose a customer first.
 
-### 6.1 Decide when tickets and issues close
+### 7.1 Decide when tickets and issues close
 
 **This is a product decision, not an implementation task, and it is open.**
 
@@ -594,7 +689,7 @@ conservative and never shows a closed ticket for something that turned out
 broken. Both are defensible. They are different products, and the choice
 changes `merge_actions` and `qa_feedback` together.
 
-### 6.2 One live end-to-end run
+### 7.2 One live end-to-end run
 
 No part of the PR agent has run against live GitHub, Jira, and Slack
 credentials together. Every leg is unit-tested and the full lifecycle has been
@@ -604,7 +699,7 @@ response-shape handling for those three is written against documented APIs.
 This is the single largest risk to a paying customer and it needs one real
 repository, one real Jira project, and one real Slack workspace, once.
 
-### 6.3 Row locking
+### 7.3 Row locking
 
 The job worker, the Gmail poller, and the auto-merge sweeper all assume a
 single process. Two instances double-process: two analyses per push, two QA
@@ -613,26 +708,7 @@ emails, two merge attempts.
 `SELECT ... FOR UPDATE SKIP LOCKED` on job claim, and an advisory lock around
 the sweep. Required before any HA or scale deployment.
 
-### 6.4 "Needs you" dashboard
-
-The dashboard is a record, not a worklist. It answers "what happened on PR
-#42"; the question a developer has is "across everything open, what is waiting
-on me". Today that means expanding every PR to find the two that need action.
-
-One aggregated list above the review queue, sourced from outstanding
-changes-requested asks, failed QA verdicts, and held auto-merges. Sorted by who
-is blocked rather than by PR, and escalating on staleness — a PR on round five
-for three days is the signal nobody currently sees.
-
-Deliberately excluded: no mark-as-done checkbox (it duplicates GitHub state and
-goes stale; derive presence instead), no read/unread state (a second state
-machine to keep in sync), and no new notification channel (Slack already
-notifies; the dashboard's job is the durable view).
-
-The risk here is precision rather than complexity. A list that shows things not
-actually needing you is ignored within a week, so it should start narrow.
-
-### 6.5 Senior dev email notifications
+### 7.4 Senior dev email notifications
 
 Reviewer email addresses are collected and displayed but never used to send.
 Review notifications go to Slack only.
