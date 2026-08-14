@@ -305,7 +305,7 @@ loops' current state, who is reachable where, and every message — with its act
 | Shown | Includes |
 |---|---|
 | Searched | The Slack query, and whether it matched. A search that found nothing looks identical to one that never ran without this |
-| Received | Prior discussion found, review bodies, tester replies — each with the verdict it produced |
+| Received | Prior discussion found, linked issue text, review bodies, tester replies — each with the verdict it produced |
 | Sent | Review pings, the QA Slack post, the QA email with its subject — verbatim, as the channel saw it |
 
 Messages that failed to send are shown and marked, since an undelivered QA notification

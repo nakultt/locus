@@ -1117,6 +1117,13 @@ async def run_pr_job(job_id: int) -> None:
             context_doc_ids=settings.context_doc_ids,
         )
 
+        # Linked and mentioned GitHub issues, with the text of each.
+        if comms.get("issues"):
+            comms_log.record_issues(
+                db, owner_id=job.owner_id, repo=job.repo,
+                pr_number=job.pr_number, issues=comms["issues"],
+            )
+
         # What was searched for in Slack, and every message it returned.
         if comms.get("slack_queries") or comms.get("slack_matches"):
             comms_log.record_search_matches(
