@@ -211,6 +211,8 @@ The response carries `webhook_url` and `webhook_secret`. **The secret is shown o
 
 **5. Open a PR.** Analysis runs on `opened`, `reopened`, `synchronize`, and `ready_for_review`. Drafts are skipped.
 
+To also track the senior-dev review loop, add the **Pull request reviews** event to the same webhook alongside **Pull requests**. Without it the queue stays empty — GitHub sends review verdicts as a separate event type.
+
 **6. Merge it.** On merge Locus transitions the Jira ticket, closes linked GitHub issues, and emails the test team a brief of what to verify. Configure the target status, QA addresses, and pinned context docs when registering the repo.
 
 ### Triggering without a webhook
@@ -265,6 +267,68 @@ worker picks up job
 | QA email | Emails the test team a model-written brief of what to verify |
 
 **Transitions are forward-only.** A target status that would move a ticket backwards — `Done` → `In Progress` — is refused rather than applied, so a misconfigured status cannot drag a team's board backwards. Unrecognized statuses pass through, since custom workflows are common and refusing everything unknown would make the feature unusable.
+
+### Senior dev review loop
+
+Between "PR opened" and "PR merged" sits the part that takes the time: a senior dev asks for
+changes, the author pushes, the senior dev looks again — often several times. Locus tracks
+that loop, because GitHub does not: each review arrives as an isolated event, and nothing in
+any payload says how long this has been going on.
+
+| State | Meaning |
+|---|---|
+| `awaiting_review` | Waiting on a reviewer |
+| `changes_requested` | Waiting on the author. **Not terminal** — this is where the loop spends most of its time |
+| `approved` | Clear to merge |
+| `merged` | Loop closed; QA takes over |
+
+The **round number** is what makes a stalled back-and-forth visible. A PR on round five is a
+conversation that is not converging, which is exactly what nobody notices without a record.
+
+Rounds advance on one specific transition: a push that follows a changes-requested review. A
+push to a PR nobody has reviewed yet is ordinary development, and counting it would turn the
+round number into a commit counter. A `commented` review is recorded in the history but moves
+nothing — it carries no verdict, and letting drive-by remarks bump the count would make a
+converging review look stuck.
+
+Each changes-requested review is summarized into a checklist of what was asked, shown against
+the PR in the dashboard. It is advisory; the reviewer's own words are stored verbatim
+alongside and are canonical. The summarizer has no tools bound and returns nothing when the
+model is unavailable — an empty checklist reads as "see the review", where an invented one
+would not.
+
+#### Auto-merge on approval
+
+Optional, **off by default**. When enabled, an approving review merges the PR — and because
+Locus merges through GitHub's API, GitHub fires the same `closed`+`merged` webhook a human
+merge would, so the post-merge actions (Jira, issues, QA email) run through the ordinary path
+with nothing special-cased.
+
+An approval alone is not enough. This is the only thing that writes to your default branch
+with no human in the loop, so the gate is checked independently of the review:
+
+| Gate | Why |
+|---|---|
+| CI green | A reviewer can approve before the checks finish. Merging on pending makes approval race CI |
+| No merge conflict | GitHub returning `null` mergeability means *unknown*, which holds rather than assumes |
+| No confirmed security finding | Deterministic rule matches, not opinions — merging over one contradicts the confirmed/unverified split |
+| No P1 review finding | P1 means "do not merge this" by definition |
+
+Unverified findings and P2/P3 do **not** block. They are advisory, and blocking on a model's
+opinion would make the feature unusable — and would hand an unverified finding authority the
+confirmed/unverified split exists to deny it.
+
+Anything held is reported to Slack with every reason at once, so a fixed CI failure does not
+lead to a fresh surprise on the next round. An approved PR that quietly stays open reads as a
+broken feature, so the loop always says why.
+
+**Jira is not moved backwards when changes are requested.** That is a real backward step, but
+transitions are forward-only so a misconfigured status cannot drag a team's board into an
+earlier stage. The review loop notifies and records; the board follows the merge.
+
+Configure the reviewers and the notification channel per repo, or account-wide under Default
+settings. The reviewer list is who gets pinged, not who is permitted to review — GitHub does
+not restrict that, and a review from anyone else is recorded like any other.
 
 ### QA feedback loop
 
@@ -348,6 +412,8 @@ classifier has no tools bound — it returns a verdict and nothing else.
 | `POST` | `/webhooks/repos` | Register a repo; returns the webhook secret once |
 | `GET` | `/webhooks/repos` | List registered repos |
 | `DELETE` | `/webhooks/repos/{owner}/{name}` | Unregister |
+| `GET` | `/webhooks/reviews` | Pull requests in the review loop; `?include_merged=true` for all |
+| `GET` | `/webhooks/reviews/{owner}/{name}/{pr_number}` | One PR's full round history |
 | `POST` | `/webhooks/analyze/{owner}/{name}/{pr_number}` | Analyze a PR now, no webhook needed |
 | `GET` | `/webhooks/jobs` | Recent analysis jobs and their errors |
 | `GET` | `/webhooks/jobs/{job_id}` | One run with findings, context, and tools used |

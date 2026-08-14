@@ -28,6 +28,13 @@ class EffectiveSettings:
     jira_done_status: str = "Done"
     close_issues_on_merge: bool = True
     context_doc_ids: list[str] = field(default_factory=list)
+    # GitHub logins expected to review this repo.
+    reviewers: list[str] = field(default_factory=list)
+    # Where review-loop notifications go. Falls back to slack_channel only if
+    # explicitly unset, so a team can keep review pings out of the summary feed.
+    review_slack_channel: str | None = None
+    auto_merge_on_approval: bool = False
+    merge_method: str = "squash"
 
     # Per key: "repo", "defaults", or "unset". The dashboard shows this so a
     # skipped stage can be traced to the setting responsible.
@@ -116,5 +123,41 @@ def resolve_settings(
         _lines(registration.context_doc_ids) if registration else []
     )
     resolved.sources["context_doc_ids"] = "repo" if resolved.context_doc_ids else "unset"
+
+    resolved.reviewers = pick(
+        "reviewers",
+        _lines(registration.reviewers) if registration else [],
+        _lines(defaults.reviewers) if defaults else [],
+        [],
+    )
+
+    # Falls back to the summary channel last: a review request with nowhere to
+    # go is worse than one in a busy channel.
+    resolved.review_slack_channel = pick(
+        "review_slack_channel",
+        (registration.review_slack_channel or "").strip() if registration else "",
+        (defaults.review_slack_channel or "").strip() if defaults else "",
+        resolved.slack_channel,
+    )
+
+    # Same shape as close_issues_on_merge: a boolean whose False is a real
+    # choice, so the repo row wins whenever it exists rather than when truthy.
+    # The final fallback is off -- an unconfigured repo must never auto-merge.
+    if registration is not None:
+        resolved.auto_merge_on_approval = bool(registration.auto_merge_on_approval)
+        resolved.sources["auto_merge_on_approval"] = "repo"
+    elif defaults is not None:
+        resolved.auto_merge_on_approval = bool(defaults.auto_merge_on_approval)
+        resolved.sources["auto_merge_on_approval"] = "defaults"
+    else:
+        resolved.auto_merge_on_approval = False
+        resolved.sources["auto_merge_on_approval"] = "unset"
+
+    resolved.merge_method = pick(
+        "merge_method",
+        (registration.merge_method or "") if registration else "",
+        (defaults.merge_method or "") if defaults else "",
+        "squash",
+    )
 
     return resolved
