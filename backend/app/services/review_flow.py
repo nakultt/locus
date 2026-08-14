@@ -343,18 +343,26 @@ def format_review_notification(
     asks: list[str],
     expected_reviewers: list[str],
     changed_files: list[dict] | None = None,
+    doc_url: str | None = None,
 ) -> str:
     """
     Build the Slack message for one review event.
 
     Addressed to whoever the ball is now with: the author on
     changes-requested, the reviewers on a request.
+
+    The written report is linked on the messages that ask someone to read the
+    change -- the review request and each resubmission. It is deliberately not
+    added to the approval or changes-requested messages: those report a
+    verdict someone has already reached, and a link to the analysis they just
+    finished reading is noise.
     """
     changed_files = changed_files or []
     pr_ref = f"{review.repo}#{review.pr_number}"
     link = f"<{review.pr_url}|{pr_ref}>" if review.pr_url else pr_ref
     title = f" — {review.pr_title}" if review.pr_title else ""
     who = f"@{reviewer}" if reviewer else "a reviewer"
+    report = f"\n:page_facing_up: <{doc_url}|Full analysis>" if doc_url else ""
 
     if outcome is schemas.ReviewOutcome.approved:
         return f":white_check_mark: {who} approved {link}{title} — ready to merge."
@@ -372,13 +380,13 @@ def format_review_notification(
 
     if outcome is schemas.ReviewOutcome.review_requested:
         mentions = " ".join(f"@{r}" for r in expected_reviewers) or "reviewers"
-        return f":eyes: Review requested on {link}{title} — {mentions}"
+        return f":eyes: Review requested on {link}{title} — {mentions}{report}"
 
     if outcome is schemas.ReviewOutcome.resubmitted:
         mentions = " ".join(f"@{r}" for r in expected_reviewers) or "reviewers"
         lines = [
             f":arrows_counterclockwise: {link}{title} ready for "
-            f"round {review.round_number} — {mentions}"
+            f"round {review.round_number} — {mentions}{report}"
         ]
         # What the reviewer asked for last time, so re-review is "check these
         # two things" rather than "read the whole diff again". This is the

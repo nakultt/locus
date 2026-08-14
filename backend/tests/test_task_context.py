@@ -77,7 +77,7 @@ class TestTicketScoping:
         assert [e.body for e in events] == ["mine"]
 
 
-class TestFreshnessWindow:
+class TestCachedSearch:
     def _searched(self, db, *, hours_ago: float, ticket=TICKET):
         comms_log.record(
             db, owner_id=OWNER, repo=REPO, pr_number=42, ticket_key=ticket,
@@ -94,53 +94,235 @@ class TestFreshnessWindow:
             event.created_at = stamp
         db.commit()
 
-    def test_a_recent_search_is_reused_with_its_matches(self, db):
+    def test_a_cached_search_returns_its_matches_and_a_watermark(self, db):
         """
         Reusing the matches matters, not merely skipping the call. Skipping
         alone would hand the reviewer empty context, which is worse than the
-        redundant search.
+        redundant search. The watermark is what makes the next search
+        incremental instead of a full re-fetch.
         """
         self._searched(db, hours_ago=1)
 
-        fresh, matches = comms_log.recent_search(
-            db, owner_id=OWNER, repo=REPO, pr_number=42,
-            ticket_key=TICKET, within_hours=12,
+        searched_at, matches = comms_log.cached_search(
+            db, owner_id=OWNER, repo=REPO, pr_number=42, ticket_key=TICKET,
         )
 
-        assert fresh
+        assert searched_at is not None
         assert [m["text"] for m in matches] == ["cap retries at 3"]
         assert matches[0]["participant"] == "priya"
 
-    def test_a_stale_search_is_not_reused(self, db):
+    def test_an_old_search_is_still_reused(self, db):
+        """
+        There is no freshness window. A requirement debated two days ago is
+        still the requirement, and the incremental search from the watermark
+        is what picks up anything said since -- a window would instead hide
+        new discussion until it expired.
+        """
         self._searched(db, hours_ago=48)
 
-        fresh, _ = comms_log.recent_search(
-            db, owner_id=OWNER, repo=REPO, pr_number=42,
-            ticket_key=TICKET, within_hours=12,
+        searched_at, matches = comms_log.cached_search(
+            db, owner_id=OWNER, repo=REPO, pr_number=42, ticket_key=TICKET,
         )
 
-        assert not fresh
+        assert searched_at is not None
+        assert [m["text"] for m in matches] == ["cap retries at 3"]
 
-    def test_never_searched_is_not_fresh(self, db):
-        fresh, matches = comms_log.recent_search(
-            db, owner_id=OWNER, repo=REPO, pr_number=42,
-            ticket_key=TICKET, within_hours=12,
+    def test_never_searched_has_no_watermark(self, db):
+        """No watermark means a full search: an incremental one from an
+        unknown point would silently skip whatever fell before it."""
+        searched_at, matches = comms_log.cached_search(
+            db, owner_id=OWNER, repo=REPO, pr_number=42, ticket_key=TICKET,
         )
 
-        assert not fresh
+        assert searched_at is None
         assert matches == []
 
     def test_a_second_pr_on_the_ticket_reuses_the_first_search(self, db):
-        """This is what the ticket key buys: PR #57 does not search again."""
+        """This is what the ticket key buys: PR #57 inherits the discussion."""
         self._searched(db, hours_ago=1)
 
-        fresh, matches = comms_log.recent_search(
+        searched_at, matches = comms_log.cached_search(
             db, owner_id=OWNER, repo=REPO, pr_number=57,  # different PR
-            ticket_key=TICKET, within_hours=12,
+            ticket_key=TICKET,
         )
 
-        assert fresh
+        assert searched_at is not None
         assert len(matches) == 1
+
+    def test_a_message_recorded_twice_is_returned_once(self, db):
+        """The cache accumulates over rounds; the same message recorded by two
+        rounds' searches would otherwise read as two people saying it."""
+        self._searched(db, hours_ago=2)
+        for _ in range(2):
+            comms_log.record(
+                db, owner_id=OWNER, repo=REPO, pr_number=42, ticket_key=TICKET,
+                loop="context", direction="received", channel="slack",
+                participant="priya", target="eng", body="cap retries at 3",
+                permalink="https://slack.example/p1",
+            )
+
+        _, matches = comms_log.cached_search(
+            db, owner_id=OWNER, repo=REPO, pr_number=42, ticket_key=TICKET,
+        )
+
+        links = [m["permalink"] for m in matches if m["permalink"]]
+        assert links == ["https://slack.example/p1"]
+
+
+class TestIncrementalSlackSearch:
+    """
+    The watermark is what replaces the freshness window. A run reuses the
+    cache and asks Slack only for what was said since -- so new discussion is
+    picked up on the next run rather than waiting for a window to expire.
+    """
+
+    @staticmethod
+    def _payload(*messages: dict) -> dict:
+        return {"ok": True, "messages": {"matches": list(messages)}}
+
+    @staticmethod
+    def _message(ts: float, text: str) -> dict:
+        return {
+            "ts": str(ts),
+            "text": text,
+            "permalink": f"https://slack.example/{ts}",
+            "channel": {"name": "eng"},
+            "username": "priya",
+        }
+
+    @pytest.mark.asyncio
+    async def test_messages_at_or_before_the_watermark_are_dropped(self, monkeypatch):
+        """
+        `after:` narrows only to the day, so the day's earlier messages come
+        back too. They are already cached; recording them again would
+        duplicate the timeline.
+        """
+        from app.services import pr_agent
+
+        since = datetime(2026, 8, 14, 12, 0, tzinfo=UTC)
+        captured: list[str] = []
+
+        class _Response:
+            @staticmethod
+            def json() -> dict:
+                return TestIncrementalSlackSearch._payload(
+                    TestIncrementalSlackSearch._message(
+                        since.timestamp() - 60, "older, already cached"
+                    ),
+                    TestIncrementalSlackSearch._message(
+                        since.timestamp() + 60, "newer, not yet seen"
+                    ),
+                )
+
+        class _Client:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *_): return False
+            async def get(self, _url, **kwargs):
+                captured.append(kwargs["params"]["query"])
+                return _Response()
+
+        monkeypatch.setattr(pr_agent.httpx, "AsyncClient", lambda **_: _Client())
+
+        matches: list[dict] = []
+        threads = await pr_agent.search_slack_threads(
+            [TICKET], REPO, 42,
+            {"credentials": {"user_token": "xoxp-test"}},
+            title="Add retry logic", matches=matches, since=since,
+        )
+
+        assert [t.summary for t in threads] == ["newer, not yet seen"]
+        assert [m["text"] for m in matches] == ["newer, not yet seen"]
+        # Narrowed server-side, a day early because `after:` excludes its day.
+        assert all("after:2026-08-13" in q for q in captured)
+
+    @pytest.mark.asyncio
+    async def test_without_a_watermark_nothing_is_filtered(self, monkeypatch):
+        """A work item never searched gets a full search, not an incremental
+        one from an unknown point."""
+        from app.services import pr_agent
+
+        captured: list[str] = []
+
+        class _Response:
+            @staticmethod
+            def json() -> dict:
+                return TestIncrementalSlackSearch._payload(
+                    TestIncrementalSlackSearch._message(1_700_000_000, "old"),
+                    TestIncrementalSlackSearch._message(1_800_000_000, "new"),
+                )
+
+        class _Client:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *_): return False
+            async def get(self, _url, **kwargs):
+                captured.append(kwargs["params"]["query"])
+                return _Response()
+
+        monkeypatch.setattr(pr_agent.httpx, "AsyncClient", lambda **_: _Client())
+
+        threads = await pr_agent.search_slack_threads(
+            [TICKET], REPO, 42,
+            {"credentials": {"user_token": "xoxp-test"}}, title="Add retry logic",
+        )
+
+        assert {t.summary for t in threads} == {"old", "new"}
+        assert all("after:" not in q for q in captured)
+
+
+class TestTimelineInheritance:
+    """
+    The reviewer is given the ticket's cached Slack discussion every round.
+    A timeline showing only rows stamped with this PR's number would omit
+    context the run demonstrably used.
+    """
+
+    def test_sibling_pr_discussion_appears_marked(self, db):
+        comms_log.record(
+            db, owner_id=OWNER, repo=REPO, pr_number=42, ticket_key=TICKET,
+            loop="context", direction="received", channel="slack",
+            participant="priya", body="cap retries at 3",
+            permalink="https://slack.example/p1",
+        )
+        comms_log.record(
+            db, owner_id=OWNER, repo=REPO, pr_number=57, ticket_key=TICKET,
+            loop="review", direction="sent", channel="slack",
+            body="round 2 submitted",
+        )
+
+        events = comms_log.timeline(
+            db, owner_id=OWNER, repo=REPO, pr_number=57, ticket_key=TICKET,
+        )
+
+        by_body = {e.body: e for e in events}
+        assert by_body["cap retries at 3"].inherited is True
+        assert by_body["round 2 submitted"].inherited is False
+
+    def test_without_a_ticket_only_this_prs_own_rows_show(self, db):
+        comms_log.record(
+            db, owner_id=OWNER, repo=REPO, pr_number=42, ticket_key=TICKET,
+            loop="context", direction="received", channel="slack",
+            body="cap retries at 3", permalink="https://slack.example/p1",
+        )
+        comms_log.record(
+            db, owner_id=OWNER, repo=REPO, pr_number=57, ticket_key=TICKET,
+            loop="review", direction="sent", channel="slack", body="mine",
+        )
+
+        events = comms_log.timeline(db, owner_id=OWNER, repo=REPO, pr_number=57)
+        assert [e.body for e in events] == ["mine"]
+
+    def test_a_message_on_both_prs_is_not_shown_twice(self, db):
+        for pr in (42, 57):
+            comms_log.record(
+                db, owner_id=OWNER, repo=REPO, pr_number=pr, ticket_key=TICKET,
+                loop="context", direction="received", channel="slack",
+                body="cap retries at 3", permalink="https://slack.example/p1",
+            )
+
+        events = comms_log.timeline(
+            db, owner_id=OWNER, repo=REPO, pr_number=57, ticket_key=TICKET,
+        )
+        assert [e.body for e in events] == ["cap retries at 3"]
 
 
 class TestContextBrief:

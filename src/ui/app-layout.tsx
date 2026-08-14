@@ -10,7 +10,7 @@ import {
   X,
   Grid,
   CalendarClock,
-  GitPullRequest,
+  ClipboardList,
   PanelLeftClose,
   PanelLeft,
   Loader2,
@@ -66,7 +66,7 @@ const AppLayout = ({ children }: AppLayoutProps) => {
   const navItems = [
     { icon: Home, label: "Home", path: "/" },
     { icon: MessageSquare, label: "Chat", path: "/chatbot" },
-    { icon: GitPullRequest, label: "PR Agent", path: "/pr-agent" },
+    { icon: ClipboardList, label: "Tasks", path: "/tasks" },
     { icon: CalendarClock, label: "Scheduler", path: "/scheduler" },
     {
       icon: Grid,

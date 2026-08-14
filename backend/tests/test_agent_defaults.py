@@ -108,13 +108,38 @@ class TestRepoWins:
 
         assert resolved.close_issues_on_merge is False
 
-    def test_context_docs_stay_per_repo(self, db):
-        """They describe one codebase; there is no sensible global value."""
-        defaults(db, slack_channel="#web")
+    def test_context_docs_accumulate_rather_than_override(self, db):
+        """
+        The one setting that combines instead of overriding.
 
-        resolved = resolve_settings(db, 1, registration(context_doc_ids="doc1\ndoc2"))
+        The account-level documents are the standards that apply everywhere --
+        a style guide, a security policy. A repo that pins its own spec should
+        still be reviewed against those, so letting the repo value win would
+        silently drop them.
+        """
+        defaults(db, context_doc_ids="global1\nglobal2")
 
-        assert resolved.context_doc_ids == ["doc1", "doc2"]
+        resolved = resolve_settings(db, 1, registration(context_doc_ids="repo1"))
+
+        assert resolved.context_doc_ids == ["global1", "global2", "repo1"]
+        assert resolved.sources["context_doc_ids"] == "both"
+
+    def test_global_context_docs_reach_an_unregistered_repo(self, db):
+        """The case the whole defaults mechanism exists for."""
+        defaults(db, context_doc_ids="global1")
+
+        resolved = resolve_settings(db, 1, registration=None)
+
+        assert resolved.context_doc_ids == ["global1"]
+        assert resolved.sources["context_doc_ids"] == "defaults"
+
+    def test_a_document_listed_in_both_is_read_once(self, db):
+        """The reviewer reads these under a context budget; duplicates cost it."""
+        defaults(db, context_doc_ids="shared\nglobal1")
+
+        resolved = resolve_settings(db, 1, registration(context_doc_ids="shared"))
+
+        assert resolved.context_doc_ids == ["shared", "global1"]
 
 
 class TestIsolation:

@@ -12,6 +12,7 @@ produce a PR comment carrying the Jira context and the security findings.
 """
 
 import logging
+from datetime import datetime, timedelta
 
 import httpx
 
@@ -219,6 +220,7 @@ async def search_slack_threads(
     issue_numbers: list[int] | None = None,
     matches: list[dict] | None = None,
     queries_tried: list[str] | None = None,
+    since: datetime | None = None,
 ) -> list[RelatedSlackThread]:
     """
     Find Slack discussion about this work.
@@ -226,6 +228,12 @@ async def search_slack_threads(
     Queries run precise -> broad: quoted ticket keys and PR/issue references
     first, then a topic search built from the distinctive words in the title.
     Requires a user token (xoxp-); search.messages rejects bot tokens.
+
+    `since` makes the search incremental: only messages posted after it are
+    returned, so a run that already has cached discussion pays for the new
+    messages rather than re-fetching the whole history. Slack's `after:`
+    operator is date-granular and exclusive of the named day, so it is set a
+    day early and the exact cutoff is applied to each match's `ts`.
     """
     credentials = slack_config.get("credentials", {}) or {}
     user_token = credentials.get("user_token", "")
@@ -258,6 +266,14 @@ async def search_slack_threads(
         matches.clear()
     tried: list[str] = []
 
+    # Narrow server-side so the 5-result cap is spent on new messages rather
+    # than on history already in the cache. `after:` excludes the named day,
+    # so it is set one day before the cutoff; the precise filter is the `ts`
+    # comparison below.
+    after_operator = ""
+    if since is not None:
+        after_operator = f" after:{(since - timedelta(days=1)).strftime('%Y-%m-%d')}"
+
     async with httpx.AsyncClient(timeout=30.0) as client:
         for query in queries:
             # Queries are ordered precise -> broad. Once enough distinct
@@ -272,7 +288,11 @@ async def search_slack_threads(
                 response = await client.get(
                     "https://slack.com/api/search.messages",
                     headers={"Authorization": f"Bearer {user_token}"},
-                    params={"query": query, "count": 5, "sort": "timestamp"},
+                    params={
+                        "query": f"{query}{after_operator}",
+                        "count": 5,
+                        "sort": "timestamp",
+                    },
                 )
                 payload = response.json()
 
@@ -290,6 +310,20 @@ async def search_slack_threads(
                     permalink = match.get("permalink", "")
                     if not permalink or permalink in seen_permalinks:
                         continue
+
+                    # `after:` only narrows to the day. Drop anything at or
+                    # before the exact watermark -- it is already cached, and
+                    # recording it again would duplicate the message. A match
+                    # with an unreadable ts is kept: a duplicate is recoverable
+                    # in a way a silently dropped message is not.
+                    if since is not None:
+                        try:
+                            posted = float(match.get("ts") or 0)
+                        except (TypeError, ValueError):
+                            posted = 0.0
+                        if posted and posted <= since.timestamp():
+                            continue
+
                     seen_permalinks.add(permalink)
 
                     channel_name = match.get("channel", {}).get("name", "unknown")
@@ -657,6 +691,7 @@ async def analyze_pull_request(
     comms: dict | None = None,
     accumulated_context: str | None = None,
     cached_slack: list[dict] | None = None,
+    slack_searched_at: datetime | None = None,
 ) -> PRAnalysisResult:
     """
     Run the full PR analysis pipeline.
@@ -802,59 +837,72 @@ async def analyze_pull_request(
                 ticket_keys, repo, pr_number, context.title, branch,
                 [i.number for i in context.linked_issues],
             )
-            if cached_slack is not None:
-                # Searched recently for this work item. Reuse what it found
-                # rather than spending a Tier-2 call (~20/min) to be told the
-                # same thing -- discussion about a requirement does not change
-                # because the author pushed a fix.
-                context.slack_threads = [
-                    RelatedSlackThread(
-                        channel=m.get("channel") or "unknown",
-                        permalink=m.get("permalink"),
-                        message_count=1,
-                        summary=(m.get("text") or "")[:280],
-                        participants=[m["participant"]] if m.get("participant") else [],
-                    )
-                    for m in cached_slack
-                ]
-                _record(tool_calls, "slack", "slack_search",
-                        query="(reused recent search)",
-                        result_count=len(context.slack_threads))
-                _stage(stages, "slack_search", "Search Slack history", "read",
-                       StageState.done,
-                       f"{len(context.slack_threads)} thread(s), reused")
-                has_user_token = True
-            else:
-                slack_matches: list[dict] = []
-                slack_queries: list[str] = []
-                context.slack_threads = await search_slack_threads(
-                    ticket_keys,
-                    repo,
-                    pr_number,
-                    integration_configs["slack"],
-                    title=context.title,
-                    branch=branch,
-                    issue_numbers=[i.number for i in context.linked_issues],
-                    matches=slack_matches,
-                    queries_tried=slack_queries,
+            # Cached discussion is always reused -- a requirement debated
+            # yesterday is still the requirement. The search that follows is
+            # incremental from the cache's watermark, so it costs one call and
+            # picks up anything said since, which a freshness window would
+            # have hidden until it expired.
+            cached_threads = [
+                RelatedSlackThread(
+                    channel=m.get("channel") or "unknown",
+                    permalink=m.get("permalink"),
+                    message_count=1,
+                    summary=(m.get("text") or "")[:280],
+                    participants=[m["participant"]] if m.get("participant") else [],
                 )
-                if comms is not None:
-                    comms["slack_matches"] = slack_matches
-                    comms["slack_queries"] = slack_queries
-                has_user_token = bool(
-                    (integration_configs["slack"].get("credentials") or {})
-                    .get("user_token")
-                )
+                for m in (cached_slack or [])
+            ]
+
+            slack_matches: list[dict] = []
+            slack_queries: list[str] = []
+            new_threads = await search_slack_threads(
+                ticket_keys,
+                repo,
+                pr_number,
+                integration_configs["slack"],
+                title=context.title,
+                branch=branch,
+                issue_numbers=[i.number for i in context.linked_issues],
+                matches=slack_matches,
+                queries_tried=slack_queries,
+                since=slack_searched_at,
+            )
+            if comms is not None:
+                # Only the new messages are handed back to be recorded. The
+                # cached ones are already rows in the log; re-recording them
+                # would duplicate the timeline on every round.
+                comms["slack_matches"] = slack_matches
+                comms["slack_queries"] = slack_queries
+            has_user_token = bool(
+                (integration_configs["slack"].get("credentials") or {})
+                .get("user_token")
+            )
+
+            # Newest last, matching how the discussion actually read, and
+            # deduplicated in case a cached message resurfaces.
+            cached_links = {t.permalink for t in cached_threads if t.permalink}
+            context.slack_threads = cached_threads + [
+                t for t in new_threads
+                if not t.permalink or t.permalink not in cached_links
+            ]
+
+            if cached_threads:
+                _record(tool_calls, "slack", "slack_cache",
+                        query="(cached discussion for this work item)",
+                        result_count=len(cached_threads))
 
             _record(
                 tool_calls, "slack", "search_messages",
                 query=" | ".join(queries) if has_user_token else None,
-                result_count=len(context.slack_threads),
+                # What this search returned, not the merged total. A run that
+                # found nothing new should say so rather than report the
+                # cache's count as its own result.
+                result_count=len(new_threads),
                 succeeded=has_user_token,
                 detail=None if has_user_token else "No user token (xoxp-); search skipped",
                 matches=[
                     f"#{t.channel}: {(t.summary or '').replace(chr(10), ' ')[:120]}"
-                    for t in context.slack_threads
+                    for t in new_threads
                 ],
             )
         except Exception as e:
@@ -867,11 +915,26 @@ async def analyze_pull_request(
             has_token = bool(
                 (integration_configs["slack"].get("credentials") or {}).get("user_token")
             )
+            # Cached and new are reported separately. "6 thread(s)" alone
+            # hides whether this run learned anything, which is the question
+            # the stage exists to answer.
+            if not has_token:
+                detail = "no user token (xoxp-)"
+            elif cached_threads:
+                detail = (
+                    f"{len(cached_threads)} cached, "
+                    f"{len(new_threads)} new since "
+                    f"{slack_searched_at:%b %d %H:%M UTC}"
+                    if slack_searched_at else
+                    f"{len(cached_threads)} cached, {len(new_threads)} new"
+                )
+            else:
+                detail = f"{len(new_threads)} thread(s)"
+
             _stage(
                 stages, "slack_search", "Search Slack history", "read",
                 StageState.done if has_token else StageState.skipped,
-                f"{len(context.slack_threads)} thread(s)" if has_token
-                else "no user token (xoxp-)",
+                detail,
             )
     else:
         _stage(stages, "slack_search", "Search Slack history", "read",

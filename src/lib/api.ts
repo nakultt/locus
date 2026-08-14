@@ -74,29 +74,69 @@ export interface Message {
 
 // ============== Helper Functions ==============
 
-function getAuthToken(): string | null {
-  // Check localStorage first (Remember Me was checked)
-  const localUser = localStorage.getItem("locus_user");
-  if (localUser) {
+const STORAGE_KEY = "locus_user";
+const REMEMBER_KEY = "locus_remember";
+
+/**
+ * A request the backend rejected for identity reasons -- a missing, invalid,
+ * or expired token, or one naming an account that no longer exists.
+ *
+ * Distinguished from an ordinary Error so callers can tell "you are not signed
+ * in" apart from "the server failed". A plain Error carrying only the detail
+ * string could not be told apart without matching on prose.
+ */
+export class AuthError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AuthError";
+  }
+}
+
+/**
+ * Notified whenever a request is rejected for identity reasons.
+ *
+ * Clearing storage is not enough on its own: AuthContext holds the user in
+ * React state, and a component tree already rendered stays "signed in" until
+ * something tells it otherwise. This is that signal.
+ */
+type SessionExpiredHandler = () => void;
+
+let sessionExpiredHandler: SessionExpiredHandler | null = null;
+
+export function onSessionExpired(handler: SessionExpiredHandler): () => void {
+  sessionExpiredHandler = handler;
+  return () => {
+    if (sessionExpiredHandler === handler) sessionExpiredHandler = null;
+  };
+}
+
+/**
+ * Drop the stored session from both storages and notify the app.
+ *
+ * Lives here rather than in AuthContext because the API layer is where a dead
+ * session is discovered, and it must be cleared before the next request reuses
+ * the same token.
+ */
+export function clearStoredSession(): void {
+  localStorage.removeItem(STORAGE_KEY);
+  localStorage.removeItem(REMEMBER_KEY);
+  sessionStorage.removeItem(STORAGE_KEY);
+  sessionExpiredHandler?.();
+}
+
+export function getAuthToken(): string | null {
+  // Check localStorage first (Remember Me was checked), then sessionStorage
+  // (Remember Me was not). A malformed entry is treated as no token.
+  for (const store of [localStorage, sessionStorage]) {
+    const raw = store.getItem(STORAGE_KEY);
+    if (!raw) continue;
     try {
-      const parsed = JSON.parse(localUser);
-      return parsed.token || null;
+      return JSON.parse(raw).token || null;
     } catch {
       return null;
     }
   }
-  
-  // Check sessionStorage (Remember Me was not checked)
-  const sessionUser = sessionStorage.getItem("locus_user");
-  if (sessionUser) {
-    try {
-      const parsed = JSON.parse(sessionUser);
-      return parsed.token || null;
-    } catch {
-      return null;
-    }
-  }
-  
+
   return null;
 }
 
@@ -124,6 +164,16 @@ async function apiRequest<T>(
     const error: ApiError = await response.json().catch(() => ({
       detail: `Request failed with status ${response.status}`,
     }));
+
+    // A 401 means the stored session is no longer usable -- expired, invalid,
+    // or naming a deleted account. Clear it here rather than leaving it for a
+    // caller to notice: every subsequent request would otherwise resend the
+    // same dead token and fail identically, leaving the UI stuck signed in.
+    if (response.status === 401) {
+      clearStoredSession();
+      throw new AuthError(error.detail);
+    }
+
     throw new Error(error.detail);
   }
 
@@ -337,29 +387,7 @@ export function streamChatMessage(
 ): () => void {
   const abortController = new AbortController();
 
-  const token = (() => {
-    // Check localStorage first (Remember Me was checked)
-    const localUser = localStorage.getItem("locus_user");
-    if (localUser) {
-      try {
-        const parsed = JSON.parse(localUser);
-        return parsed.token || null;
-      } catch {
-        return null;
-      }
-    }
-    // Check sessionStorage (Remember Me was not checked)
-    const sessionUser = sessionStorage.getItem("locus_user");
-    if (sessionUser) {
-      try {
-        const parsed = JSON.parse(sessionUser);
-        return parsed.token || null;
-      } catch {
-        return null;
-      }
-    }
-    return null;
-  })();
+  const token = getAuthToken();
 
   fetch(`${API_BASE_URL}/api/chat/stream`, {
     method: "POST",
@@ -372,6 +400,12 @@ export function streamChatMessage(
   })
     .then(async (response) => {
       if (!response.ok) {
+        // Same rule as apiRequest: a dead session is cleared where it is
+        // found, so the next request does not resend the same token.
+        if (response.status === 401) {
+          clearStoredSession();
+          throw new AuthError("Your session has expired. Please sign in again.");
+        }
         throw new Error(`Request failed with status ${response.status}`);
       }
 
@@ -731,6 +765,12 @@ export interface CommunicationEvent {
   outcome?: string | null;
   succeeded: boolean;
   created_at?: string | null;
+  /**
+   * Found on a sibling PR for the same work item and reused as context here,
+   * rather than found on this PR. Shown either way — the reviewer was given
+   * it — but labelled, so it does not read as discussion about this PR.
+   */
+  inherited?: boolean;
 }
 
 export interface ReviewerContact {
@@ -876,6 +916,14 @@ export interface PRAgentDefaults {
   review_slack_channel?: string | null;
   auto_merge_on_approval: boolean;
   merge_method: MergeMethod;
+  /**
+   * Google Docs read on every run, for every repo.
+   *
+   * These accumulate with a repo's own rather than being overridden by them:
+   * a repo that pins its own spec should still be reviewed against the
+   * organisation's standards.
+   */
+  context_docs: string[];
 }
 
 /** Account-wide fallbacks used by any repo that does not set its own. */
@@ -902,6 +950,121 @@ export async function analyzePR(repo: string, prNumber: number): Promise<PRJob> 
   return apiRequest<PRJob>(`/webhooks/analyze/${repo}/${prNumber}`, {
     method: "POST",
   });
+}
+
+// --- Task board -----------------------------------------------------------
+
+export type TaskSource = "github" | "jira";
+
+/**
+ * Where a task sits in the automated pipeline.
+ *
+ * Everything between `assigned` and `done` is automated except the coding, so
+ * a stage not yet reached says where the work is -- not what Locus skipped.
+ */
+export type TaskStage =
+  | "assigned"
+  | "in_progress"
+  | "analyzed"
+  | "in_review"
+  | "changes_requested"
+  | "approved"
+  | "merged"
+  | "testing"
+  | "done";
+
+export interface TaskStageStatus {
+  stage: TaskStage;
+  label: string;
+  state: StageState;
+  detail?: string | null;
+}
+
+export interface TaskPullRequest {
+  repo: string;
+  pr_number: number;
+  url?: string | null;
+  title?: string | null;
+  author?: string | null;
+  review_state?: ReviewState | null;
+  round_number: number;
+  last_reviewer?: string | null;
+}
+
+export interface TaskCard {
+  key: string;
+  source: TaskSource;
+  title: string;
+  url: string;
+  status?: string | null;
+  assignee?: string | null;
+  issue_type?: string | null;
+  priority?: string | null;
+  updated_at?: string | null;
+
+  stage: TaskStage;
+  stages: TaskStageStatus[];
+  pull_requests: TaskPullRequest[];
+
+  items: WorklistItem[];
+  needs_you: boolean;
+  blocked_reason?: string | null;
+  age_hours: number;
+  round_number: number;
+}
+
+export interface TaskBoard {
+  needs_you: TaskCard[];
+  in_flight: TaskCard[];
+  total: number;
+  github_available: boolean;
+  jira_available: boolean;
+  unavailable: string[];
+}
+
+export interface TaskDetail {
+  card: TaskCard;
+  analysis?: PRAnalysisResult | null;
+  job_status?: string | null;
+  job_error?: string | null;
+  reviews: PRReviewDetail[];
+  reviewer_contacts: ReviewerContact[];
+  qa_notified: boolean;
+  qa_resolved?: boolean | null;
+  qa_channel?: string | null;
+  qa_recipients: string[];
+  events: CommunicationEvent[];
+}
+
+/**
+ * Every task assigned to you, ordered by what is waiting on you.
+ *
+ * The assigned half is cached server-side for a minute, so a polling
+ * dashboard does not burn a GitHub rate limit. Pass `refresh` after an action
+ * that should change a card's position.
+ */
+export async function getTaskBoard(refresh = false): Promise<TaskBoard> {
+  return apiRequest<TaskBoard>(`/tasks${refresh ? "?refresh=true" : ""}`);
+}
+
+/**
+ * One task's whole pipeline: analysis, review rounds, and every message.
+ *
+ * The key goes in a query parameter because it legitimately contains "/" and
+ * "#" -- `acme/api#42` in a path segment would need double-escaping.
+ */
+export async function getTaskDetail(taskKey: string): Promise<TaskDetail> {
+  return apiRequest<TaskDetail>(
+    `/tasks/detail?task_key=${encodeURIComponent(taskKey)}`
+  );
+}
+
+/** Re-run the analysis on the task's most recent pull request. */
+export async function analyzeTask(taskKey: string): Promise<PRJob> {
+  return apiRequest<PRJob>(
+    `/tasks/analyze?task_key=${encodeURIComponent(taskKey)}`,
+    { method: "POST" }
+  );
 }
 
 // ============== Adaptive Scheduler ==============

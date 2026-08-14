@@ -467,6 +467,10 @@ class PRAgentDefaults(Base):
     review_slack_channel = Column(String(255), nullable=True)
     auto_merge_on_approval = Column(Integer, nullable=False, default=0)
     merge_method = Column(String(16), nullable=False, default="squash")
+    # Newline-separated Google Doc ids read as context on every run. Per-repo
+    # docs describe one codebase; these are the standards that apply to all of
+    # them, and without them an unregistered repo reviews against nothing.
+    context_doc_ids = Column(Text, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

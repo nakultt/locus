@@ -67,6 +67,11 @@ class TestUnauthenticatedAccess:
             ("GET", "/webhooks/summary"),
             ("GET", "/webhooks/repos"),
             ("GET", "/webhooks/jobs"),
+            # The task board reads two third-party accounts on the user's
+            # behalf; an unauthenticated caller must never reach it.
+            ("GET", "/tasks"),
+            ("GET", "/tasks/detail?task_key=ACME-1"),
+            ("POST", "/tasks/analyze?task_key=ACME-1"),
         ],
     )
     def test_requires_a_token(self, app_client, method, path):

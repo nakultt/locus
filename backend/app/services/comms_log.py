@@ -19,6 +19,7 @@ messages and low enough that one pasted logfile cannot fill the table.
 """
 
 import logging
+from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
@@ -169,29 +170,27 @@ def record_issues(
         )
 
 
-def recent_search(
+def cached_search(
     db: Session,
     *,
     owner_id: int,
     repo: str,
     pr_number: int,
     ticket_key: str | None,
-    within_hours: int,
-) -> tuple[bool, list[dict]]:
+) -> tuple[datetime | None, list[dict]]:
     """
-    Whether Slack was already searched recently, and what it found.
+    What the last Slack search for this work item found, and when it ran.
 
-    Returns `(is_fresh, matches)`. When fresh, the caller should skip the API
-    call and use the returned matches -- not simply skip, which would hand the
-    reviewer empty context and be worse than the redundant search.
+    Returns `(searched_at, matches)`. The cache is always usable -- there is no
+    freshness window, because discussion that was relevant an hour ago is still
+    relevant now. `searched_at` is the watermark: the caller searches Slack for
+    messages newer than it and merges, so nothing said since the last run is
+    missed. `None` means this work item was never searched, and the caller
+    should run a full search.
 
     Scoped to the ticket when there is one, so the second pull request on a
     work item inherits the first one's discussion instead of searching again.
     """
-    from datetime import UTC, datetime, timedelta
-
-    cutoff = datetime.now(UTC) - timedelta(hours=within_hours)
-
     query = db.query(models.CommunicationEvent).filter(
         models.CommunicationEvent.owner_id == owner_id,
         models.CommunicationEvent.channel == "slack",
@@ -207,35 +206,42 @@ def recent_search(
 
     events = query.order_by(models.CommunicationEvent.created_at).all()
     if not events:
-        return False, []
+        return None, []
 
     searched = [e for e in events if e.direction == "searched"]
-    if not searched:
-        return False, []
-
     newest = max(
         (e.created_at for e in searched if e.created_at is not None),
         default=None,
     )
     if newest is None:
-        return False, []
+        # Messages with no search behind them cannot produce a watermark; an
+        # incremental search from an unknown point would silently skip
+        # whatever fell between. Fall back to a full search.
+        return None, []
     if newest.tzinfo is None:
         newest = newest.replace(tzinfo=UTC)
-    if newest < cutoff:
-        return False, []
 
-    matches = [
-        {
+    # Deduplicated by permalink. The cache accumulates over rounds and the
+    # same message can be recorded by several rounds' searches; showing it
+    # three times would read as three separate people saying it.
+    matches: list[dict] = []
+    seen: set[str] = set()
+    for e in events:
+        if e.direction != "received" or not e.body:
+            continue
+        if e.permalink:
+            if e.permalink in seen:
+                continue
+            seen.add(e.permalink)
+        matches.append({
             "channel": e.target,
             "participant": e.participant,
             "text": e.body,
             "permalink": e.permalink,
             "query": e.query,
-        }
-        for e in events
-        if e.direction == "received" and e.body
-    ]
-    return True, matches
+            "cached_at": e.created_at,
+        })
+    return newest, matches
 
 
 def ticket_timeline(
@@ -271,18 +277,65 @@ def timeline(
     owner_id: int,
     repo: str,
     pr_number: int,
+    ticket_key: str | None = None,
 ) -> list[models.CommunicationEvent]:
-    """Everything recorded for one PR, oldest first."""
-    return (
+    """
+    Everything recorded for one PR, oldest first.
+
+    When the PR belongs to a work item, the Slack discussion cached under that
+    ticket by earlier pull requests is included too. That discussion is what
+    the reviewer was actually given -- the analysis reuses it every round --
+    so a timeline that showed only rows stamped with this PR's number would
+    omit context the run demonstrably used. Inherited rows are marked
+    `inherited` so the UI can say where they came from rather than implying
+    they were found on this PR.
+    """
+    own = (
         db.query(models.CommunicationEvent)
         .filter(
             models.CommunicationEvent.repo == repo,
             models.CommunicationEvent.pr_number == pr_number,
             models.CommunicationEvent.owner_id == owner_id,
         )
-        .order_by(
-            models.CommunicationEvent.created_at,
-            models.CommunicationEvent.id,
-        )
         .all()
     )
+    for event in own:
+        event.inherited = False
+
+    events = list(own)
+
+    if ticket_key:
+        inherited = (
+            db.query(models.CommunicationEvent)
+            .filter(
+                models.CommunicationEvent.owner_id == owner_id,
+                models.CommunicationEvent.ticket_key == ticket_key,
+                models.CommunicationEvent.pr_number != pr_number,
+                models.CommunicationEvent.channel == "slack",
+                models.CommunicationEvent.direction == "received",
+                models.CommunicationEvent.body.isnot(None),
+            )
+            .all()
+        )
+        # Deduplicated against what this PR already recorded: the same Slack
+        # message can be stored under two PRs on the same ticket, and showing
+        # it twice would read as two people saying it.
+        seen = {e.permalink for e in own if e.permalink}
+        for event in inherited:
+            if event.permalink and event.permalink in seen:
+                continue
+            if event.permalink:
+                seen.add(event.permalink)
+            event.inherited = True
+            events.append(event)
+
+    # Stored timestamps are naive on some backends and aware on others;
+    # comparing the two raises, so the key normalizes before sorting.
+    def _ordering(event: models.CommunicationEvent) -> tuple[datetime, int]:
+        stamp = event.created_at or datetime.min
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=UTC)
+        return (stamp, event.id or 0)
+
+    events.sort(key=_ordering)
+    return events
