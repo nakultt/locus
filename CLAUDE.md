@@ -89,6 +89,24 @@ clean one.
 `ReviewPriority` (`p1`–`p3`) is deliberately not `SecuritySeverity`. A `p1` means "do not merge
 this" — a judgement about this change — not a CVSS-style rating. Don't collapse the two.
 
+**A suggested fix is offered where it can be applied, and never over a secret.**
+A finding says where to look; the change to make is the expensive part, so
+`security_scan.suggest_fixes` writes the replacement code. Three rules hold it
+together. The fix is model-written even on a Semgrep finding — the scanner
+confirms the *problem*, nothing confirms the *fix*, so it does not inherit that
+confirmation. The applicable copy goes out as an inline review comment, because
+GitHub renders ```suggestion as an Apply button only there and as an inert code
+block in the issue-style summary; rendering that fence in the summary would look
+applicable and not be. And Gitleaks findings are excluded outright whatever their
+severity: writing a replacement line means handing the model the source holding
+the live secret and rendering its answer into a comment, which is the exposure
+the location-only rule exists to prevent — a committed secret is fixed by
+rotating it, not by editing a line. Anchors are checked against
+`get_diff_line_positions` first, since GitHub rejects an out-of-diff anchor with
+a 422 and a range running past the diff would overwrite code the PR never
+touched. Nits get no suggestion: the Apply button invites a click at any
+priority. `tests/test_suggested_fixes.py` pins all of it.
+
 **Models that read attacker-influenced text have no tools bound.** Diff text, Slack messages,
 QA replies, and review bodies are controlled by anyone who can open a PR, post in a channel,
 or review. The security scanner, the code reviewer, the QA classifier, and the review-asks
