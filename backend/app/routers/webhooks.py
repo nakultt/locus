@@ -22,7 +22,14 @@ from sqlalchemy.orm import Session
 from app import crud, models, schemas, security
 from app.database import SessionLocal, get_db
 from app.dependencies import get_current_user, get_integration_configs
-from app.services import automerge, comms_log, review_flow
+from app.services import (
+    automerge,
+    comms_log,
+    context_brief,
+    github_pr,
+    review_flow,
+    worklist,
+)
 from app.services.agent_settings import resolve_settings
 from app.services.capabilities import build_readiness
 from app.services.google_docs_context import extract_document_id
@@ -49,6 +56,13 @@ MERGE_ACTION = "merged"
 REVIEW_SUBMITTED_ACTION = "review_submitted"
 REVIEW_REQUESTED_ACTION = "review_requested"
 REVIEW_ACTIONS = {REVIEW_SUBMITTED_ACTION, REVIEW_REQUESTED_ACTION}
+
+# How long a Slack search stays good for. Discussion about what a change is
+# meant to do does not move because the author pushed a fix, and the search is
+# Tier 2 (~20 requests/minute) -- a PR with five pushes would otherwise search
+# six times for the same terms. The diff scan and both review passes are
+# deliberately outside this window; they are derived from code that changed.
+SLACK_FRESHNESS_HOURS = 12
 
 
 def verify_github_signature(payload: bytes, signature: str, secret: str) -> bool:
@@ -665,6 +679,26 @@ async def get_review(
 
 
 @router.get(
+    "/worklist",
+    response_model=schemas.Worklist,
+    summary="What is waiting on you, across every task",
+)
+async def get_worklist(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> schemas.Worklist:
+    """
+    The user's outstanding work, grouped by task and ordered by urgency.
+
+    Ordering is settled server-side so the API and the UI cannot disagree
+    about what is most urgent. Sorted by whether the ball is with you, then by
+    staleness -- a task on its fifth round for three days is a conversation
+    that is not converging, which is the signal the per-PR views cannot show.
+    """
+    return worklist.build(db, owner_id=current_user.id)
+
+
+@router.get(
     "/activity/{owner}/{name}/{pr_number}",
     response_model=schemas.PRActivity,
     summary="Both loops for one PR, with every message searched, sent, and received",
@@ -1034,8 +1068,36 @@ async def run_pr_job(job_id: int) -> None:
                 head_sha=job.head_sha,
             )
 
+        # Everything already known about this work item, so the reviewer sees
+        # what earlier rounds asked for and what QA rejected -- not just what
+        # this run happened to gather.
+        prior_review = db.query(models.PRReview).filter(
+            models.PRReview.repo == job.repo,
+            models.PRReview.pr_number == job.pr_number,
+            models.PRReview.owner_id == job.owner_id,
+        ).first()
+        prior_ticket = None
+        if prior_review and prior_review.ticket_keys:
+            prior_ticket = prior_review.ticket_keys.splitlines()[0].strip() or None
+
+        accumulated = context_brief.requirement_context(
+            db, owner_id=job.owner_id, repo=job.repo,
+            pr_number=job.pr_number, ticket_key=prior_ticket,
+        ) or None
+
+        # Skip the Slack search when this work item was searched recently and
+        # reuse what it found. Reusing rather than merely skipping matters:
+        # skipping alone would hand the reviewer empty context, which is worse
+        # than the redundant call.
+        is_fresh, cached_matches = comms_log.recent_search(
+            db, owner_id=job.owner_id, repo=job.repo, pr_number=job.pr_number,
+            ticket_key=prior_ticket, within_hours=SLACK_FRESHNESS_HOURS,
+        )
+
         comms: dict = {}
         result = await analyze_pull_request(
+            accumulated_context=accumulated,
+            cached_slack=cached_matches if is_fresh else None,
             comms=comms,
             repo=job.repo,
             pr_number=job.pr_number,
@@ -1048,11 +1110,27 @@ async def run_pr_job(job_id: int) -> None:
             context_doc_ids=settings.context_doc_ids,
         )
 
+        # The work item this PR belongs to. Keys everything recorded below,
+        # and lets the worklist group several PRs into one task.
+        ticket_keys = comms.get("ticket_keys") or []
+        primary_ticket = ticket_keys[0] if ticket_keys else None
+
+        if ticket_keys:
+            review_row = db.query(models.PRReview).filter(
+                models.PRReview.repo == job.repo,
+                models.PRReview.pr_number == job.pr_number,
+                models.PRReview.owner_id == job.owner_id,
+            ).first()
+            if review_row is not None:
+                review_row.ticket_keys = "\n".join(ticket_keys)
+                db.commit()
+
         # Linked and mentioned GitHub issues, with the text of each.
         if comms.get("issues"):
             comms_log.record_issues(
                 db, owner_id=job.owner_id, repo=job.repo,
                 pr_number=job.pr_number, issues=comms["issues"],
+                ticket_key=primary_ticket,
             )
 
         # What was searched for in Slack, and every message it returned.
@@ -1062,6 +1140,7 @@ async def run_pr_job(job_id: int) -> None:
                 pr_number=job.pr_number,
                 queries=comms.get("slack_queries") or [],
                 matches=comms.get("slack_matches") or [],
+                ticket_key=primary_ticket,
             )
 
         if resubmitted is not None:
@@ -1072,12 +1151,36 @@ async def run_pr_job(job_id: int) -> None:
             ))
             channel = settings.review_slack_channel
             if channel and "slack" in integration_configs:
+                # What the reviewer asked for, and what actually changed
+                # since the commit they reviewed. Both are already stored:
+                # pending_asks from their review, head_sha on that round.
+                prior_asks = [
+                    line.strip()
+                    for line in (resubmitted.pending_asks or "").splitlines()
+                    if line.strip()
+                ]
+                reviewed_sha = next(
+                    (
+                        r.head_sha for r in reversed(resubmitted.rounds)
+                        if r.outcome == schemas.ReviewOutcome.changes_requested.value
+                        and r.head_sha
+                    ),
+                    None,
+                )
+                changed_files: list[dict] = []
+                gh_token = (integration_configs.get("github") or {}).get("api_key")
+                if gh_token and reviewed_sha and job.head_sha:
+                    changed_files = await github_pr.compare_commits(
+                        gh_token, job.repo, reviewed_sha, job.head_sha
+                    )
+
                 resubmit_text = review_flow.format_review_notification(
                     resubmitted,
                     schemas.ReviewOutcome.resubmitted,
                     resubmitted.last_reviewer,
-                    [],
+                    prior_asks,
                     settings.reviewers,
+                    changed_files=changed_files,
                 )
                 sent = await review_flow.post_review_notification(
                     integration_configs["slack"], channel, resubmit_text

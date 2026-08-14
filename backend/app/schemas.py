@@ -558,6 +558,64 @@ class PRActivity(BaseModel):
     events: list[CommunicationEvent] = []
 
 
+class WorklistKind(str, Enum):
+    """What kind of attention an item needs."""
+    changes_requested = "changes_requested"
+    qa_rejected = "qa_rejected"
+    approved_not_merged = "approved_not_merged"
+    delivery_failed = "delivery_failed"
+    awaiting_review = "awaiting_review"
+
+
+class WorklistItem(BaseModel):
+    """One thing a person can act on, with the words that prompted it."""
+    kind: WorklistKind
+    blocked_on_you: bool
+    repo: str
+    pr_number: int
+    pr_url: str | None = None
+    headline: str
+    detail: list[str] = Field(
+        default_factory=list,
+        description="Model-written checklist; for scanning, not for acting",
+    )
+    quotes: list[str] = Field(
+        default_factory=list,
+        description="The asker's own words, which is what someone acts on",
+    )
+    actor: str | None = None
+    age_hours: float = 0.0
+    round_number: int = 1
+    from_human: bool = Field(
+        True,
+        description="A person asked, rather than a model producing a finding",
+    )
+
+
+class WorklistTask(BaseModel):
+    """
+    One work item, and everything outstanding across the PRs that touch it.
+
+    Grouped by task rather than pull request: a ticket spanning three PRs is
+    one thing that has been running for two weeks, not three young items.
+    """
+    key: str
+    repo: str
+    title: str | None = None
+    pull_requests: list[int] = Field(default_factory=list)
+    items: list[WorklistItem] = Field(default_factory=list)
+    needs_you: bool = False
+    age_hours: float = 0.0
+    round_number: int = 1
+
+
+class Worklist(BaseModel):
+    """The two sections the dashboard renders."""
+    needs_you: list[WorklistTask] = []
+    waiting_on_others: list[WorklistTask] = []
+    total_needs_you: int = 0
+
+
 class MergeMethod(str, Enum):
     """How an auto-merge lands the branch. Mirrors GitHub's own options."""
     squash = "squash"

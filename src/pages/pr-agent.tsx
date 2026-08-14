@@ -30,6 +30,7 @@ import {
   savePRAgentDefaults,
   getPRActivity,
   getPRJob,
+  getWorklist,
   getReview,
   listPRJobs,
   listRepos,
@@ -54,6 +55,10 @@ import {
   type CommChannel,
   type CommunicationEvent,
   type PRActivity,
+  type Worklist,
+  type WorklistItem,
+  type WorklistKind,
+  type WorklistTask,
   type SecurityFinding,
   type ToolInvocation,
   type ServiceStatus,
@@ -1011,6 +1016,191 @@ const JobRow = ({ job }: { job: PRJob }) => {
   );
 };
 
+
+const KIND_STYLE: Record<WorklistKind, { label: string; className: string; dot: string }> = {
+  changes_requested: {
+    label: "Changes requested",
+    className: "text-orange-600 dark:text-orange-400",
+    dot: "bg-orange-500",
+  },
+  qa_rejected: {
+    label: "Testing failed",
+    className: "text-red-600 dark:text-red-400",
+    dot: "bg-red-500",
+  },
+  approved_not_merged: {
+    label: "Approved, not merged",
+    className: "text-green-600 dark:text-green-400",
+    dot: "bg-green-500",
+  },
+  delivery_failed: {
+    label: "Message not delivered",
+    className: "text-yellow-600 dark:text-yellow-400",
+    dot: "bg-yellow-500",
+  },
+  awaiting_review: {
+    label: "Waiting on review",
+    className: "text-muted-foreground",
+    dot: "bg-muted-foreground",
+  },
+};
+
+/** "3d", "4h", "just now" — staleness is the ranking signal, so it is prominent. */
+const ageLabel = (hours: number) => {
+  if (hours >= 48) return `${Math.floor(hours / 24)}d`;
+  if (hours >= 1) return `${Math.floor(hours)}h`;
+  return "just now";
+};
+
+const WorklistItemRow = ({ item }: { item: WorklistItem }) => {
+  const style = KIND_STYLE[item.kind];
+
+  return (
+    <div className="flex gap-2">
+      <span className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${style.dot}`} />
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-baseline gap-x-2">
+          <span className={`text-xs font-medium ${style.className}`}>
+            {item.headline}
+          </span>
+          <span className="text-[11px] text-muted-foreground">
+            {item.repo}#{item.pr_number}
+          </span>
+          {item.round_number > 1 && (
+            <span className="rounded bg-muted px-1.5 text-[10px] text-muted-foreground">
+              round {item.round_number}
+            </span>
+          )}
+          <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
+            {ageLabel(item.age_hours)}
+          </span>
+        </div>
+
+        {/* Checklist for scanning. */}
+        {item.detail.length > 0 && (
+          <ul className="mt-1 space-y-0.5">
+            {item.detail.map((d, i) => (
+              <li key={i} className="text-[11px] text-muted-foreground">
+                • {d}
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {/* Their own words, which is what someone acts on. */}
+        {item.quotes.map((q, i) => (
+          <pre
+            key={i}
+            className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/50 p-1.5 font-mono text-[11px] text-foreground"
+          >
+            {q}
+          </pre>
+        ))}
+
+        {item.pr_url && (
+          <a
+            href={item.pr_url}
+            target="_blank"
+            rel="noreferrer"
+            className="mt-1 inline-flex items-center gap-1 text-[11px] text-blue-600 hover:underline dark:text-blue-400"
+          >
+            Open PR <ExternalLink size={10} />
+          </a>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const WorklistTaskCard = ({ task }: { task: WorklistTask }) => (
+  <div
+    className={`rounded-xl border p-3 ${
+      task.needs_you ? "border-border bg-card" : "border-border/60 bg-muted/20"
+    }`}
+  >
+    <div className="mb-2 flex flex-wrap items-baseline gap-x-2">
+      <span className="text-sm font-semibold text-foreground">{task.key}</span>
+      {task.title && (
+        <span className="truncate text-xs text-muted-foreground">{task.title}</span>
+      )}
+      {task.pull_requests.length > 1 && (
+        <span className="rounded bg-muted px-1.5 text-[10px] text-muted-foreground">
+          {task.pull_requests.length} PRs
+        </span>
+      )}
+    </div>
+    <div className="space-y-2.5">
+      {task.items.map((item, i) => (
+        <WorklistItemRow key={i} item={item} />
+      ))}
+    </div>
+  </div>
+);
+
+/**
+ * What is waiting on you, across every task.
+ *
+ * Grouped by work item rather than pull request: a ticket spanning three PRs
+ * is one thing that has been running two weeks, not three young items.
+ * Ordered entirely by the server so the two cannot disagree about urgency.
+ */
+const WorklistPanel = ({ data }: { data: Worklist | null }) => {
+  const [showWaiting, setShowWaiting] = useState(false);
+
+  if (!data) return null;
+
+  if (data.needs_you.length === 0 && data.waiting_on_others.length === 0) {
+    return null;
+  }
+
+  return (
+    <section className="mb-6">
+      <div className="mb-2 flex items-center gap-2">
+        <h2 className="text-sm font-semibold text-foreground">Needs you</h2>
+        {data.total_needs_you > 0 && (
+          <span className="rounded-full bg-orange-500/10 px-2 py-0.5 text-[11px] font-medium text-orange-600 dark:text-orange-400">
+            {data.total_needs_you}
+          </span>
+        )}
+      </div>
+
+      {data.needs_you.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-border p-6 text-center">
+          <Check size={20} className="mx-auto mb-1.5 text-green-500" />
+          <p className="text-sm text-muted-foreground">
+            Nothing is waiting on you.
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {data.needs_you.map((task) => (
+            <WorklistTaskCard key={task.key} task={task} />
+          ))}
+        </div>
+      )}
+
+      {data.waiting_on_others.length > 0 && (
+        <div className="mt-2">
+          <button
+            onClick={() => setShowWaiting(!showWaiting)}
+            className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+          >
+            {showWaiting ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+            Waiting on someone else ({data.waiting_on_others.length})
+          </button>
+          {showWaiting && (
+            <div className="mt-2 space-y-2">
+              {data.waiting_on_others.map((task) => (
+                <WorklistTaskCard key={task.key} task={task} />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+};
+
 const LOOP_STYLE: Record<CommLoop, { label: string; className: string }> = {
   context: {
     label: "Context",
@@ -1477,6 +1667,7 @@ export default function PRAgentDashboard() {
   const [jobs, setJobs] = useState<PRJob[]>([]);
   const [repos, setRepos] = useState<RepoRegistration[]>([]);
   const [reviews, setReviews] = useState<PRReviewSummary[]>([]);
+  const [worklist, setWorklist] = useState<Worklist | null>(null);
   const [loading, setLoading] = useState(true);
 
   const [repoInput, setRepoInput] = useState("");
@@ -1540,12 +1731,14 @@ export default function PRAgentDashboard() {
   const refresh = useCallback(async () => {
     if (!userId) return;
     try {
-      const [s, j, r, rv] = await Promise.all([
+      const [s, j, r, rv, wl] = await Promise.all([
         getPRAgentSummary(),
         listPRJobs(),
         listRepos(),
         listReviews(),
+        getWorklist(),
       ]);
+      setWorklist(wl);
       setSummary(s);
       setJobs(j);
       setRepos(r.repos);
@@ -2077,6 +2270,9 @@ export default function PRAgentDashboard() {
             </div>
           </div>
         )}
+
+        {/* What is waiting on you, before anything else on the page. */}
+        <WorklistPanel data={worklist} />
 
         {/* Review queue */}
         <div className="mb-2 flex items-center justify-between">

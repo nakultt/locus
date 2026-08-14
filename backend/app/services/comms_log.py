@@ -51,6 +51,7 @@ def record(
     direction: str,
     channel: str,
     body: str | None = None,
+    ticket_key: str | None = None,
     participant: str | None = None,
     target: str | None = None,
     subject: str | None = None,
@@ -71,6 +72,7 @@ def record(
         db.add(models.CommunicationEvent(
             repo=repo,
             pr_number=pr_number,
+            ticket_key=ticket_key,
             loop=loop,
             direction=direction,
             channel=channel,
@@ -102,6 +104,7 @@ def record_search_matches(
     pr_number: int,
     queries: list[str],
     matches: list[dict],
+    ticket_key: str | None = None,
 ) -> None:
     """
     Record a Slack search: the queries tried, and every message they returned.
@@ -114,6 +117,7 @@ def record_search_matches(
         record(
             db, owner_id=owner_id, repo=repo, pr_number=pr_number,
             loop="context", direction="searched", channel="slack",
+            ticket_key=ticket_key,
             query=query,
             body=None,
             outcome=f"{len(matches)} match(es)" if matches else "no matches",
@@ -123,6 +127,7 @@ def record_search_matches(
         record(
             db, owner_id=owner_id, repo=repo, pr_number=pr_number,
             loop="context", direction="received", channel="slack",
+            ticket_key=ticket_key,
             participant=match.get("participant"),
             target=match.get("channel"),
             body=match.get("text"),
@@ -138,6 +143,7 @@ def record_issues(
     repo: str,
     pr_number: int,
     issues: list[dict],
+    ticket_key: str | None = None,
 ) -> None:
     """
     Record the GitHub issues this PR links or mentions, with their text.
@@ -153,6 +159,7 @@ def record_issues(
         record(
             db, owner_id=owner_id, repo=repo, pr_number=pr_number,
             loop="context", direction="received", channel="github",
+            ticket_key=ticket_key,
             participant=issue.get("author") or None,
             target=f"issue #{number}" if number else None,
             subject=issue.get("title"),
@@ -160,6 +167,102 @@ def record_issues(
             permalink=issue.get("url"),
             outcome=issue.get("relation"),
         )
+
+
+def recent_search(
+    db: Session,
+    *,
+    owner_id: int,
+    repo: str,
+    pr_number: int,
+    ticket_key: str | None,
+    within_hours: int,
+) -> tuple[bool, list[dict]]:
+    """
+    Whether Slack was already searched recently, and what it found.
+
+    Returns `(is_fresh, matches)`. When fresh, the caller should skip the API
+    call and use the returned matches -- not simply skip, which would hand the
+    reviewer empty context and be worse than the redundant search.
+
+    Scoped to the ticket when there is one, so the second pull request on a
+    work item inherits the first one's discussion instead of searching again.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    cutoff = datetime.now(UTC) - timedelta(hours=within_hours)
+
+    query = db.query(models.CommunicationEvent).filter(
+        models.CommunicationEvent.owner_id == owner_id,
+        models.CommunicationEvent.channel == "slack",
+        models.CommunicationEvent.loop == "context",
+    )
+    if ticket_key:
+        query = query.filter(models.CommunicationEvent.ticket_key == ticket_key)
+    else:
+        query = query.filter(
+            models.CommunicationEvent.repo == repo,
+            models.CommunicationEvent.pr_number == pr_number,
+        )
+
+    events = query.order_by(models.CommunicationEvent.created_at).all()
+    if not events:
+        return False, []
+
+    searched = [e for e in events if e.direction == "searched"]
+    if not searched:
+        return False, []
+
+    newest = max(
+        (e.created_at for e in searched if e.created_at is not None),
+        default=None,
+    )
+    if newest is None:
+        return False, []
+    if newest.tzinfo is None:
+        newest = newest.replace(tzinfo=UTC)
+    if newest < cutoff:
+        return False, []
+
+    matches = [
+        {
+            "channel": e.target,
+            "participant": e.participant,
+            "text": e.body,
+            "permalink": e.permalink,
+            "query": e.query,
+        }
+        for e in events
+        if e.direction == "received" and e.body
+    ]
+    return True, matches
+
+
+def ticket_timeline(
+    db: Session,
+    *,
+    owner_id: int,
+    ticket_key: str,
+) -> list[models.CommunicationEvent]:
+    """
+    Everything recorded for one work item, across every pull request it spans.
+
+    This is what makes the second PR on a ticket start with the first one's
+    context -- including the QA rejection that caused it to exist -- rather
+    than from nothing.
+    """
+    return (
+        db.query(models.CommunicationEvent)
+        .filter(
+            models.CommunicationEvent.ticket_key == ticket_key,
+            models.CommunicationEvent.owner_id == owner_id,
+        )
+        .order_by(
+            models.CommunicationEvent.created_at,
+            models.CommunicationEvent.id,
+        )
+        .all()
+    )
 
 
 def timeline(

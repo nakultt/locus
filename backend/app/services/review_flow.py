@@ -63,6 +63,10 @@ Review:
 # enormous review cannot dominate a context window.
 _MAX_BODY_CHARS = 6000
 
+# A refactor touching forty files should not produce a forty-line Slack
+# message; past a handful the list stops being scannable, which is the point.
+_MAX_DELTA_FILES = 8
+
 
 def _get_or_create_review(
     db: Session,
@@ -338,6 +342,7 @@ def format_review_notification(
     reviewer: str | None,
     asks: list[str],
     expected_reviewers: list[str],
+    changed_files: list[dict] | None = None,
 ) -> str:
     """
     Build the Slack message for one review event.
@@ -345,6 +350,7 @@ def format_review_notification(
     Addressed to whoever the ball is now with: the author on
     changes-requested, the reviewers on a request.
     """
+    changed_files = changed_files or []
     pr_ref = f"{review.repo}#{review.pr_number}"
     link = f"<{review.pr_url}|{pr_ref}>" if review.pr_url else pr_ref
     title = f" — {review.pr_title}" if review.pr_title else ""
@@ -370,10 +376,28 @@ def format_review_notification(
 
     if outcome is schemas.ReviewOutcome.resubmitted:
         mentions = " ".join(f"@{r}" for r in expected_reviewers) or "reviewers"
-        return (
-            f":arrows_counterclockwise: {link}{title} updated and ready for "
+        lines = [
+            f":arrows_counterclockwise: {link}{title} ready for "
             f"round {review.round_number} — {mentions}"
-        )
+        ]
+        # What the reviewer asked for last time, so re-review is "check these
+        # two things" rather than "read the whole diff again". This is the
+        # expensive re-read in the loop, and it is a person's time.
+        if asks:
+            lines.append("")
+            lines.append("*You asked for:*")
+            lines.extend(f"• {ask}" for ask in asks)
+        if changed_files:
+            shown = changed_files[:_MAX_DELTA_FILES]
+            lines.append("")
+            lines.append("*Changed since your review:*")
+            lines.extend(
+                f"• `{f['filename']}` +{f['additions']} −{f['deletions']}"
+                for f in shown
+            )
+            if len(changed_files) > _MAX_DELTA_FILES:
+                lines.append(f"• …and {len(changed_files) - _MAX_DELTA_FILES} more")
+        return "\n".join(lines)
 
     return f"Update on {link}{title}"
 
