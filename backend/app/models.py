@@ -116,6 +116,11 @@ class PRJob(Base):
     pr_number = Column(Integer, nullable=False)
     action = Column(String(32), nullable=False)  # opened, synchronize, reopened
     head_sha = Column(String(64), nullable=True)
+    # Event fields the job needs but the PR number cannot supply -- a review's
+    # verdict, reviewer, and body. Stored rather than re-fetched because the
+    # review that fired the webhook may already have been superseded by the
+    # time the worker gets to it.
+    payload_json = Column(Text, nullable=True)
 
     status = Column(String(20), nullable=False, default="queued", index=True)
     result_json = Column(Text, nullable=True)  # Serialized PRAnalysisResult
@@ -164,6 +169,90 @@ class QAThread(Base):
 
     def __repr__(self) -> str:
         return f"<QAThread(repo={self.repo}, pr=#{self.pr_number})>"
+
+
+class PRReview(Base):
+    """
+    Where a pull request stands in the senior-dev review loop.
+
+    One row per (repo, pr_number). GitHub reports each review as an isolated
+    event -- there is no "this PR is on its third round" anywhere in the
+    payload -- so the round count and the current state have to be accumulated
+    here as events arrive.
+
+    `state` is what gates the merge; `round_number` is what makes a stalled
+    back-and-forth visible. A PR on round five is a conversation that is not
+    converging, which is exactly what nobody notices without a record.
+    """
+
+    __tablename__ = "pr_reviews"
+
+    id = Column(Integer, primary_key=True, index=True)
+    repo = Column(String(255), nullable=False, index=True)  # "owner/name"
+    pr_number = Column(Integer, nullable=False, index=True)
+    pr_url = Column(String(512), nullable=True)
+    pr_title = Column(String(512), nullable=True)
+    # GitHub login of whoever opened the PR -- the dev the loop returns to.
+    author = Column(String(255), nullable=True)
+
+    # awaiting_review | changes_requested | approved | merged
+    state = Column(String(32), nullable=False, default="awaiting_review", index=True)
+    # Increments on every changes_requested -> re-review cycle. Starts at 1.
+    round_number = Column(Integer, nullable=False, default=1)
+    # Most recent reviewer to act, for "who is this waiting on".
+    last_reviewer = Column(String(255), nullable=True)
+    # Model-written checklist of what the reviewer asked for, refreshed each
+    # time changes are requested. Advisory only; the review body is canonical.
+    pending_asks = Column(Text, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+
+    rounds = relationship(
+        "PRReviewRound",
+        back_populates="review",
+        cascade="all, delete-orphan",
+        order_by="PRReviewRound.round_number",
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<PRReview(repo={self.repo}, pr=#{self.pr_number}, "
+            f"state={self.state}, round={self.round_number})>"
+        )
+
+
+class PRReviewRound(Base):
+    """
+    One completed leg of the review loop, appended and never rewritten.
+
+    Kept as history rather than folded into PRReview because "what did the
+    senior dev ask for in round two" is the question that gets asked when a
+    change regresses, and a mutable current-state row cannot answer it.
+    """
+
+    __tablename__ = "pr_review_rounds"
+
+    id = Column(Integer, primary_key=True, index=True)
+    review_id = Column(Integer, ForeignKey("pr_reviews.id"), nullable=False, index=True)
+
+    round_number = Column(Integer, nullable=False)
+    # approved | changes_requested | commented | review_requested | resubmitted
+    outcome = Column(String(32), nullable=False)
+    reviewer = Column(String(255), nullable=True)
+    # Reviewer's own words. Untrusted: anyone who can review can write here.
+    body = Column(Text, nullable=True)
+    # Head commit the review applied to, so a later push is visibly newer.
+    head_sha = Column(String(64), nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    review = relationship("PRReview", back_populates="rounds")
+
+    def __repr__(self) -> str:
+        return f"<PRReviewRound(review_id={self.review_id}, round={self.round_number}, outcome={self.outcome})>"
 
 
 class Deadline(Base):
@@ -247,6 +336,19 @@ class RepoWebhook(Base):
     # Jira status to move tickets to on merge. Forward-only; see merge_actions.
     jira_done_status = Column(String(64), nullable=False, default="Done")
     close_issues_on_merge = Column(Integer, nullable=False, default=1)
+    # GitHub logins of the senior devs who review this repo, newline-separated.
+    # Used to address review notifications; reviews from anyone else are still
+    # recorded, since GitHub does not restrict who may review.
+    reviewers = Column(Text, nullable=True)
+    # Channel for review-loop notifications. Separate from slack_channel: PR
+    # summaries are for the team, a review request is for one person, and
+    # collapsing them buries the request in the feed.
+    review_slack_channel = Column(String(255), nullable=True)
+    # Merge automatically once a review approves and the gate passes. Off by
+    # default: this is the only path that writes to a default branch with no
+    # human in the loop, and it must be turned on deliberately.
+    auto_merge_on_approval = Column(Integer, nullable=False, default=0)
+    merge_method = Column(String(16), nullable=False, default="squash")
     enabled = Column(Integer, nullable=False, default=1)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -279,6 +381,10 @@ class PRAgentDefaults(Base):
     qa_emails = Column(Text, nullable=True)  # newline-separated
     jira_done_status = Column(String(64), nullable=False, default="Done")
     close_issues_on_merge = Column(Integer, nullable=False, default=1)
+    reviewers = Column(Text, nullable=True)  # newline-separated GitHub logins
+    review_slack_channel = Column(String(255), nullable=True)
+    auto_merge_on_approval = Column(Integer, nullable=False, default=0)
+    merge_method = Column(String(16), nullable=False, default="squash")
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

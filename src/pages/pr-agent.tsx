@@ -7,12 +7,14 @@ import {
   ChevronRight,
   ClipboardList,
   Copy,
+  Eye,
   ExternalLink,
   FileText,
   GitMerge,
   GitPullRequest,
   Loader2,
   Mail,
+  MessageSquare,
   Play,
   RefreshCw,
   ShieldAlert,
@@ -27,18 +29,24 @@ import {
   getPRAgentSummary,
   savePRAgentDefaults,
   getPRJob,
+  getReview,
   listPRJobs,
   listRepos,
+  listReviews,
   registerRepo,
   unregisterRepo,
   type PRAgentDefaults,
   type PRAgentSummary,
   type PRJob,
   type PRJobDetail,
+  type PRReviewDetail,
+  type PRReviewSummary,
   type RepoRegistration,
   type PipelineStage,
   type ReviewFinding,
   type ReviewPriority,
+  type ReviewState,
+  type MergeMethod,
   type SecurityFinding,
   type ToolInvocation,
   type ServiceStatus,
@@ -696,6 +704,7 @@ const StageChecklist = ({
 const GlobalDefaults = ({ docsConnected }: { docsConnected: boolean }) => {
   const [values, setValues] = useState<PRAgentDefaults | null>(null);
   const [emailsInput, setEmailsInput] = useState("");
+  const [reviewersInput, setReviewersInput] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -705,6 +714,7 @@ const GlobalDefaults = ({ docsConnected }: { docsConnected: boolean }) => {
       .then((d) => {
         setValues(d);
         setEmailsInput(d.qa_emails.join(", "));
+        setReviewersInput((d.reviewers ?? []).join(", "));
       })
       .catch(() => setValues(null));
   }, []);
@@ -721,9 +731,14 @@ const GlobalDefaults = ({ docsConnected }: { docsConnected: boolean }) => {
           .split(/[,\n]/)
           .map((e) => e.trim())
           .filter((e) => e.includes("@")),
+        reviewers: reviewersInput
+          .split(/[,\n]/)
+          .map((r) => r.trim().replace(/^@/, ""))
+          .filter(Boolean),
       });
       setValues(next);
       setEmailsInput(next.qa_emails.join(", "));
+      setReviewersInput((next.reviewers ?? []).join(", "));
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
     } catch (e) {
@@ -766,6 +781,30 @@ const GlobalDefaults = ({ docsConnected }: { docsConnected: boolean }) => {
             className="w-full rounded-lg border border-border bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
           />
         </div>
+        <div>
+          <label className="mb-1 block text-xs text-muted-foreground">
+            Senior dev reviewers (GitHub logins)
+          </label>
+          <input
+            value={reviewersInput}
+            onChange={(e) => setReviewersInput(e.target.value)}
+            placeholder="senior-dev, tech-lead"
+            className="w-full rounded-lg border border-border bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs text-muted-foreground">
+            Slack channel for review requests
+          </label>
+          <input
+            value={values.review_slack_channel ?? ""}
+            onChange={(e) =>
+              setValues({ ...values, review_slack_channel: e.target.value })
+            }
+            placeholder="#code-review"
+            className="w-full rounded-lg border border-border bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+          />
+        </div>
       </div>
 
       <div className="mt-3 space-y-2">
@@ -793,6 +832,36 @@ const GlobalDefaults = ({ docsConnected }: { docsConnected: boolean }) => {
           />
           Close linked GitHub issues on merge
         </label>
+        <label className="flex items-center gap-2 text-xs text-foreground">
+          <input
+            type="checkbox"
+            checked={values.auto_merge_on_approval}
+            onChange={(e) =>
+              setValues({ ...values, auto_merge_on_approval: e.target.checked })
+            }
+            className="rounded border-border"
+          />
+          Merge automatically when a review approves
+          <select
+            value={values.merge_method}
+            onChange={(e) =>
+              setValues({
+                ...values,
+                merge_method: e.target.value as PRAgentDefaults["merge_method"],
+              })
+            }
+            disabled={!values.auto_merge_on_approval}
+            className="rounded border border-border bg-background px-1.5 py-0.5 text-xs disabled:opacity-50"
+          >
+            <option value="squash">squash</option>
+            <option value="merge">merge</option>
+            <option value="rebase">rebase</option>
+          </select>
+        </label>
+        <p className="text-xs text-muted-foreground">
+          Still gated on green CI, no conflict, no confirmed security finding, and no
+          P1 review finding. Held merges are reported in Slack with the reason.
+        </p>
       </div>
 
       {error && <p className="mt-2 text-xs text-red-500">{error}</p>}
@@ -881,6 +950,164 @@ const JobRow = ({ job }: { job: PRJob }) => {
   );
 };
 
+const REVIEW_STATE_STYLE: Record<ReviewState, { label: string; className: string }> = {
+  awaiting_review: {
+    label: "Awaiting review",
+    className: "bg-amber-500/10 text-amber-600 dark:text-amber-400",
+  },
+  changes_requested: {
+    label: "Changes requested",
+    className: "bg-orange-500/10 text-orange-600 dark:text-orange-400",
+  },
+  approved: {
+    label: "Approved",
+    className: "bg-green-500/10 text-green-600 dark:text-green-400",
+  },
+  merged: {
+    label: "Merged",
+    className: "bg-purple-500/10 text-purple-600 dark:text-purple-400",
+  },
+};
+
+const OUTCOME_LABEL: Record<string, string> = {
+  review_requested: "Review requested",
+  approved: "Approved",
+  changes_requested: "Changes requested",
+  commented: "Commented",
+  resubmitted: "Author pushed changes",
+};
+
+/**
+ * One PR in the review queue, expandable to its full round history.
+ *
+ * The round count is shown even at one, so a PR that has been round-tripping
+ * five times is visibly different from one waiting on its first look.
+ */
+const ReviewQueueRow = ({ review }: { review: PRReviewSummary }) => {
+  const [open, setOpen] = useState(false);
+  const [detail, setDetail] = useState<PRReviewDetail | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const style = REVIEW_STATE_STYLE[review.state];
+
+  const toggle = async () => {
+    const next = !open;
+    setOpen(next);
+    if (next && !detail) {
+      setLoading(true);
+      try {
+        setDetail(await getReview(review.repo, review.pr_number));
+      } finally {
+        setLoading(false);
+      }
+    }
+  };
+
+  return (
+    <div className="rounded-xl border border-border">
+      <button
+        onClick={toggle}
+        className="flex w-full items-center gap-3 p-3 text-left hover:bg-muted/50"
+      >
+        {open ? (
+          <ChevronDown size={15} className="shrink-0 text-muted-foreground" />
+        ) : (
+          <ChevronRight size={15} className="shrink-0 text-muted-foreground" />
+        )}
+
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="truncate text-sm font-medium text-foreground">
+              {review.repo}#{review.pr_number}
+            </span>
+            <span className={`rounded px-1.5 py-0.5 text-[11px] ${style.className}`}>
+              {style.label}
+            </span>
+            <span className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
+              round {review.round_number}
+            </span>
+          </div>
+          {review.pr_title && (
+            <p className="truncate text-xs text-muted-foreground">{review.pr_title}</p>
+          )}
+        </div>
+
+        <div className="shrink-0 text-right text-[11px] text-muted-foreground">
+          {review.author && <div>by {review.author}</div>}
+          {review.last_reviewer && <div>reviewed by {review.last_reviewer}</div>}
+        </div>
+      </button>
+
+      {open && (
+        <div className="border-t border-border p-3">
+          {loading && (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Loader2 size={13} className="animate-spin" /> Loading history…
+            </div>
+          )}
+
+          {detail && (
+            <div className="space-y-3">
+              {detail.pending_asks.length > 0 && (
+                <div className="rounded-lg bg-orange-500/5 p-3">
+                  <p className="mb-1 text-xs font-semibold text-foreground">
+                    Outstanding asks
+                  </p>
+                  <ul className="space-y-1">
+                    {detail.pending_asks.map((ask, i) => (
+                      <li key={i} className="text-xs text-muted-foreground">
+                        • {ask}
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="mt-2 text-[10px] text-muted-foreground">
+                    Summarized from the review. The reviewer's own words below are
+                    canonical.
+                  </p>
+                </div>
+              )}
+
+              <div className="space-y-2">
+                {detail.rounds.map((round, i) => (
+                  <div key={i} className="flex gap-2 text-xs">
+                    <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                      {round.round_number}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <span className="font-medium text-foreground">
+                        {OUTCOME_LABEL[round.outcome] ?? round.outcome}
+                      </span>
+                      {round.reviewer && (
+                        <span className="text-muted-foreground"> — {round.reviewer}</span>
+                      )}
+                      {round.body && (
+                        <p className="mt-1 whitespace-pre-wrap break-words text-muted-foreground">
+                          {round.body}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {detail.pr_url && (
+                <a
+                  href={detail.pr_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 text-xs text-blue-600 hover:underline dark:text-blue-400"
+                >
+                  Open on GitHub <ExternalLink size={11} />
+                </a>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
 export default function PRAgentDashboard() {
   const { user } = useAuth();
   const userId = user?.id;
@@ -888,6 +1115,7 @@ export default function PRAgentDashboard() {
   const [summary, setSummary] = useState<PRAgentSummary | null>(null);
   const [jobs, setJobs] = useState<PRJob[]>([]);
   const [repos, setRepos] = useState<RepoRegistration[]>([]);
+  const [reviews, setReviews] = useState<PRReviewSummary[]>([]);
   const [loading, setLoading] = useState(true);
 
   const [repoInput, setRepoInput] = useState("");
@@ -898,6 +1126,10 @@ export default function PRAgentDashboard() {
   const [qaEmailsInput, setQaEmailsInput] = useState("");
   const [jiraDoneStatus, setJiraDoneStatus] = useState("Done");
   const [closeIssues, setCloseIssues] = useState(true);
+  const [reviewersInput, setReviewersInput] = useState("");
+  const [reviewChannelInput, setReviewChannelInput] = useState("");
+  const [autoMerge, setAutoMerge] = useState(false);
+  const [mergeMethod, setMergeMethod] = useState<MergeMethod>("squash");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [justRegistered, setJustRegistered] = useState<RepoRegistration | null>(null);
@@ -936,19 +1168,25 @@ export default function PRAgentDashboard() {
     setQaEmailsInput((reg.qa_emails ?? []).join(", "));
     setJiraDoneStatus(reg.jira_done_status ?? "Done");
     setCloseIssues(reg.close_issues_on_merge ?? true);
+    setReviewersInput((reg.reviewers ?? []).join(", "));
+    setReviewChannelInput(reg.review_slack_channel ?? "");
+    setAutoMerge(reg.auto_merge_on_approval ?? false);
+    setMergeMethod(reg.merge_method ?? "squash");
   }, []);
 
   const refresh = useCallback(async () => {
     if (!userId) return;
     try {
-      const [s, j, r] = await Promise.all([
+      const [s, j, r, rv] = await Promise.all([
         getPRAgentSummary(),
         listPRJobs(),
         listRepos(),
+        listReviews(),
       ]);
       setSummary(s);
       setJobs(j);
       setRepos(r.repos);
+      setReviews(rv.reviews);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load dashboard");
     } finally {
@@ -987,6 +1225,12 @@ export default function PRAgentDashboard() {
         .map((e) => e.trim())
         .filter((e) => e.includes("@"));
 
+      // Accept comma- or newline-separated logins, with or without a leading @.
+      const reviewers = reviewersInput
+        .split(/[,\n]/)
+        .map((r) => r.trim().replace(/^@/, ""))
+        .filter(Boolean);
+
       const reg = await registerRepo(
         repoInput.trim(),
         channelInput.trim() || undefined,
@@ -994,7 +1238,11 @@ export default function PRAgentDashboard() {
         contextDocs,
         qaEmails,
         jiraDoneStatus.trim() || "Done",
-        closeIssues
+        closeIssues,
+        reviewers,
+        reviewChannelInput.trim() || undefined,
+        autoMerge,
+        mergeMethod
       );
       setJustRegistered(reg);
       setRepoInput("");
@@ -1156,6 +1404,62 @@ export default function PRAgentDashboard() {
               {summary?.docs_connected
                 ? "Their text is given to the reviewer so it can flag changes that contradict the spec. Saved when you register."
                 : "Connect Google Docs in Integrations to use this."}
+            </p>
+          </div>
+
+          <div className="mt-3 border-t border-border pt-3">
+            <p className="mb-2 text-xs font-medium text-foreground">
+              Senior dev review
+              <span className="ml-1 font-normal text-muted-foreground">
+                — who reviews, and where the loop is announced
+              </span>
+            </p>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <input
+                value={reviewersInput}
+                onChange={(e) => setReviewersInput(e.target.value)}
+                placeholder="senior-dev, tech-lead"
+                className="flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+              />
+              <input
+                value={reviewChannelInput}
+                onChange={(e) => setReviewChannelInput(e.target.value)}
+                placeholder="#code-review"
+                className="w-40 rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+              />
+            </div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              GitHub logins. This is who gets pinged, not who is allowed to review —
+              GitHub does not restrict that, and a review from anyone else is still
+              recorded. Falls back to the summary channel when no review channel is
+              set.
+            </p>
+
+            <label className="mt-2 flex items-center gap-2 text-xs text-foreground">
+              <input
+                type="checkbox"
+                checked={autoMerge}
+                onChange={(e) => setAutoMerge(e.target.checked)}
+                className="rounded border-border"
+              />
+              Merge automatically when approved
+              <select
+                value={mergeMethod}
+                onChange={(e) => setMergeMethod(e.target.value as MergeMethod)}
+                disabled={!autoMerge}
+                className="rounded border border-border bg-background px-1.5 py-0.5 text-xs disabled:opacity-50"
+              >
+                <option value="squash">squash</option>
+                <option value="merge">merge</option>
+                <option value="rebase">rebase</option>
+              </select>
+            </label>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Off unless you turn it on — this is the only thing that writes to your
+              default branch with no human in the loop. An approval alone is not
+              enough: the merge also needs green CI, no merge conflict, no confirmed
+              security finding, and no P1 review finding. Anything held is reported in
+              Slack with the reason.
             </p>
           </div>
 
@@ -1393,6 +1697,47 @@ export default function PRAgentDashboard() {
                 </div>
               ))}
             </div>
+          </div>
+        )}
+
+        {/* Review queue */}
+        <div className="mb-2 flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-foreground">Review queue</h2>
+          {reviews.length > 0 && (
+            <div className="flex gap-2 text-[11px] text-muted-foreground">
+              <span className="inline-flex items-center gap-1">
+                <Eye size={11} />
+                {reviews.filter((r) => r.state === "awaiting_review").length} awaiting
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <MessageSquare size={11} />
+                {reviews.filter((r) => r.state === "changes_requested").length} need
+                changes
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <Check size={11} />
+                {reviews.filter((r) => r.state === "approved").length} approved
+              </span>
+            </div>
+          )}
+        </div>
+        {reviews.length === 0 ? (
+          <div className="mb-6 rounded-xl border border-dashed border-border p-8 text-center">
+            <Eye size={24} className="mx-auto mb-2 text-muted-foreground" />
+            <p className="text-sm text-muted-foreground">
+              No pull requests in review.
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Add the <span className="font-mono">Pull request reviews</span> event to
+              your GitHub webhook, then request a review — the loop appears here as it
+              runs.
+            </p>
+          </div>
+        ) : (
+          <div className="mb-6 space-y-2">
+            {reviews.map((review) => (
+              <ReviewQueueRow key={review.id} review={review} />
+            ))}
           </div>
         )}
 
