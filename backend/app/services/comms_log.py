@@ -131,6 +131,37 @@ def record_search_matches(
         )
 
 
+def record_issues(
+    db: Session,
+    *,
+    owner_id: int,
+    repo: str,
+    pr_number: int,
+    issues: list[dict],
+) -> None:
+    """
+    Record the GitHub issues this PR links or mentions, with their text.
+
+    An issue body is context a human wrote about this work -- the same kind of
+    thing as a Slack thread, and worth reading for the same reason. The
+    relation is carried as the outcome because "closes" and "mentions" are
+    materially different: only the former is closed on merge, and showing them
+    identically would overstate the relationship.
+    """
+    for issue in issues:
+        number = issue.get("number")
+        record(
+            db, owner_id=owner_id, repo=repo, pr_number=pr_number,
+            loop="context", direction="received", channel="github",
+            participant=issue.get("author") or None,
+            target=f"issue #{number}" if number else None,
+            subject=issue.get("title"),
+            body=issue.get("body") or None,
+            permalink=issue.get("url"),
+            outcome=issue.get("relation"),
+        )
+
+
 def timeline(
     db: Session,
     *,

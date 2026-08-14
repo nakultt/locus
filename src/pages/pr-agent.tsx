@@ -43,6 +43,7 @@ import {
   type PRReviewDetail,
   type PRReviewSummary,
   type RepoRegistration,
+  type LinkedIssue,
   type PipelineStage,
   type ReviewFinding,
   type ReviewPriority,
@@ -217,6 +218,77 @@ const StageTimeline = ({ stages }: { stages: PipelineStage[] }) => {
   );
 };
 
+/**
+ * One linked or mentioned GitHub issue, expandable to the text a human wrote.
+ *
+ * "Closes" and "Mentions" are labelled differently and deliberately: only a
+ * formally closing issue is closed on merge, and rendering both identically
+ * would overstate what the PR is claiming about a bare `#12`.
+ *
+ * The body is collapsed by default. It is fetched and fed to the reviewer
+ * either way, so hiding it entirely means the dashboard shows less than the
+ * model was given -- but a wall of issue text above the findings buries them.
+ */
+const IssueRow = ({ issue }: { issue: LinkedIssue }) => {
+  const [open, setOpen] = useState(false);
+  const hasBody = Boolean(issue.body?.trim());
+  const closes = issue.relation === "closes";
+
+  return (
+    <div className="rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs">
+      <div className="flex items-start gap-1.5">
+        {hasBody ? (
+          <button
+            onClick={() => setOpen(!open)}
+            className="mt-0.5 shrink-0 text-muted-foreground hover:text-foreground"
+            aria-label={open ? "Hide issue text" : "Show issue text"}
+          >
+            {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+          </button>
+        ) : (
+          <span className="mt-0.5 w-3 shrink-0" />
+        )}
+
+        <div className="min-w-0 flex-1">
+          <span
+            className={`rounded px-1.5 py-0.5 text-[10px] ${
+              closes
+                ? "bg-purple-500/10 text-purple-600 dark:text-purple-400"
+                : "bg-muted text-muted-foreground"
+            }`}
+            title={
+              closes
+                ? "Formally linked — closed automatically when this PR merges"
+                : "Bare #N reference — left alone on merge"
+            }
+          >
+            {closes ? "Closes" : "Mentions"}
+          </span>{" "}
+          <a
+            href={issue.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-medium text-primary hover:underline"
+          >
+            #{issue.number}
+          </a>
+          <span className="text-foreground"> — {issue.title}</span>
+          <span className="text-muted-foreground"> ({issue.state})</span>
+          {issue.author && (
+            <span className="text-muted-foreground"> · opened by {issue.author}</span>
+          )}
+        </div>
+      </div>
+
+      {open && hasBody && (
+        <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded bg-background/60 p-2 font-mono text-[11px] leading-relaxed text-foreground">
+          {issue.body}
+        </pre>
+      )}
+    </div>
+  );
+};
+
 const FindingRow = ({ finding }: { finding: SecurityFinding }) => (
   <div className={`rounded-lg border px-3 py-2 ${SEVERITY_STYLE[finding.severity]}`}>
     <div className="flex items-start justify-between gap-3">
@@ -299,24 +371,7 @@ const JobDetail = ({ detail }: { detail: PRJobDetail }) => {
           <h4 className="mb-1.5 text-xs font-medium text-foreground">Linked issues</h4>
           <div className="space-y-1">
             {ctx.linked_issues.map((issue) => (
-              <div
-                key={issue.number}
-                className="rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs"
-              >
-                <span className="text-muted-foreground">
-                  {issue.relation === "closes" ? "Closes" : "Mentions"}{" "}
-                </span>
-                <a
-                  href={issue.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="font-medium text-primary hover:underline"
-                >
-                  #{issue.number}
-                </a>
-                <span className="text-foreground"> — {issue.title}</span>
-                <span className="text-muted-foreground"> ({issue.state})</span>
-              </div>
+              <IssueRow key={issue.number} issue={issue} />
             ))}
           </div>
         </section>
