@@ -753,6 +753,53 @@ export interface PRActivity {
   events: CommunicationEvent[];
 }
 
+export type WorklistKind =
+  | "changes_requested"
+  | "qa_rejected"
+  | "approved_not_merged"
+  | "delivery_failed"
+  | "awaiting_review";
+
+export interface WorklistItem {
+  kind: WorklistKind;
+  blocked_on_you: boolean;
+  repo: string;
+  pr_number: number;
+  pr_url?: string | null;
+  headline: string;
+  /** Model-written checklist — for scanning. */
+  detail: string[];
+  /** The asker's own words — what someone actually acts on. */
+  quotes: string[];
+  actor?: string | null;
+  age_hours: number;
+  round_number: number;
+  /** A person asked, rather than a model producing a finding. */
+  from_human: boolean;
+}
+
+export interface WorklistTask {
+  key: string;
+  repo: string;
+  title?: string | null;
+  pull_requests: number[];
+  items: WorklistItem[];
+  needs_you: boolean;
+  age_hours: number;
+  round_number: number;
+}
+
+export interface Worklist {
+  needs_you: WorklistTask[];
+  waiting_on_others: WorklistTask[];
+  total_needs_you: number;
+}
+
+/** Ordered server-side, so the UI cannot disagree about what is most urgent. */
+export async function getWorklist(): Promise<Worklist> {
+  return apiRequest<Worklist>("/webhooks/worklist");
+}
+
 /** Both loops and the full message traffic for one PR, in one request. */
 export async function getPRActivity(
   repo: string,

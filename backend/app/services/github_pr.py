@@ -117,6 +117,44 @@ async def get_combined_ci_state(token: str, repo: str, head_sha: str) -> tuple[s
     return "success", [] if saw_any else []
 
 
+async def compare_commits(
+    token: str, repo: str, base_sha: str, head_sha: str
+) -> list[dict]:
+    """
+    Files changed between two commits.
+
+    Used to answer "what happened since you last looked" for a reviewer, which
+    is the difference between re-reading a whole diff and checking two things.
+
+    Returns an empty list rather than raising when the compare fails: a
+    resubmission notice with no delta is still useful, one that never sends
+    because a compare 404'd is not.
+    """
+    if not base_sha or not head_sha or base_sha == head_sha:
+        return []
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                f"{GITHUB_API_BASE}/repos/{repo}/compare/{base_sha}...{head_sha}",
+                headers=_headers(token),
+            )
+        if response.status_code != 200:
+            return []
+        files = response.json().get("files") or []
+    except Exception:
+        return []
+
+    return [
+        {
+            "filename": f.get("filename", ""),
+            "additions": f.get("additions", 0),
+            "deletions": f.get("deletions", 0),
+        }
+        for f in files
+    ]
+
+
 async def merge_pull_request(
     token: str,
     repo: str,

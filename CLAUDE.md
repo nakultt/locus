@@ -132,6 +132,24 @@ the log — `merge_actions._qa_email_text` and `post_qa_thread`'s third return v
 that reason. A reconstruction drifts from what the channel actually saw, which makes the
 record worse than useless.
 
+**Context caches by work item; findings never cache.** `context_brief.build()` renders the
+accumulated context on demand rather than storing it — a file has no transactions, and three
+loops already write per-PR state concurrently. The split it exists to protect: Slack
+discussion, issue bodies and tickets are reused across review rounds (keyed by
+`ticket_key`, so the second PR on a ticket inherits the first one's history), while the diff,
+the security findings and the code review are re-derived every round. Reusing a stored
+analysis across a round would resubmit round two carrying round one's findings against round
+two's code — a vulnerability introduced while fixing something else would pass unreported.
+`build()` takes the current run's analysis as an argument for exactly that reason; it never
+reads a stored one.
+
+**The worklist is grouped by task and ordered by staleness.** `worklist.build()` answers
+"what is waiting on me", which the per-PR views cannot. Grouped by `ticket_key` because one
+ticket spans several PRs and a PR-level list shows a two-week round trip as three young items.
+Ordered server-side — blocked-on-you first, then oldest, then round count — so the API and the
+UI cannot disagree about urgency. Severity deliberately does not rank: this is a list of
+conversations, and a task stuck on round five is the signal worth surfacing.
+
 **The review loop accumulates state GitHub does not keep.** GitHub reports each review as an
 isolated event; nothing in any payload says "this PR is on its third round". `PRReview` holds
 the current state and round number, `PRReviewRound` is the append-only history, and
