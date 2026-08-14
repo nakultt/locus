@@ -1,3 +1,4 @@
+import { formatDateTime } from "@/lib/datetime";
 import type {
   CommChannel,
   CommDirection,
@@ -152,12 +153,10 @@ export const ageLabel = (hours: number) => {
   return "just now";
 };
 
-export const timeOf = (iso?: string | null) =>
-  iso
-    ? new Date(iso).toLocaleString(undefined, {
-        month: "short",
-        day: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-      })
-    : "";
+/**
+ * An absolute timestamp, always in IST.
+ *
+ * Not the viewer's zone: these are shared events people discuss with each
+ * other, so the wall clock has to be the same for everyone reading it.
+ */
+export const timeOf = (iso?: string | null) => formatDateTime(iso);

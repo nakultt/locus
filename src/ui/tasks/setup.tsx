@@ -9,6 +9,7 @@ import {
   type PRJobDetail,
   type ServiceStatus,
 } from "@/lib/api";
+import { formatFull } from "@/lib/datetime";
 import { STATUS_STYLE } from "./shared";
 import { StageChecklist } from "./pipeline";
 import { AnalysisView } from "./analysis";
@@ -421,7 +422,7 @@ export const JobRow = ({ job }: { job: PRJob }) => {
           </span>
         )}
         <span className="ml-auto text-xs text-muted-foreground">
-          {new Date(job.created_at).toLocaleString()}
+          {formatFull(job.created_at)}
         </span>
       </button>
 

@@ -10,6 +10,7 @@ import {
   Users,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
+import { formatWithWeekday } from "@/lib/datetime";
 import {
   applySchedule,
   getScheduleConflicts,
@@ -34,14 +35,9 @@ const CLASS_LABEL: Record<EventClass, { label: string; tone: string }> = {
   hard_fixed: { label: "fixed", tone: "text-red-600 dark:text-red-400" },
 };
 
-const formatWhen = (iso: string) =>
-  new Date(iso).toLocaleString(undefined, {
-    weekday: "short",
-    day: "numeric",
-    month: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+// Always IST, never the browser's zone. A schedule is the one place a wrong
+// offset is both most likely to be acted on and hardest to notice.
+const formatWhen = (iso: string) => formatWithWeekday(iso);
 
 const MoveRow = ({ move }: { move: ScheduleMove }) => {
   const tone = CLASS_LABEL[move.event_class];
