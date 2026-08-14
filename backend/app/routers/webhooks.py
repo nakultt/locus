@@ -11,6 +11,7 @@ is parsed at all.
 import hashlib
 import hmac
 import json
+import logging
 import os
 import secrets
 from datetime import UTC, datetime
@@ -26,8 +27,10 @@ from app.services import (
     automerge,
     comms_log,
     context_brief,
+    finding_diff,
     github_pr,
     review_flow,
+    suppression,
     worklist,
 )
 from app.services.agent_settings import resolve_settings
@@ -36,6 +39,8 @@ from app.services.google_docs_context import extract_document_id
 from app.services.merge_actions import run_merge_actions
 from app.services.pr_agent import analyze_pull_request
 from app.services.security_scan import gitleaks_available, semgrep_available
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -129,7 +134,9 @@ async def github_webhook(
     if x_github_event == "ping":
         return {"message": "pong"}
 
-    if x_github_event not in ("pull_request", "pull_request_review"):
+    if x_github_event not in (
+        "pull_request", "pull_request_review", "issue_comment"
+    ):
         return {"message": f"Ignoring event: {x_github_event}"}
 
     payload = _parse_webhook_body(raw_body, request.headers.get("content-type", ""))
@@ -165,6 +172,17 @@ async def github_webhook(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid signature"
         )
+
+    # A comment carrying an `@locus` command. Handled here rather than queued:
+    # it runs a regex over a fixed vocabulary and writes one row, so the
+    # webhook can answer within GitHub's timeout without a worker.
+    #
+    # The comment body is untrusted -- anyone who can comment on the pull
+    # request wrote it -- so no model reads it and the only reachable effect
+    # is suppressing a finding on this pull request. Nothing here touches
+    # another repository or sends anything outward.
+    if x_github_event == "issue_comment":
+        return await _handle_comment_command(db, payload, registration)
 
     action = payload.get("action", "")
     pr = payload.get("pull_request", {}) or {}
@@ -1059,6 +1077,99 @@ async def _try_auto_merge(
     )
 
 
+async def _handle_comment_command(
+    db: Session,
+    payload: dict,
+    registration: models.RepoWebhook,
+) -> dict:
+    """
+    Act on an `@locus` command in a pull request comment.
+
+    Only `created` comments on pull requests are considered. GitHub sends
+    `issue_comment` for plain issues too, and those have no findings to
+    dismiss; an edited comment is not a fresh instruction.
+
+    Locus's own comments are ignored outright. The comment it posts ends with
+    an `@locus ignore` hint, and acting on that would make the bot obey its
+    own instructions -- the exact confused-deputy shape the untrusted-text
+    rules exist to prevent.
+    """
+    if payload.get("action") != "created":
+        return {"message": "Ignoring comment action"}
+
+    issue = payload.get("issue") or {}
+    if not issue.get("pull_request"):
+        return {"message": "Ignoring comment on a non-PR issue"}
+
+    comment = payload.get("comment") or {}
+    body = comment.get("body") or ""
+    author = (comment.get("user") or {}).get("login") or ""
+
+    # Our own comment quotes the command syntax; obeying it would be the bot
+    # instructing itself.
+    if github_pr.COMMENT_MARKER in body or github_pr.INLINE_MARKER in body:
+        return {"message": "Ignoring own comment"}
+
+    commands = suppression.parse_commands(body)
+    if not commands:
+        return {"message": "No command found"}
+
+    repo = registration.repo
+    pr_number = issue.get("number")
+    if not pr_number:
+        return {"message": "Comment carries no pull request number"}
+
+    # The findings this command can refer to are the ones last reported.
+    stored = finding_diff.previous_result(
+        db, owner_id=registration.owner_id, repo=repo, pr_number=pr_number
+    )
+    if stored is None:
+        return {"message": "No analysis to act on yet"}
+
+    try:
+        analysis = schemas.PRAnalysisResult.model_validate(stored)
+    except Exception:
+        return {"message": "Stored analysis could not be read"}
+
+    applied: list[str] = []
+    unmatched: list[str] = []
+
+    for command in commands:
+        if not command.suppresses:
+            # `explain` is recognised but does nothing yet; it is accepted so
+            # the vocabulary is stable and a user is not told it is invalid.
+            continue
+
+        matched = suppression.match_finding(analysis, command.target)
+        if matched is None:
+            unmatched.append(command.target)
+            continue
+
+        file_path, title = matched
+        suppression.suppress(
+            db,
+            owner_id=registration.owner_id,
+            repo=repo,
+            pr_number=pr_number,
+            file_path=file_path,
+            title=title,
+            suppressed_by=author,
+            reason=command.reason,
+        )
+        applied.append(title)
+
+    logger.info(
+        "Locus command on %s#%s by %s: %s suppressed, %s unmatched",
+        repo, pr_number, author, len(applied), len(unmatched),
+    )
+
+    return {
+        "message": "Command processed",
+        "suppressed": applied,
+        "unmatched": unmatched,
+    }
+
+
 async def run_pr_job(job_id: int) -> None:
     """
     Execute a queued PR analysis job.
@@ -1068,11 +1179,20 @@ async def run_pr_job(job_id: int) -> None:
     db = SessionLocal()
     try:
         job = db.query(models.PRJob).filter(models.PRJob.id == job_id).first()
-        if not job or job.status != schemas.PRJobStatus.queued.value:
+        # `running` is the normal case: the worker claims the job atomically
+        # before calling this. `queued` is accepted for direct callers -- the
+        # manual re-run endpoint and the tests -- which have no claim step.
+        # Anything terminal is left alone, so a completed job is never re-run.
+        if not job or job.status not in (
+            schemas.PRJobStatus.queued.value,
+            schemas.PRJobStatus.running.value,
+        ):
             return
 
-        job.status = schemas.PRJobStatus.running.value
-        db.commit()
+        if job.status == schemas.PRJobStatus.queued.value:
+            job.status = schemas.PRJobStatus.running.value
+            job.started_at = datetime.now(UTC)
+            db.commit()
 
         registration = db.query(models.RepoWebhook).filter(
             models.RepoWebhook.repo == job.repo,
@@ -1142,10 +1262,26 @@ async def run_pr_job(job_id: int) -> None:
         )
 
         comms: dict = {}
+        # The previous completed run's findings, so this one can report what
+        # moved. Fetched here rather than inside the pipeline, which takes
+        # data rather than a database session.
+        prior_findings = finding_diff.previous_result(
+            db,
+            owner_id=job.owner_id,
+            repo=job.repo,
+            pr_number=job.pr_number,
+            before_job_id=job.id,
+        )
+
         result = await analyze_pull_request(
             accumulated_context=accumulated,
             cached_slack=cached_matches,
             slack_searched_at=searched_at,
+            previous_findings=prior_findings,
+            suppressed=suppression.active_for(
+                db, owner_id=job.owner_id, repo=job.repo,
+                pr_number=job.pr_number,
+            ),
             comms=comms,
             repo=job.repo,
             pr_number=job.pr_number,

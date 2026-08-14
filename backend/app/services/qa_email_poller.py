@@ -20,7 +20,7 @@ import httpx
 
 from app import crud, models
 from app.database import SessionLocal
-from app.services import comms_log
+from app.services import comms_log, integration_health
 from app.services.qa_feedback import handle_qa_reply
 
 logger = logging.getLogger(__name__)
@@ -171,8 +171,19 @@ async def poll_once() -> int:
             try:
                 messages = await fetch_replies(access_token, cutoff)
             except Exception as e:
+                # Swallowed so one user's dead credential does not stop the
+                # loop for everyone -- but recorded, because a token that
+                # expired days ago is otherwise invisible: QA replies simply
+                # stop arriving, which reads as nobody replying.
                 logger.debug("Gmail poll failed for user %s: %s", owner_id, e)
+                integration_health.record_failure(
+                    db, owner_id=owner_id, service="gmail", error=str(e)
+                )
                 continue
+
+            integration_health.record_success(
+                db, owner_id=owner_id, service="gmail"
+            )
 
             for message in messages:
                 # In-Reply-To is the reliable link. References is checked too,
