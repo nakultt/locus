@@ -252,3 +252,133 @@ class TestSettingsDefaultOff:
             assert settings.merge_method == "squash"
         finally:
             db.close()
+
+
+class TestGateIsRetried:
+    """
+    Evaluating the gate once, on the approval event, does not work.
+
+    GitHub computes mergeability lazily: the first read after any change
+    returns `mergeable: null`, and the approval webhook fires within a second
+    of the click. Without a retry the common path is an approved PR that sits
+    open forever, which is worse than not having the feature.
+    """
+
+    @pytest.fixture
+    def approved_repo(self, tmp_path, monkeypatch):
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        from app import security
+        from app.database import Base
+        from app.services import automerge
+
+        engine = create_engine(
+            f"sqlite:///{tmp_path}/sweep.db",
+            connect_args={"check_same_thread": False},
+        )
+        Base.metadata.create_all(bind=engine)
+        Session = sessionmaker(bind=engine)
+        monkeypatch.setattr(automerge, "SessionLocal", Session)
+
+        db = Session()
+        db.add(models.User(
+            id=1, email="d@a.com", hashed_password="x", timezone="UTC"))
+        db.add(models.Integration(
+            service_name="github",
+            encrypted_api_key=security.encrypt_token("ghp_x"),
+            owner_id=1))
+        db.add(models.RepoWebhook(
+            repo="acme/widget", encrypted_secret=security.encrypt_token("s"),
+            auto_merge_on_approval=1, merge_method="squash",
+            jira_done_status="Done", close_issues_on_merge=1,
+            enabled=1, owner_id=1))
+        db.add(models.PRReview(
+            repo="acme/widget", pr_number=42, pr_title="Add retry logic",
+            state="approved", round_number=1, owner_id=1))
+        db.commit()
+        db.close()
+        return Session
+
+    @pytest.mark.asyncio
+    async def test_a_pr_held_on_unknown_mergeability_merges_on_the_next_sweep(
+        self, approved_repo, monkeypatch
+    ):
+        from app.services import automerge, github_pr
+
+        # First read: GitHub is still computing. Second: it has an answer.
+        answers = [
+            {"merged": False, "mergeable": None, "head": {"sha": "a1"}},
+            {"merged": False, "mergeable": True, "head": {"sha": "a1"}},
+        ]
+
+        async def fake_pr(_t, _r, _n):
+            return answers.pop(0) if len(answers) > 1 else answers[0]
+
+        async def fake_ci(_t, _r, _s):
+            return "success", []
+
+        merged: list[str] = []
+
+        async def fake_merge(_t, repo, number, merge_method="squash",
+                             commit_title=None):
+            merged.append(f"{repo}#{number}")
+            return True, "Merged"
+
+        monkeypatch.setattr(github_pr, "get_pull_request", fake_pr)
+        monkeypatch.setattr(github_pr, "get_combined_ci_state", fake_ci)
+        monkeypatch.setattr(github_pr, "merge_pull_request", fake_merge)
+
+        # Sweep one: GitHub has not decided yet, so nothing happens.
+        assert await automerge.sweep_once() == 0
+        assert merged == []
+
+        # Sweep two: it has. Without this retry the PR is stuck forever.
+        assert await automerge.sweep_once() == 1
+        assert merged == ["acme/widget#42"]
+
+    @pytest.mark.asyncio
+    async def test_sweep_skips_repos_with_auto_merge_off(
+        self, approved_repo, monkeypatch
+    ):
+        """The dangerous default stays off, including on the retry path."""
+        from app.services import automerge, github_pr
+
+        db = approved_repo()
+        try:
+            db.query(models.RepoWebhook).one().auto_merge_on_approval = 0
+            db.commit()
+        finally:
+            db.close()
+
+        async def boom(*_a, **_kw):
+            raise AssertionError("must not touch GitHub for an opted-out repo")
+
+        monkeypatch.setattr(github_pr, "get_pull_request", boom)
+
+        assert await automerge.sweep_once() == 0
+
+    @pytest.mark.asyncio
+    async def test_a_still_blocked_pr_is_silent_on_retry(
+        self, approved_repo, monkeypatch
+    ):
+        """
+        Repeating the reason every minute would train people to ignore the
+        channel. The blocker was already reported when the approval landed.
+        """
+        from app.services import automerge, github_pr, review_flow
+
+        async def fake_pr(_t, _r, _n):
+            return {"merged": False, "mergeable": False, "head": {"sha": "a1"}}
+
+        async def fake_ci(_t, _r, _s):
+            return "success", []
+
+        async def loud(*_a, **_kw):
+            raise AssertionError("a held retry must not post to Slack")
+
+        monkeypatch.setattr(github_pr, "get_pull_request", fake_pr)
+        monkeypatch.setattr(github_pr, "get_combined_ci_state", fake_ci)
+        monkeypatch.setattr(review_flow, "post_review_notification", loud)
+
+        assert await automerge.sweep_once() == 0

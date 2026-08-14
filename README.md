@@ -305,7 +305,7 @@ loops' current state, who is reachable where, and every message — with its act
 | Shown | Includes |
 |---|---|
 | Searched | The Slack query, and whether it matched. A search that found nothing looks identical to one that never ran without this |
-| Received | Prior discussion found, review bodies, tester replies — each with the verdict it produced |
+| Received | Prior discussion found, linked issue text, review bodies, tester replies — each with the verdict it produced |
 | Sent | Review pings, the QA Slack post, the QA email with its subject — verbatim, as the channel saw it |
 
 Messages that failed to send are shown and marked, since an undelivered QA notification
@@ -338,6 +338,12 @@ with no human in the loop, so the gate is checked independently of the review:
 Unverified findings and P2/P3 do **not** block. They are advisory, and blocking on a model's
 opinion would make the feature unusable — and would hand an unverified finding authority the
 confirmed/unverified split exists to deny it.
+
+**A held merge is retried, not abandoned.** GitHub computes mergeability lazily, so the first
+read right after an approval usually returns "unknown" — and it emits no event when it
+finishes. A sweeper re-checks approved PRs every 60 seconds for up to 24 hours, silently, and
+announces only when the merge lands. Without it, the common case is an approved PR that never
+merges.
 
 Anything held is reported to Slack with every reason at once, so a fixed CI failure does not
 lead to a fresh surprise on the next round. An approved PR that quietly stays open reads as a

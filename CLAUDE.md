@@ -156,6 +156,15 @@ would both make the feature unusable and hand an unverified finding the authorit
 confirmed/unverified split exists to deny it. Every refusal is reported to Slack with the
 reason — an approved PR that silently stays open reads as a broken feature.
 
+**The merge gate must be retried, not evaluated once.** GitHub computes mergeability lazily:
+the first read after any change returns `mergeable: null`, and the approval webhook fires
+within a second of the click. A gate evaluated only on that event holds on unknown — correctly
+— and then nothing ever re-evaluates, so the approved PR sits open forever. GitHub emits no
+event when mergeability resolves, so there is nothing to subscribe to. `automerge.sweep_once`
+runs on a timer for exactly this; `attempt_merge` is written to be side-effect-free when it
+declines so it is safe to call repeatedly. A held retry stays silent — the reason was reported
+when the approval landed, and repeating it every minute trains people to ignore the channel.
+
 **Auto-merge does not special-case the post-merge path.** Locus merges through GitHub's API,
 GitHub fires `closed` + `merged=true` exactly as it does for a human merge, and the ordinary
 merge job runs. Do not add a direct call to `run_merge_actions` from the review path; it would

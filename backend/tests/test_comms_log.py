@@ -134,6 +134,73 @@ class TestSearchVisibility:
         assert received.query == '"LOC-42"'
 
 
+class TestLinkedIssues:
+    ISSUES = [
+        {
+            "number": 7, "title": "Retries hammer the API on 500s",
+            "state": "open", "url": "https://github.com/acme/widget/issues/7",
+            "author": "priya", "body": "We should cap retries at 3.",
+            "relation": "closes",
+        },
+        {
+            "number": 9, "title": "Unrelated flake",
+            "state": "open", "url": "https://github.com/acme/widget/issues/9",
+            "author": "sam", "body": "", "relation": "mentions",
+        },
+    ]
+
+    def test_issue_text_and_author_are_recorded(self, db):
+        """
+        An issue body is context a human wrote about this work.
+
+        It was already fetched and fed to the reviewer; not storing it meant
+        the dashboard showed less than the model was given.
+        """
+        comms_log.record_issues(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR, issues=self.ISSUES
+        )
+
+        closes = db.query(models.CommunicationEvent).filter(
+            models.CommunicationEvent.outcome == "closes"
+        ).one()
+
+        assert closes.body == "We should cap retries at 3."
+        assert closes.participant == "priya"
+        assert closes.subject == "Retries hammer the API on 500s"
+        assert closes.permalink.endswith("/issues/7")
+
+    def test_closes_and_mentions_stay_distinguishable(self, db):
+        """
+        Only a formally closing issue is closed on merge.
+
+        Recording both identically would let the UI overstate what the PR
+        claims about a bare #N reference.
+        """
+        comms_log.record_issues(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR, issues=self.ISSUES
+        )
+
+        outcomes = {
+            e.target: e.outcome
+            for e in db.query(models.CommunicationEvent).all()
+        }
+
+        assert outcomes == {"issue #7": "closes", "issue #9": "mentions"}
+
+    def test_an_issue_with_no_body_is_still_recorded(self, db):
+        """A title-only issue is still context; it just has nothing to expand."""
+        comms_log.record_issues(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR, issues=self.ISSUES
+        )
+
+        mention = db.query(models.CommunicationEvent).filter(
+            models.CommunicationEvent.outcome == "mentions"
+        ).one()
+
+        assert mention.body is None
+        assert mention.subject == "Unrelated flake"
+
+
 class TestTimeline:
     def test_both_loops_come_back_in_one_ordered_story(self, db):
         for loop, direction, body in [

@@ -728,6 +728,11 @@ async def analyze_pull_request(
             github_token, repo, pr.get("body"), {i["number"] for i in linked}
         )
         context.linked_issues = [LinkedIssue(**i) for i in linked + mentioned]
+        if comms is not None:
+            # Handed to the caller to log. An issue body is context a human
+            # wrote about this work, exactly like a Slack thread, and belongs
+            # on the same timeline rather than only in the run detail.
+            comms["issues"] = linked + mentioned
         _record(tool_calls, "github", "get_linked_issues",
                 query=f"PR #{pr_number}", result_count=len(linked))
         if mentioned:
