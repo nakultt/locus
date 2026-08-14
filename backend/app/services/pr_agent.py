@@ -217,6 +217,8 @@ async def search_slack_threads(
     title: str | None = None,
     branch: str | None = None,
     issue_numbers: list[int] | None = None,
+    matches: list[dict] | None = None,
+    queries_tried: list[str] | None = None,
 ) -> list[RelatedSlackThread]:
     """
     Find Slack discussion about this work.
@@ -249,6 +251,12 @@ async def search_slack_threads(
 
     threads: list[RelatedSlackThread] = []
     seen_permalinks: set[str] = set()
+    # Everything the search actually saw, handed back through `matches` so the
+    # caller can record it. A query that returned nothing is indistinguishable
+    # from one that never ran unless the query itself is kept.
+    if matches is not None:
+        matches.clear()
+    tried: list[str] = []
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         for query in queries:
@@ -257,6 +265,8 @@ async def search_slack_threads(
             # rate limit (Slack search is Tier 2, ~20/min).
             if len(threads) >= MAX_SLACK_THREADS:
                 break
+
+            tried.append(query)
 
             try:
                 response = await client.get(
@@ -282,18 +292,35 @@ async def search_slack_threads(
                         continue
                     seen_permalinks.add(permalink)
 
+                    channel_name = match.get("channel", {}).get("name", "unknown")
+                    author = match.get("username") or match.get("user")
+                    full_text = match.get("text", "") or ""
+
                     threads.append(RelatedSlackThread(
-                        channel=match.get("channel", {}).get("name", "unknown"),
+                        channel=channel_name,
                         permalink=permalink,
                         message_count=1,
-                        summary=(match.get("text", "") or "")[:280],
-                        participants=(
-                            [match["username"]] if match.get("username") else []
-                        ),
+                        # The card summary stays short; the full text goes to
+                        # the communication log, where it is read deliberately.
+                        summary=full_text[:280],
+                        participants=[author] if author else [],
                     ))
+
+                    if matches is not None:
+                        matches.append({
+                            "channel": channel_name,
+                            "participant": author,
+                            "text": full_text,
+                            "permalink": permalink,
+                            "query": query,
+                        })
             except Exception as e:
                 logger.debug("Slack query %r failed: %s", query, e)
                 continue
+
+    if queries_tried is not None:
+        queries_tried.clear()
+        queries_tried.extend(tried)
 
     return threads[:MAX_SLACK_THREADS]
 
@@ -627,6 +654,7 @@ async def analyze_pull_request(
     enable_llm_review: bool = True,
     export_to_docs: bool = False,
     context_doc_ids: list[str] | None = None,
+    comms: dict | None = None,
 ) -> PRAnalysisResult:
     """
     Run the full PR analysis pipeline.
@@ -638,6 +666,11 @@ async def analyze_pull_request(
         post_comment: Whether to write the comment back to the PR
         slack_channel: Channel for the summary; None to skip
         enable_llm_review: Whether to run the unverified LLM pass
+        comms: Optional sink the pipeline fills with what it searched and
+            sent, for the caller to persist. Passed in rather than written
+            here because this function has no database session, and giving it
+            one would couple the pipeline to storage it does not otherwise
+            need.
 
     Returns:
         The analysis result, including anything that went wrong.
@@ -762,6 +795,8 @@ async def analyze_pull_request(
                 ticket_keys, repo, pr_number, context.title, branch,
                 [i.number for i in context.linked_issues],
             )
+            slack_matches: list[dict] = []
+            slack_queries: list[str] = []
             context.slack_threads = await search_slack_threads(
                 ticket_keys,
                 repo,
@@ -770,7 +805,12 @@ async def analyze_pull_request(
                 title=context.title,
                 branch=branch,
                 issue_numbers=[i.number for i in context.linked_issues],
+                matches=slack_matches,
+                queries_tried=slack_queries,
             )
+            if comms is not None:
+                comms["slack_matches"] = slack_matches
+                comms["slack_queries"] = slack_queries
             has_user_token = bool(
                 (integration_configs["slack"].get("credentials") or {}).get("user_token")
             )

@@ -28,6 +28,7 @@ import {
   getPRAgentDefaults,
   getPRAgentSummary,
   savePRAgentDefaults,
+  getPRActivity,
   getPRJob,
   getReview,
   listPRJobs,
@@ -47,6 +48,11 @@ import {
   type ReviewPriority,
   type ReviewState,
   type MergeMethod,
+  type CommLoop,
+  type CommDirection,
+  type CommChannel,
+  type CommunicationEvent,
+  type PRActivity,
   type SecurityFinding,
   type ToolInvocation,
   type ServiceStatus,
@@ -950,6 +956,283 @@ const JobRow = ({ job }: { job: PRJob }) => {
   );
 };
 
+const LOOP_STYLE: Record<CommLoop, { label: string; className: string }> = {
+  context: {
+    label: "Context",
+    className: "bg-slate-500/10 text-slate-600 dark:text-slate-300",
+  },
+  review: {
+    label: "Review loop",
+    className: "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400",
+  },
+  qa: {
+    label: "Testing loop",
+    className: "bg-teal-500/10 text-teal-600 dark:text-teal-400",
+  },
+};
+
+const DIRECTION_GLYPH: Record<CommDirection, { glyph: string; tone: string }> = {
+  searched: { glyph: "🔍", tone: "text-muted-foreground" },
+  sent: { glyph: "↗", tone: "text-blue-500" },
+  received: { glyph: "↙", tone: "text-green-600 dark:text-green-400" },
+};
+
+const CHANNEL_LABEL: Record<CommChannel, string> = {
+  slack: "Slack",
+  email: "Email",
+  github: "GitHub",
+};
+
+const timeOf = (iso?: string | null) =>
+  iso ? new Date(iso).toLocaleString(undefined, {
+    month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+  }) : "";
+
+/**
+ * One message, shown with its actual text.
+ *
+ * The body is rendered verbatim in a monospace block rather than summarized.
+ * A summary answers the easy questions; "what exactly did the bot say to my
+ * team" is the one people actually ask, and only the real text answers it.
+ */
+const MessageRow = ({ event }: { event: CommunicationEvent }) => {
+  const dir = DIRECTION_GLYPH[event.direction];
+  const loop = LOOP_STYLE[event.loop];
+
+  return (
+    <div className="flex gap-2.5">
+      <span className={`mt-0.5 shrink-0 text-sm ${dir.tone}`} title={event.direction}>
+        {dir.glyph}
+      </span>
+
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className={`rounded px-1.5 py-0.5 text-[10px] ${loop.className}`}>
+            {loop.label}
+          </span>
+          <span className="text-[11px] font-medium text-foreground">
+            {event.direction === "searched"
+              ? `Searched ${CHANNEL_LABEL[event.channel]}`
+              : event.direction === "sent"
+                ? `Sent via ${CHANNEL_LABEL[event.channel]}`
+                : `From ${CHANNEL_LABEL[event.channel]}`}
+          </span>
+          {event.participant && (
+            <span className="text-[11px] text-muted-foreground">
+              {event.direction === "sent" ? "to" : ""} {event.participant}
+            </span>
+          )}
+          {event.target && event.target !== event.participant && (
+            <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+              {event.target}
+            </span>
+          )}
+          {event.outcome && (
+            <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+              {event.outcome}
+            </span>
+          )}
+          {!event.succeeded && (
+            <span className="rounded bg-red-500/10 px-1.5 py-0.5 text-[10px] text-red-600 dark:text-red-400">
+              not delivered
+            </span>
+          )}
+          <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
+            {timeOf(event.created_at)}
+          </span>
+        </div>
+
+        {event.query && (
+          <p className="mt-1 font-mono text-[11px] text-muted-foreground">
+            query: {event.query}
+          </p>
+        )}
+
+        {event.subject && (
+          <p className="mt-1 text-[11px] font-medium text-foreground">
+            {event.subject}
+          </p>
+        )}
+
+        {event.body && (
+          <pre className="mt-1 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted/50 p-2 font-mono text-[11px] leading-relaxed text-foreground">
+            {event.body}
+          </pre>
+        )}
+
+        {event.permalink && (
+          <a
+            href={event.permalink}
+            target="_blank"
+            rel="noreferrer"
+            className="mt-1 inline-flex items-center gap-1 text-[11px] text-blue-600 hover:underline dark:text-blue-400"
+          >
+            Open in {CHANNEL_LABEL[event.channel]} <ExternalLink size={10} />
+          </a>
+        )}
+      </div>
+    </div>
+  );
+};
+
+/**
+ * Both loops for one PR: where it stands now, and everything said along the way.
+ *
+ * Review and testing are shown as two columns of state over one shared
+ * timeline. They are genuinely sequential -- testing only begins once the
+ * review ends in a merge -- so a single ordered log reads correctly, while
+ * two separate ones would hide the handoff between them.
+ */
+const ActivityPanel = ({ repo, prNumber }: { repo: string; prNumber: number }) => {
+  const [data, setData] = useState<PRActivity | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [filter, setFilter] = useState<CommLoop | "all">("all");
+
+  useEffect(() => {
+    let live = true;
+    setLoading(true);
+    getPRActivity(repo, prNumber)
+      .then((d) => live && setData(d))
+      .catch((e) => live && setError(e instanceof Error ? e.message : "Failed"))
+      .finally(() => live && setLoading(false));
+    return () => {
+      live = false;
+    };
+  }, [repo, prNumber]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 p-4 text-xs text-muted-foreground">
+        <Loader2 size={13} className="animate-spin" /> Loading activity…
+      </div>
+    );
+  }
+
+  if (error || !data) {
+    return (
+      <p className="p-4 text-xs text-muted-foreground">
+        {error ?? "Nothing recorded for this pull request yet."}
+      </p>
+    );
+  }
+
+  const shown =
+    filter === "all" ? data.events : data.events.filter((e) => e.loop === filter);
+
+  const reviewState = data.review?.state;
+  const qaState = !data.qa_notified
+    ? "not started"
+    : data.qa_resolved
+      ? "signed off"
+      : "awaiting tester";
+
+  return (
+    <div className="space-y-4 p-3">
+      {/* What is happening now, per loop */}
+      <div className="grid gap-2 sm:grid-cols-2">
+        <div className="rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-3">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-indigo-600 dark:text-indigo-400">
+            Senior dev review
+          </p>
+          <p className="mt-1 text-sm font-medium text-foreground">
+            {reviewState ? REVIEW_STATE_STYLE[reviewState].label : "Not started"}
+            {data.review && (
+              <span className="ml-1 text-xs font-normal text-muted-foreground">
+                · round {data.review.round_number}
+              </span>
+            )}
+          </p>
+
+          {data.reviewer_contacts.length > 0 && (
+            <ul className="mt-2 space-y-1">
+              {data.reviewer_contacts.map((c) => (
+                <li key={c.login} className="text-[11px] text-muted-foreground">
+                  <span className="text-foreground">{c.login}</span>
+                  {c.slack && <span> · {c.slack}</span>}
+                  {c.email && <span> · {c.email}</span>}
+                  {!c.slack && !c.email && (
+                    <span className="italic"> · no contact configured</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {data.review?.pending_asks?.length ? (
+            <div className="mt-2">
+              <p className="text-[11px] font-medium text-foreground">
+                Outstanding asks
+              </p>
+              <ul className="mt-0.5 space-y-0.5">
+                {data.review.pending_asks.map((a, i) => (
+                  <li key={i} className="text-[11px] text-muted-foreground">
+                    • {a}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </div>
+
+        <div className="rounded-lg border border-teal-500/30 bg-teal-500/5 p-3">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-teal-600 dark:text-teal-400">
+            Testing team
+          </p>
+          <p className="mt-1 text-sm font-medium text-foreground">{qaState}</p>
+          <ul className="mt-2 space-y-1 text-[11px] text-muted-foreground">
+            {data.qa_channel && <li>Slack · {data.qa_channel}</li>}
+            {data.qa_recipients.map((r) => (
+              <li key={r}>Email · {r}</li>
+            ))}
+            {!data.qa_channel && data.qa_recipients.length === 0 && (
+              <li className="italic">No QA channel or recipients configured</li>
+            )}
+          </ul>
+        </div>
+      </div>
+
+      {/* The message log */}
+      <div>
+        <div className="mb-2 flex items-center gap-1.5">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Messages ({data.events.length})
+          </p>
+          <div className="ml-auto flex gap-1">
+            {(["all", "review", "qa", "context"] as const).map((f) => (
+              <button
+                key={f}
+                onClick={() => setFilter(f)}
+                className={`rounded px-1.5 py-0.5 text-[10px] ${
+                  filter === f
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-muted text-muted-foreground hover:bg-muted/70"
+                }`}
+              >
+                {f === "all" ? "All" : LOOP_STYLE[f].label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {shown.length === 0 ? (
+          <p className="rounded-lg border border-dashed border-border p-4 text-center text-[11px] text-muted-foreground">
+            No messages recorded{filter !== "all" && " for this loop"}. Runs from
+            before message logging existed show nothing here — there is no record
+            to recover.
+          </p>
+        ) : (
+          <div className="space-y-3">
+            {shown.map((e) => (
+              <MessageRow key={e.id} event={e} />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 const REVIEW_STATE_STYLE: Record<ReviewState, { label: string; className: string }> = {
   awaiting_review: {
     label: "Awaiting review",
@@ -987,6 +1270,7 @@ const ReviewQueueRow = ({ review }: { review: PRReviewSummary }) => {
   const [open, setOpen] = useState(false);
   const [detail, setDetail] = useState<PRReviewDetail | null>(null);
   const [loading, setLoading] = useState(false);
+  const [tab, setTab] = useState<"history" | "activity">("history");
 
   const style = REVIEW_STATE_STYLE[review.state];
 
@@ -1039,7 +1323,27 @@ const ReviewQueueRow = ({ review }: { review: PRReviewSummary }) => {
       </button>
 
       {open && (
-        <div className="border-t border-border p-3">
+        <div className="border-t border-border">
+          <div className="flex gap-1 border-b border-border px-3 pt-2">
+            {(["history", "activity"] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => setTab(t)}
+                className={`rounded-t px-2.5 py-1 text-[11px] ${
+                  tab === t
+                    ? "bg-muted font-medium text-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {t === "history" ? "Review rounds" : "Messages & loops"}
+              </button>
+            ))}
+          </div>
+
+          {tab === "activity" ? (
+            <ActivityPanel repo={review.repo} prNumber={review.pr_number} />
+          ) : (
+          <div className="p-3">
           {loading && (
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <Loader2 size={13} className="animate-spin" /> Loading history…
@@ -1102,6 +1406,8 @@ const ReviewQueueRow = ({ review }: { review: PRReviewSummary }) => {
               )}
             </div>
           )}
+          </div>
+          )}
         </div>
       )}
     </div>
@@ -1128,6 +1434,7 @@ export default function PRAgentDashboard() {
   const [closeIssues, setCloseIssues] = useState(true);
   const [reviewersInput, setReviewersInput] = useState("");
   const [reviewChannelInput, setReviewChannelInput] = useState("");
+  const [reviewerContactsInput, setReviewerContactsInput] = useState("");
   const [autoMerge, setAutoMerge] = useState(false);
   const [mergeMethod, setMergeMethod] = useState<MergeMethod>("squash");
   const [busy, setBusy] = useState(false);
@@ -1170,6 +1477,7 @@ export default function PRAgentDashboard() {
     setCloseIssues(reg.close_issues_on_merge ?? true);
     setReviewersInput((reg.reviewers ?? []).join(", "));
     setReviewChannelInput(reg.review_slack_channel ?? "");
+    setReviewerContactsInput(reg.reviewer_contacts ?? "");
     setAutoMerge(reg.auto_merge_on_approval ?? false);
     setMergeMethod(reg.merge_method ?? "squash");
   }, []);
@@ -1241,6 +1549,7 @@ export default function PRAgentDashboard() {
         closeIssues,
         reviewers,
         reviewChannelInput.trim() || undefined,
+        reviewerContactsInput.trim() || undefined,
         autoMerge,
         mergeMethod
       );
@@ -1433,6 +1742,20 @@ export default function PRAgentDashboard() {
               GitHub does not restrict that, and a review from anyone else is still
               recorded. Falls back to the summary channel when no review channel is
               set.
+            </p>
+
+            <textarea
+              value={reviewerContactsInput}
+              onChange={(e) => setReviewerContactsInput(e.target.value)}
+              placeholder={"senior-dev, @sr-dev, sr@company.com\ntech-lead, @lead, lead@company.com"}
+              rows={2}
+              className="mt-2 w-full rounded-lg border border-border bg-background px-3 py-2 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-primary/50"
+            />
+            <p className="mt-1 text-xs text-muted-foreground">
+              Optional, one reviewer per line:{" "}
+              <span className="font-mono">login, @slack, email</span>. A GitHub login
+              is not a Slack handle and not an address — without this the dashboard
+              can say a review was requested but not who was actually reached.
             </p>
 
             <label className="mt-2 flex items-center gap-2 text-xs text-foreground">

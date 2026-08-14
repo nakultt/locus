@@ -53,23 +53,37 @@ class TestPostQaThread:
 
         with patch("app.services.merge_actions.httpx.AsyncClient",
                    return_value=fake_client(payload)):
-            ts, channel_id = await post_qa_thread(config, "#web", result, "brief")
+            ts, channel_id, text = await post_qa_thread(
+                config, "#web", result, "brief"
+            )
 
         assert ts == "1786638974.393459"
         assert channel_id == "C09WEB123"
+        # The posted text comes back so the timeline records what the channel
+        # actually saw, rather than a reconstruction that can drift from it.
+        assert "brief" in text
 
     @pytest.mark.asyncio
-    async def test_failure_returns_a_pair(self, result):
-        """Callers unpack two values; a failure must not raise on unpack."""
+    async def test_failure_returns_a_triple(self, result):
+        """Callers unpack three values; a failure must not raise on unpack."""
         config = {"credentials": {"bot_token": "xoxb-x"}}
 
         with patch("app.services.merge_actions.httpx.AsyncClient",
                    return_value=fake_client({"ok": False, "error": "not_in_channel"})):
-            assert await post_qa_thread(config, "#web", result, "b") == (None, None)
+            ts, channel_id, text = await post_qa_thread(config, "#web", result, "b")
+
+        assert (ts, channel_id) == (None, None)
+        # Text is returned even on failure: a QA notification that did not go
+        # out is exactly the one worth showing, and it can only be shown if
+        # the attempted body survives the failure.
+        assert text
 
     @pytest.mark.asyncio
-    async def test_missing_token_returns_a_pair(self, result):
-        assert await post_qa_thread({}, "#web", result, "b") == (None, None)
+    async def test_missing_token_returns_a_triple(self, result):
+        ts, channel_id, text = await post_qa_thread({}, "#web", result, "b")
+
+        assert (ts, channel_id) == (None, None)
+        assert text
 
 
 class TestReplyMatching:
