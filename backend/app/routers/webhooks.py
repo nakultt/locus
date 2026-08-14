@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from app import crud, models, schemas, security
 from app.database import SessionLocal, get_db
 from app.dependencies import get_current_user, get_integration_configs
-from app.services import comms_log, github_pr, review_flow
+from app.services import automerge, comms_log, review_flow
 from app.services.agent_settings import resolve_settings
 from app.services.capabilities import build_readiness
 from app.services.google_docs_context import extract_document_id
@@ -959,91 +959,22 @@ async def _try_auto_merge(
     integration_configs: dict[str, dict],
 ) -> schemas.MergeGateResult:
     """
-    Merge an approved PR, if every gate passes.
+    Try to merge on the approval event.
 
-    Approval alone is not enough. A reviewer clicking approve is saying the
-    change is right, not that CI passed -- they may not have looked, and on a
-    fast-moving PR the checks may not have finished. This is the only path
-    that writes to a default branch with no human in the loop, so the gate is
-    evaluated independently of the approval and every refusal is reported.
-
-    The merge itself is not the end of the flow: GitHub fires a
-    `closed` + `merged=true` webhook for an API merge exactly as it does for a
-    human one, which queues the ordinary merge job -- Jira transition, issue
-    closing, QA notification. Nothing about step 5 is special-cased here.
+    The real work lives in `automerge.attempt_merge`, which is also driven on
+    a timer -- a gate evaluated only here would leave a PR stuck whenever
+    GitHub had not finished computing mergeability at the instant the approval
+    arrived, which is the common case rather than the rare one.
     """
-    github_config = integration_configs.get("github") or {}
-    token = github_config.get("api_key") or ""
-    if not token:
-        return schemas.MergeGateResult(
-            blockers=["GitHub is not connected"]
-        )
-
-    # Re-read the PR rather than trusting the webhook payload: mergeability
-    # and the head commit may have moved between the review and this job.
-    try:
-        pr = await github_pr.get_pull_request(token, job.repo, job.pr_number)
-    except Exception as e:
-        return schemas.MergeGateResult(blockers=[f"Could not read the PR: {e}"])
-
-    if pr.get("merged"):
-        return schemas.MergeGateResult(
-            merged=True, detail="Already merged before the gate ran"
-        )
-
-    head_sha = (pr.get("head") or {}).get("sha") or job.head_sha or ""
-    ci_state, failing = ("success", [])
-    if head_sha:
-        try:
-            ci_state, failing = await github_pr.get_combined_ci_state(
-                token, job.repo, head_sha
-            )
-        except Exception as e:
-            return schemas.MergeGateResult(
-                blockers=[f"Could not read CI status: {e}"]
-            )
-
-    # The most recent completed analysis for this PR carries the findings the
-    # gate refuses to merge over.
-    analysis = None
-    last = (
-        db.query(models.PRJob)
-        .filter(
-            models.PRJob.repo == job.repo,
-            models.PRJob.pr_number == job.pr_number,
-            models.PRJob.owner_id == job.owner_id,
-            models.PRJob.status == schemas.PRJobStatus.completed.value,
-            models.PRJob.result_json.isnot(None),
-        )
-        .order_by(models.PRJob.completed_at.desc())
-        .first()
-    )
-    if last is not None:
-        try:
-            analysis = schemas.PRAnalysisResult.model_validate_json(last.result_json)
-        except Exception:
-            # A result stored under an older schema must not block a merge
-            # by looking like a failure to read findings.
-            analysis = None
-
-    allowed, blockers = review_flow.evaluate_merge_gate(
-        review, analysis, ci_state, failing, pr.get("mergeable")
-    )
-
-    if not allowed:
-        return schemas.MergeGateResult(blockers=blockers)
-
-    merged, detail = await github_pr.merge_pull_request(
-        token,
-        job.repo,
-        job.pr_number,
-        merge_method=settings.merge_method,
-        commit_title=f"{review.pr_title or 'Merge pull request'} (#{job.pr_number})",
-    )
-
-    return schemas.MergeGateResult(
-        attempted=True, merged=merged, detail=detail,
-        blockers=[] if merged else [detail],
+    return await automerge.attempt_merge(
+        db,
+        owner_id=job.owner_id,
+        repo=job.repo,
+        pr_number=job.pr_number,
+        review=review,
+        settings=settings,
+        integration_configs=integration_configs,
+        head_sha=job.head_sha,
     )
 
 

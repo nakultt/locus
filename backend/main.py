@@ -22,7 +22,7 @@ from app.routers import (
     slack_events,
     webhooks,
 )
-from app.services.worker import qa_email_loop, worker_loop
+from app.services.worker import merge_gate_loop, qa_email_loop, worker_loop
 
 
 @asynccontextmanager
@@ -33,6 +33,7 @@ async def lifespan(app: FastAPI):
     tasks = [
         asyncio.create_task(worker_loop()),
         asyncio.create_task(qa_email_loop()),
+        asyncio.create_task(merge_gate_loop()),
     ]
     try:
         yield

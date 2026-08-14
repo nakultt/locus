@@ -59,6 +59,35 @@ async def worker_loop() -> None:
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
 
+async def merge_gate_loop() -> None:
+    """
+    Retry auto-merge for approved PRs the gate was not ready to pass.
+
+    Separate from the job worker because it is not driven by queued work: it
+    exists precisely for the case where no event will arrive. GitHub emits
+    nothing when mergeability finishes computing, so without this an approved
+    PR whose first gate read returned `mergeable: null` -- the common case,
+    since the approval webhook fires within a second of the click -- would sit
+    open forever.
+    """
+    from app.services.automerge import SWEEP_INTERVAL_SECONDS, sweep_once
+
+    logger.info("Auto-merge sweeper started")
+
+    while True:
+        try:
+            await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
+            merged = await sweep_once()
+            if merged:
+                logger.info("Auto-merge sweep merged %s pull request(s)", merged)
+
+        except asyncio.CancelledError:
+            logger.info("Auto-merge sweeper stopping")
+            raise
+        except Exception:
+            logger.exception("Auto-merge sweep failed")
+
+
 async def qa_email_loop() -> None:
     """
     Poll Gmail for QA replies.

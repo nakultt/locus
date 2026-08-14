@@ -339,6 +339,12 @@ Unverified findings and P2/P3 do **not** block. They are advisory, and blocking 
 opinion would make the feature unusable — and would hand an unverified finding authority the
 confirmed/unverified split exists to deny it.
 
+**A held merge is retried, not abandoned.** GitHub computes mergeability lazily, so the first
+read right after an approval usually returns "unknown" — and it emits no event when it
+finishes. A sweeper re-checks approved PRs every 60 seconds for up to 24 hours, silently, and
+announces only when the merge lands. Without it, the common case is an approved PR that never
+merges.
+
 Anything held is reported to Slack with every reason at once, so a fixed CI failure does not
 lead to a fresh surprise on the next round. An approved PR that quietly stays open reads as a
 broken feature, so the loop always says why.
