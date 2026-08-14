@@ -467,3 +467,252 @@ No part of this has run against live Google Calendar, Jira, Slack, or GitHub. Re
 are written against the documented APIs. The solver, the date parser, and the auth and
 credential-isolation work are exercised directly and do not depend on those services, but
 every call that reads or writes to them is unproven.
+
+---
+
+## Phase 5 — Persistent task context
+
+The review and QA loops are built and the message log exists, but nothing reads
+the log back. Every model call still gets context gathered fresh, and the
+gathering re-runs on every push and again on merge — a PR with five pushes
+searches Slack six times for the same terms, against an API limited to roughly
+20 requests a minute.
+
+The goal of this phase is that context is **accumulated once and reused**,
+without ever reusing anything derived from code that has changed.
+
+### 5.0 The rule this phase must not break
+
+Context splits into two halves that behave differently, and conflating them is
+the failure mode to design against:
+
+| | Changes between review rounds? | Reuse? |
+|---|---|---|
+| Diff, changed files | Always — that is what a round *is* | Never |
+| Semgrep / Gitleaks findings | Derived from the diff | Never |
+| Code review findings | Derived from the diff | Never |
+| Slack prior discussion | Rarely | Yes |
+| Linked issue bodies | Rarely | Yes |
+| Jira summary / status | Occasionally | Yes, short TTL |
+
+Caching the whole brief and skipping re-analysis would resubmit round two
+carrying round one's security findings against round two's code. That is worse
+than the waste it saves: a vulnerability introduced while fixing something else
+would pass unreported. **The requirement half caches; the code half never does.**
+
+### 5.1 `context_brief()` — render, do not store
+
+A function that assembles `communication_events`, `PRReview`/`PRReviewRound`,
+and the linked tickets and issues into one ordered markdown document, on demand.
+
+Markdown was considered as the *storage* format and rejected. Files have no
+transactions, and three things already write per-PR state concurrently (the job
+worker, the Gmail poller, the auto-merge sweeper); they are not queryable, so
+"which PRs did QA reject this week" becomes a grep; they break under
+multi-instance deployment, which is already needed; and flattening typed
+columns to prose means parsing prose to get them back.
+
+Rendering on demand keeps one source of truth and costs nothing to keep
+correct.
+
+Consumers, in order of value: the code reviewer, the QA brief, the
+changes-requested summarizer, and the resubmission message.
+
+### 5.2 Key the log by ticket, not only by pull request
+
+`communication_events` is keyed `(repo, pr_number)`. A Jira ticket routinely
+spans several pull requests — the feature, the fix after QA rejected it, the
+follow-up — and today each starts from an empty log.
+
+Add a nullable `ticket_key`, populated from the keys `linking.py` already
+extracts. Then "everything ever said about LOC-42" is one query across every PR
+that touched it, and the second PR on a ticket starts with the first one's
+context instead of nothing.
+
+Nullable because a PR with no ticket is normal and must keep working.
+
+### 5.3 Freshness window on gathering
+
+Skip the Slack, Jira, and issue reads when the log already holds them from
+within the window and no new ticket key has appeared since.
+
+This is what actually removes the 6× waste. It depends on 5.1 and 5.2 landing
+first: without the brief there is nothing to reuse, and without the ticket key
+the cache misses on the second PR of a ticket.
+
+The diff scan and both review passes stay outside the window, per 5.0.
+
+### 5.4 Delta-aware resubmission
+
+Today a push after changes-requested tells the reviewer only "updated and ready
+for round 2". They then re-read the whole diff to work out whether their two
+asks were addressed. That is the most expensive re-read in the system, and it
+is a person's time rather than an API call.
+
+`PRReviewRound.head_sha` already records the exact commit each review was made
+against, so the diff since the reviewer last looked is computable today. The
+message should pair each outstanding ask with what changed:
+
+```
+Round 2 — you asked for:
+  • Add a test for the retry path  →  tests/test_retry.py  +38
+  • Cap the backoff                →  retry.py  +4 −1
+  2 files changed since your review
+```
+
+This is the item a customer would notice first. It needs no new schema.
+
+### 5.5 Live Slack capture (stretch)
+
+The log records only what Locus touched. The Slack search runs at fixed
+moments, so a discussion that happens in `#eng` two hours after the search
+never enters the record.
+
+Widening the existing `message.channels` subscription to record channel
+messages carrying a known ticket key would make the history live rather than a
+series of snapshots. Deferred behind 5.1–5.4 because it needs a Slack scope
+change and a noise filter, and the value is lower than the delta message.
+
+---
+
+## Phase 6 — Task dashboard
+
+The dashboard today is a **record**, not a **worklist**. It answers "what
+happened on PR #42" — you pick a pull request and expand it. The question a
+developer actually has is the inverse: "across everything I have open, what is
+waiting on me?" Nothing answers that. Finding the two PRs that need action
+means expanding six.
+
+Everything needed is already stored. This phase is aggregation and
+presentation, not new plumbing.
+
+### 6.0 Task-level, not PR-level — and why it depends on 5.2
+
+The unit a developer thinks in is the **task** — the Jira ticket or GitHub
+issue — not the pull request. One task routinely spans several PRs: the
+feature, the fix after QA rejected it, the follow-up.
+
+Everything in the system today is keyed by `(repo, pr_number)`. A task-level
+dashboard is therefore **blocked on 5.2** (ticket keying); without it, the same
+piece of work appears as three unrelated rows with no way to tell they are one
+thing.
+
+Build 5.2 first. A PR-level version is possible sooner and is strictly worse:
+it shows a task that has been round-tripping for two weeks as three separate
+young items.
+
+### 6.1 The organizing principle: who is blocked
+
+Sort by **whether the ball is with you**, not by PR, repo, or recency.
+
+Two sections. *Needs you* is the whole point of the page. *Waiting on someone
+else* is collapsed by default — visible so nothing feels lost, but not
+competing for attention with things that can be acted on.
+
+Within *needs you*, escalate by **staleness rather than severity**. A task on
+round five for three days is a conversation that is not converging, which is
+precisely the signal nobody sees today. That is what the round counter was
+built for and where it earns its keep.
+
+### 6.2 Sources — start narrow
+
+Every item must be something a person can act on now:
+
+| Source | Item | Where it comes from |
+|---|---|---|
+| Review loop | Reviewer requested changes | `PRReview.pending_asks` + the round's verbatim body |
+| Testing loop | QA reported broken | `CommunicationEvent` with `outcome='broken'` |
+| Auto-merge | Held on something a human must fix | Gate blockers: conflict, red CI, confirmed finding, P1 |
+| Delivery | A message failed to send | `CommunicationEvent.succeeded = 0` |
+
+Nothing else, initially. The risk in this phase is **precision, not
+complexity**: a list that shows things which do not actually need you is
+ignored within a week, and once ignored it is very hard to win back. Add
+sources only when someone asks for one.
+
+### 6.3 Show the words, not just the label
+
+Each item carries the asker's own sentence, not only the model-written
+checklist. The checklist is for scanning; the quote is for acting.
+
+Rank **humans above the bot**. "@senior-dev: add a test" and "P1 finding:
+possible null deref" are not the same weight — a person asked, a model
+guessed. Styling them identically teaches people to skim both.
+
+### 6.4 One endpoint
+
+`GET /webhooks/worklist` returning the aggregated items across all repos for
+the authenticated user, already ordered. Ordering is a server concern: the
+client should not be able to disagree with the API about what is most urgent.
+
+Reuses the existing per-resource 404 rule and `owner_id` scoping.
+
+### 6.5 What is deliberately not built
+
+Recorded because this is where dashboards usually go wrong, and the reasons
+are easy to lose.
+
+**No mark-as-done checkbox.** It duplicates state GitHub already owns and goes
+stale within minutes. Derive an item's presence instead: the developer pushes,
+the round advances, the item disappears on its own. Derived state beats tracked
+state.
+
+**No read/unread.** A second state machine to keep in sync with the first, and
+it will drift.
+
+**No new notification channel.** Slack already pings. This page's job is the
+*durable* view — Slack scrollback loses things, and "what is still outstanding"
+must survive scrolling past it.
+
+**No cross-user view.** One person's worklist. A team view is a different
+product with different access questions, and building it early would force
+those questions before there is a reason to answer them.
+
+---
+
+## Phase 7 — Before charging money
+
+Ordered by what would lose a customer first.
+
+### 7.1 Decide when tickets and issues close
+
+**This is a product decision, not an implementation task, and it is open.**
+
+Built today: merge closes the Jira ticket and linked issues, and a "broken" QA
+verdict reopens them.
+
+The alternative: merge notifies QA only, and nothing closes until a tester
+confirms.
+
+The current design is optimistic and self-correcting; the alternative is
+conservative and never shows a closed ticket for something that turned out
+broken. Both are defensible. They are different products, and the choice
+changes `merge_actions` and `qa_feedback` together.
+
+### 7.2 One live end-to-end run
+
+No part of the PR agent has run against live GitHub, Jira, and Slack
+credentials together. Every leg is unit-tested and the full lifecycle has been
+driven through the real webhook and worker with the network faked, but
+response-shape handling for those three is written against documented APIs.
+
+This is the single largest risk to a paying customer and it needs one real
+repository, one real Jira project, and one real Slack workspace, once.
+
+### 7.3 Row locking
+
+The job worker, the Gmail poller, and the auto-merge sweeper all assume a
+single process. Two instances double-process: two analyses per push, two QA
+emails, two merge attempts.
+
+`SELECT ... FOR UPDATE SKIP LOCKED` on job claim, and an advisory lock around
+the sweep. Required before any HA or scale deployment.
+
+### 7.4 Senior dev email notifications
+
+Reviewer email addresses are collected and displayed but never used to send.
+Review notifications go to Slack only.
+
+A review *verdict* must remain a GitHub review — an email saying "looks good"
+cannot gate a merge — so this is notification only, following the
+`merge_actions.email_test_team` pattern.
