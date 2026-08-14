@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 import httpx
 
 from app.schemas import (
+    FindingSource,
     LinkedIssue,
     PipelineStage,
     PRAnalysisResult,
@@ -32,7 +33,13 @@ from app.schemas import (
     ToolInvocation,
 )
 from app.services import github_pr, google_docs_context, linking, search_terms
-from app.services.security_scan import run_code_review, scan_changes
+from app.services.security_scan import (
+    FIX_WORTHY_PRIORITIES,
+    FIX_WORTHY_SEVERITIES,
+    run_code_review,
+    scan_changes,
+    suggest_fixes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -478,7 +485,150 @@ def _render_requirement_context(context: PRContext) -> str:
     )
 
 
+def _fix_candidates(
+    confirmed: list[SecurityFinding],
+    unverified: list[SecurityFinding],
+    review_findings: list[ReviewFinding],
+) -> list[ReviewFinding | SecurityFinding]:
+    """
+    The findings worth spending a model call on writing code for.
+
+    Nits are excluded on purpose. A suggestion block renders an Apply button
+    whatever the priority, and offering one-click code for a naming quibble
+    invites churn on changes nobody asked to be made. P1 and P2, and security
+    findings of medium and above, are the ones where someone genuinely has
+    work to do next.
+
+    Unverified security findings are included: the finding is a guess, but if
+    the reader is going to evaluate it anyway, seeing the concrete change it
+    implies is what makes it evaluable.
+
+    Gitleaks findings are excluded outright, whatever their severity. A
+    detected credential is reported by location and never by value; writing a
+    replacement line means sending the model the source that contains the live
+    secret and rendering its answer into a PR comment, which is exactly the
+    widening of exposure the location-only rule exists to prevent. The fix for
+    a committed secret is to rotate it, which is not a code edit anyway.
+    """
+    def worth_fixing(f: SecurityFinding) -> bool:
+        return (
+            f.severity in FIX_WORTHY_SEVERITIES
+            and f.source is not FindingSource.gitleaks
+        )
+
+    return [
+        *(f for f in confirmed if worth_fixing(f)),
+        *(f for f in unverified if worth_fixing(f)),
+        *(f for f in review_findings if f.priority in FIX_WORTHY_PRIORITIES),
+    ]
+
+
 # ============== Rendering ==============
+
+def _render_suggested_fix(fix) -> list[str]:
+    """
+    Render a suggested fix inside the summary comment.
+
+    Deliberately a plain fenced block, not a ```suggestion one. The summary is
+    posted to the issues endpoint, where GitHub renders a suggestion fence as
+    an ordinary code block with no Apply button -- so using that fence here
+    would only produce something that looks applicable and is not. The
+    applicable copy goes out as an inline review comment; see
+    `build_inline_comments`.
+    """
+    if fix is None:
+        return []
+
+    lines: list[str] = []
+
+    if fix.replacement:
+        lines.append("")
+        lines.append("  <details><summary>Suggested fix</summary>")
+        lines.append("")
+        lines.append("  ```")
+        lines.extend(f"  {line}" for line in fix.replacement.splitlines())
+        lines.append("  ```")
+        if fix.explanation:
+            lines.append("")
+            lines.append(f"  {fix.explanation}")
+        lines.append("")
+        lines.append("  </details>")
+    elif fix.explanation:
+        lines.append(f"  _Suggested fix:_ {fix.explanation}")
+
+    return lines
+
+
+def _finding_label(finding) -> str:
+    """The severity or priority tag for a finding, whichever kind it is."""
+    if isinstance(finding, ReviewFinding):
+        return f"**{finding.priority.value.upper()}** ({finding.category})"
+    return f"**{finding.severity.value.upper()}** security"
+
+
+def build_inline_comments(
+    result: PRAnalysisResult,
+    commentable: dict[str, set[int]],
+) -> list[dict]:
+    """
+    Turn findings that carry a fix into anchored review comments.
+
+    Only findings whose fix covers lines the diff actually touches become
+    comments. GitHub rejects an anchor outside the diff with a 422, and the
+    scanner reads whole reconstructed files, so a finding may legitimately
+    point at code this PR never changed. Those keep their place in the summary
+    comment; they just cannot be applied inline.
+
+    The anchor is the fix's `end_line`, because GitHub attaches a multi-line
+    suggestion to the last line of its range and reads `start_line` upward
+    from there.
+    """
+    comments: list[dict] = []
+
+    findings = [
+        *result.confirmed_findings,
+        *result.unverified_findings,
+        *result.review_findings,
+    ]
+
+    for finding in findings:
+        fix = finding.suggested_fix
+        if fix is None or not fix.replacement or fix.end_line is None:
+            continue
+
+        lines = commentable.get(finding.file_path)
+        if not lines:
+            continue
+
+        start = fix.start_line if fix.start_line is not None else fix.end_line
+        # Every line the suggestion replaces has to be in the diff. Applying a
+        # range that extends past it would silently overwrite code this PR
+        # never touched.
+        if any(n not in lines for n in range(start, fix.end_line + 1)):
+            continue
+
+        body = [f"{_finding_label(finding)} — {finding.title}", ""]
+        if finding.description:
+            body.append(finding.description)
+            body.append("")
+        body.append("```suggestion")
+        body.extend(fix.replacement.splitlines())
+        body.append("```")
+        if fix.explanation:
+            body.append("")
+            body.append(fix.explanation)
+
+        comment: dict = {
+            "path": finding.file_path,
+            "line": fix.end_line,
+            "body": "\n".join(body),
+        }
+        if fix.start_line is not None and fix.start_line < fix.end_line:
+            comment["start_line"] = fix.start_line
+        comments.append(comment)
+
+    return comments
+
 
 def _render_review_findings(findings: list[ReviewFinding]) -> str:
     """Render the non-security review section."""
@@ -506,6 +656,7 @@ def _render_review_findings(findings: list[ReviewFinding]) -> str:
         lines.append(f"  `{location}`")
         if finding.description:
             lines.append(f"  {finding.description}")
+        lines.extend(_render_suggested_fix(finding.suggested_fix))
         lines.append("")
 
     return "\n".join(lines)
@@ -529,6 +680,7 @@ def _render_findings(findings: list[SecurityFinding], heading: str, caveat: str)
         lines.append(f"  `{location}`")
         if finding.description:
             lines.append(f"  {finding.description}")
+        lines.extend(_render_suggested_fix(finding.suggested_fix))
         lines.append("")
 
     return "\n".join(lines)
@@ -992,13 +1144,15 @@ async def analyze_pull_request(
     # the LLM review, where what changed matters more than whole-file context.
     confirmed: list[SecurityFinding] = []
     unverified: list[SecurityFinding] = []
-    # Bound here so the review stage below still runs its skip path if the
-    # fetch raises.
+    # Bound here so the stages below still run their skip paths if the fetch
+    # raises. `head_sha` and `changed_files` are needed by the fix-suggestion
+    # and inline-comment steps, which run outside this try.
     diff = ""
+    changed_files: dict[str, str] = {}
+    head_sha = pr.get("head", {}).get("sha") or branch or "HEAD"
     try:
         diff = await github_pr.get_pr_diff(github_token, repo, pr_number)
 
-        head_sha = pr.get("head", {}).get("sha") or branch or "HEAD"
         try:
             changed_files, file_notes = await github_pr.get_changed_file_contents(
                 github_token, repo, pr_number, head_sha
@@ -1075,6 +1229,38 @@ async def analyze_pull_request(
         _stage(stages, "review", "Review code changes", "read", StageState.skipped,
                "LLM review disabled" if not enable_llm_review else "no diff to review")
 
+    # 6c. The code that fixes what we just reported.
+    #
+    # A finding tells someone where to look; the diff to apply is the part
+    # they still have to write. Runs after both passes so one call covers
+    # security and review findings together, and only over findings worth
+    # acting on -- see `_fix_candidates`.
+    #
+    # Deliberately not fatal and deliberately last: the findings are the
+    # product, and losing them because the suggestion pass broke would be a
+    # far worse outcome than a comment with no suggested code.
+    fix_targets = _fix_candidates(confirmed, unverified, review_findings)
+    if fix_targets and changed_files:
+        try:
+            attached, fix_error = await suggest_fixes(fix_targets, changed_files)
+            if fix_error:
+                errors.append(fix_error)
+        except Exception as e:
+            errors.append(f"Fix suggestions failed: {e}")
+            _stage(stages, "suggest_fixes", "Write suggested fixes", "read",
+                   StageState.failed, str(e))
+        else:
+            _record(tool_calls, "scanners", "suggest_fixes",
+                    query=f"{len(fix_targets)} finding(s)", result_count=attached)
+            _stage(stages, "suggest_fixes", "Write suggested fixes", "read",
+                   StageState.done,
+                   f"{attached} of {len(fix_targets)} finding(s) got a fix")
+    else:
+        _stage(stages, "suggest_fixes", "Write suggested fixes", "read",
+               StageState.skipped,
+               "no findings worth a fix" if not fix_targets
+               else "changed file contents unavailable")
+
     result = PRAnalysisResult(
         context=context,
         confirmed_findings=confirmed,
@@ -1102,6 +1288,42 @@ async def analyze_pull_request(
     else:
         _stage(stages, "pr_comment", "Comment on the PR", "write",
                StageState.skipped, "merged PR — outcome goes to Slack and QA instead")
+
+    # 6b. The applicable copy of each fix, anchored to the line it changes.
+    #
+    # The summary comment can only describe a fix; GitHub renders an Apply
+    # button on inline review comments only. Anchors are checked against the
+    # diff first, because a finding may point at code this PR never touched
+    # and GitHub rejects an out-of-diff anchor outright.
+    #
+    # The previous round's inline comments are removed first: unlike the
+    # summary they cannot be edited in place, since the line one was attached
+    # to may no longer exist after a push.
+    if post_comment and any(
+        f.suggested_fix and f.suggested_fix.replacement
+        for f in (*confirmed, *unverified, *review_findings)
+    ):
+        try:
+            commentable = await github_pr.get_diff_line_positions(
+                github_token, repo, pr_number
+            )
+            inline = build_inline_comments(result, commentable)
+            if inline:
+                await github_pr.clear_inline_comments(github_token, repo, pr_number)
+                posted, notes = await github_pr.post_inline_comments(
+                    github_token, repo, pr_number, head_sha, inline
+                )
+                result.errors.extend(notes)
+                _stage(stages, "inline_comments", "Post applicable fixes", "write",
+                       StageState.done, f"{posted} suggestion(s) posted")
+            else:
+                _stage(stages, "inline_comments", "Post applicable fixes", "write",
+                       StageState.skipped,
+                       "no fix landed on a line this PR changed")
+        except Exception as e:
+            result.errors.append(f"Could not post inline suggestions: {e}")
+            _stage(stages, "inline_comments", "Post applicable fixes", "write",
+                   StageState.failed, str(e))
 
     # 7. Google Doc record
     if export_to_docs:
@@ -1170,9 +1392,13 @@ async def analyze_pull_request(
         # The work items this PR belongs to, for keying the log and grouping
         # pull requests into tasks. Issue references count: a repo with no
         # tracker still has work items, they are just numbered differently.
+        # A GitHub issue is qualified by its repository. A bare "#5" is
+        # ambiguous across repos and, more concretely, cannot be matched
+        # against an assigned issue -- which the task board identifies as
+        # "owner/name#5", the same shape worklist._task_key falls back to.
         comms["ticket_keys"] = (
             [t.key for t in context.tickets]
-            or [f"#{i.number}" for i in context.linked_issues
+            or [f"{repo}#{i.number}" for i in context.linked_issues
                 if i.relation == "closes"]
         )
 

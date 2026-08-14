@@ -68,6 +68,7 @@ def _derive_stage(
     reviews: list[models.PRReview],
     qa: models.QAThread | None,
     analyzed: bool,
+    has_pr: bool = False,
 ) -> tuple[schemas.TaskStage, bool]:
     """
     How far this task has travelled, and whether changes were ever requested.
@@ -77,6 +78,11 @@ def _derive_stage(
     genuinely still in review, but a ticket with one merged PR and one
     abandoned draft has merged. Ordering the states and taking the max
     resolves both without special-casing either.
+
+    A `PRReview` row only exists once someone requests a review, so the early
+    stages cannot be derived from it. An open pull request that has been
+    analyzed but not yet sent for review is real progress, and reporting it as
+    `assigned` would say no work had started at all.
     """
     if qa is not None:
         return (
@@ -86,9 +92,11 @@ def _derive_stage(
         )
 
     if not reviews:
-        return (
-            schemas.TaskStage.analyzed if analyzed else schemas.TaskStage.assigned
-        ), False
+        if analyzed:
+            return schemas.TaskStage.analyzed, False
+        if has_pr:
+            return schemas.TaskStage.in_progress, False
+        return schemas.TaskStage.assigned, False
 
     # Ranked by how far along the loop each state is.
     rank = {
@@ -282,6 +290,28 @@ async def build(
         .all()
     }
 
+    # Which pull requests belong to which work item, from the key the analysis
+    # recorded. A `PRReview` row only appears once a review is requested, so
+    # without this an open, analyzed pull request is invisible to the join and
+    # its task reads as "assigned" -- as though nobody had started.
+    prs_by_key: dict[str, set[tuple[str, int]]] = {}
+    for event in (
+        db.query(
+            models.CommunicationEvent.ticket_key,
+            models.CommunicationEvent.repo,
+            models.CommunicationEvent.pr_number,
+        )
+        .filter(
+            models.CommunicationEvent.owner_id == owner_id,
+            models.CommunicationEvent.ticket_key.isnot(None),
+        )
+        .distinct()
+        .all()
+    ):
+        prs_by_key.setdefault(event.ticket_key, set()).add(
+            (event.repo, event.pr_number)
+        )
+
     # Attention, computed once by the module that owns those rules.
     work = worklist.build(db, owner_id=owner_id)
     by_key = {
@@ -293,6 +323,11 @@ async def build(
         matched = _matching_reviews(reviews, item.key, item)
         pr_idents = {(r.repo, r.pr_number) for r in matched}
 
+        # Pull requests known only from the analysis log, before any review
+        # was requested. Reviewed PRs already carry richer rows, so those win.
+        logged_prs = prs_by_key.get(item.key, set())
+        pr_idents |= logged_prs
+
         qa = next(
             (
                 thread for thread in qa_threads
@@ -303,8 +338,35 @@ async def build(
         )
         analyzed = bool(pr_idents & analyzed_prs)
 
-        stage, had_changes = _derive_stage(matched, qa, analyzed)
+        stage, had_changes = _derive_stage(
+            matched, qa, analyzed, has_pr=bool(pr_idents)
+        )
         task = by_key.get(item.key)
+
+        # Every pull request on this work item: the reviewed ones with their
+        # full state, then any known only from the analysis log.
+        reviewed_idents = {(r.repo, r.pr_number) for r in matched}
+        pull_requests = [
+            schemas.TaskPullRequest(
+                repo=r.repo,
+                pr_number=r.pr_number,
+                url=r.pr_url,
+                title=r.pr_title,
+                author=r.author,
+                review_state=r.state,
+                round_number=r.round_number,
+                last_reviewer=r.last_reviewer,
+            )
+            for r in sorted(matched, key=lambda r: r.pr_number)
+        ]
+        pull_requests += [
+            schemas.TaskPullRequest(
+                repo=repo,
+                pr_number=number,
+                url=f"https://github.com/{repo}/pull/{number}",
+            )
+            for repo, number in sorted(logged_prs - reviewed_idents)
+        ]
 
         cards.append(schemas.TaskCard(
             key=item.key,
@@ -318,19 +380,7 @@ async def build(
             updated_at=item.updated_at,
             stage=stage,
             stages=_build_stages(stage, had_changes, matched),
-            pull_requests=[
-                schemas.TaskPullRequest(
-                    repo=r.repo,
-                    pr_number=r.pr_number,
-                    url=r.pr_url,
-                    title=r.pr_title,
-                    author=r.author,
-                    review_state=r.state,
-                    round_number=r.round_number,
-                    last_reviewer=r.last_reviewer,
-                )
-                for r in sorted(matched, key=lambda r: r.pr_number)
-            ],
+            pull_requests=pull_requests,
             items=task.items if task else [],
             needs_you=task.needs_you if task else False,
             blocked_reason=_blocked_reason(task.items) if task else None,

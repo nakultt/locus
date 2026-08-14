@@ -101,6 +101,56 @@ class TestJoining:
         assert card.stage is schemas.TaskStage.assigned
 
 
+class TestWorkItemKeyShape:
+    """
+    A GitHub issue's work-item key must carry its repository.
+
+    The pipeline once recorded a linked issue as a bare "#5". The task board
+    identifies the same issue as "owner/name#5" -- the shape
+    `worklist._task_key` already falls back to -- so the two never matched and
+    a card found neither its pull requests nor its messages. A bare "#5" is
+    also ambiguous across repositories.
+    """
+
+    @pytest.mark.asyncio
+    async def test_bare_issue_key_does_not_join(self, db, monkeypatch):
+        """The regression, stated directly: this is what used to be stored."""
+        db.add(models.CommunicationEvent(
+            repo=REPO, pr_number=6, ticket_key="#5",
+            loop="context", direction="received", channel="github",
+            owner_id=OWNER,
+        ))
+        db.commit()
+
+        board = await _build(
+            db,
+            [_item("acme/widget#5", source=schemas.TaskSource.github)],
+            monkeypatch=monkeypatch,
+        )
+        card = (board.needs_you + board.in_flight)[0]
+
+        assert card.pull_requests == []
+        assert card.stage is schemas.TaskStage.assigned
+
+    @pytest.mark.asyncio
+    async def test_repo_qualified_key_joins(self, db, monkeypatch):
+        db.add(models.CommunicationEvent(
+            repo=REPO, pr_number=6, ticket_key="acme/widget#5",
+            loop="context", direction="received", channel="github",
+            owner_id=OWNER,
+        ))
+        db.commit()
+
+        board = await _build(
+            db,
+            [_item("acme/widget#5", source=schemas.TaskSource.github)],
+            monkeypatch=monkeypatch,
+        )
+        card = (board.needs_you + board.in_flight)[0]
+
+        assert [pr.pr_number for pr in card.pull_requests] == [6]
+
+
 class TestStageDerivation:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -160,6 +210,78 @@ class TestStageDerivation:
         card = (board.needs_you + board.in_flight)[0]
 
         assert card.stage is schemas.TaskStage.done
+
+
+class TestPullRequestsBeforeReview:
+    """
+    A `PRReview` row appears only when someone requests a review. Everything
+    before that -- the PR opened, the analysis run, the bot's comment -- is
+    recorded against the work item in the message log instead. A board that
+    joined only on review rows showed an open, analyzed pull request as
+    "assigned", as though nobody had started.
+    """
+
+    @pytest.mark.asyncio
+    async def test_open_pr_with_no_review_is_in_progress(self, db, monkeypatch):
+        db.add(models.CommunicationEvent(
+            repo=REPO, pr_number=6, ticket_key="acme/widget#5",
+            loop="context", direction="received", channel="github",
+            owner_id=OWNER,
+        ))
+        db.commit()
+
+        board = await _build(
+            db,
+            [_item("acme/widget#5", source=schemas.TaskSource.github)],
+            monkeypatch=monkeypatch,
+        )
+        card = (board.needs_you + board.in_flight)[0]
+
+        assert card.stage is schemas.TaskStage.in_progress
+        assert [pr.pr_number for pr in card.pull_requests] == [6]
+
+    @pytest.mark.asyncio
+    async def test_analyzed_pr_with_no_review_is_analyzed(self, db, monkeypatch):
+        db.add(models.CommunicationEvent(
+            repo=REPO, pr_number=6, ticket_key="acme/widget#5",
+            loop="context", direction="received", channel="github",
+            owner_id=OWNER,
+        ))
+        db.add(models.PRJob(
+            repo=REPO, pr_number=6, action="opened",
+            status=schemas.PRJobStatus.completed.value, owner_id=OWNER,
+        ))
+        db.commit()
+
+        board = await _build(
+            db,
+            [_item("acme/widget#5", source=schemas.TaskSource.github)],
+            monkeypatch=monkeypatch,
+        )
+        card = (board.needs_you + board.in_flight)[0]
+
+        assert card.stage is schemas.TaskStage.analyzed
+
+    @pytest.mark.asyncio
+    async def test_a_reviewed_pr_is_not_listed_twice(self, db, monkeypatch):
+        """The review row and the log describe the same pull request."""
+        _review(db, pr=6, state="awaiting_review", tickets="acme/widget#5")
+        db.add(models.CommunicationEvent(
+            repo=REPO, pr_number=6, ticket_key="acme/widget#5",
+            loop="context", direction="received", channel="github",
+            owner_id=OWNER,
+        ))
+        db.commit()
+
+        board = await _build(
+            db,
+            [_item("acme/widget#5", source=schemas.TaskSource.github)],
+            monkeypatch=monkeypatch,
+        )
+        card = (board.needs_you + board.in_flight)[0]
+
+        assert [pr.pr_number for pr in card.pull_requests] == [6]
+        assert card.pull_requests[0].review_state is not None
 
 
 class TestStepper:

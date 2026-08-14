@@ -221,6 +221,38 @@ class FindingSource(str, Enum):
     llm = "llm"
 
 
+class SuggestedFix(BaseModel):
+    """
+    Replacement code that would resolve a finding.
+
+    Always model-generated, including on a Semgrep or Gitleaks finding. The
+    scanner confirms the *problem* deterministically; nothing confirms the
+    *fix*, so a suggestion attached to a confirmed finding does not inherit
+    that confirmation and must never be rendered as though it did.
+
+    `replacement` holds the literal lines that replace `start_line..end_line`
+    in `file_path`, ready for GitHub's ```suggestion block -- which renders an
+    "Apply" button, so the text has to be exactly what belongs in the file.
+    Indentation is therefore significant and is preserved verbatim.
+
+    A fix that cannot be expressed as a line-range replacement -- one spanning
+    several files, or requiring a new import elsewhere -- sets `replacement`
+    to None and explains itself in `explanation` instead. Rendering an
+    incomplete suggestion behind an Apply button is worse than rendering
+    prose, because one click commits it.
+    """
+    # None when the fix cannot be expressed as an in-place line replacement.
+    replacement: str | None = None
+    # The inclusive line range `replacement` substitutes for. Both required
+    # for a suggestion block: GitHub anchors it to a range, and a wrong range
+    # silently applies the fix to the wrong code.
+    start_line: int | None = None
+    end_line: int | None = None
+    # Why this fixes it, and anything the replacement cannot carry -- a new
+    # dependency, a migration, a change needed in another file.
+    explanation: str = ""
+
+
 class SecurityFinding(BaseModel):
     """A single security finding against a PR diff."""
     source: FindingSource
@@ -232,6 +264,10 @@ class SecurityFinding(BaseModel):
     rule_id: str | None = None
     # Deliberately no `secret_value` field. Detected credentials are reported
     # by location only; echoing them into a PR comment widens the exposure.
+
+    # The fix, as code. Model-generated even here: the scanner confirms the
+    # problem, nothing confirms the fix. See `SuggestedFix`.
+    suggested_fix: SuggestedFix | None = None
 
 
 class ReviewPriority(str, Enum):
@@ -263,6 +299,9 @@ class ReviewFinding(BaseModel):
         "correctness",
         description="correctness, requirements, quality, or testing",
     )
+    # Replacement code resolving this finding, when the model could express
+    # one. Advisory like the finding itself.
+    suggested_fix: SuggestedFix | None = None
 
 
 class RelatedTicket(BaseModel):

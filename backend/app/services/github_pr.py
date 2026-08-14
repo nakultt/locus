@@ -499,3 +499,174 @@ async def upsert_pr_comment(token: str, repo: str, pr_number: int, body: str) ->
             )
         response.raise_for_status()
         return response.json()
+
+
+# ============== Inline review comments ==============
+
+# Marks a Locus inline comment, the same way COMMENT_MARKER marks the summary.
+# Inline comments cannot be edited in place across pushes -- the line they were
+# anchored to may not exist any more -- so this is used to find and remove the
+# previous round's before posting the current one.
+INLINE_MARKER = "<!-- locus-inline -->"
+
+
+async def get_diff_line_positions(
+    token: str, repo: str, pr_number: int
+) -> dict[str, set[int]]:
+    """
+    Which lines of which files this PR's diff actually touches.
+
+    An inline comment can only be anchored to a line that appears in the diff;
+    GitHub rejects anything else with a 422. A finding may well point at a line
+    the diff does not include -- the scanner reads whole reconstructed files,
+    not the diff -- so the caller checks against this before trying to post one.
+
+    Returns:
+        Mapping of file path -> set of line numbers in the *head* revision that
+        can carry a comment. Only added and context lines qualify; a deleted
+        line has no line number on the right-hand side to attach to.
+    """
+    diff_text = await get_pr_diff(token, repo, pr_number)
+
+    commentable: dict[str, set[int]] = {}
+    current_file: str | None = None
+    new_line = 0
+
+    for line in diff_text.splitlines():
+        if line.startswith("+++ b/"):
+            current_file = line[6:].strip()
+            commentable.setdefault(current_file, set())
+            continue
+        if line.startswith("@@"):
+            # "@@ -a,b +c,d @@" -- c is where the new-side hunk starts.
+            try:
+                new_span = line.split("+", 1)[1].split(maxsplit=1)[0]
+                new_line = int(new_span.split(",")[0])
+            except (IndexError, ValueError):
+                new_line = 0
+            continue
+        if current_file is None or new_line <= 0:
+            continue
+
+        if line.startswith("+"):
+            commentable[current_file].add(new_line)
+            new_line += 1
+        elif line.startswith("-"):
+            # Deleted: exists only on the left, so nothing to anchor to.
+            continue
+        elif line.startswith(" "):
+            commentable[current_file].add(new_line)
+            new_line += 1
+
+    return commentable
+
+
+async def clear_inline_comments(token: str, repo: str, pr_number: int) -> int:
+    """
+    Delete the inline comments Locus left on a previous run.
+
+    Unlike the summary comment these cannot be edited in place: an inline
+    comment is bound to a line in a particular commit, and after a push that
+    line may have moved or gone. Leaving them would stack a fresh set on top of
+    every stale one, which is precisely the noise the summary marker exists to
+    prevent.
+
+    Failures are swallowed per comment: a stale comment left behind is untidy,
+    but failing the run over it would cost the analysis.
+
+    Returns:
+        How many were deleted.
+    """
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            response = await client.get(
+                f"{GITHUB_API_BASE}/repos/{repo}/pulls/{pr_number}/comments",
+                headers=_headers(token),
+                params={"per_page": 100},
+            )
+            response.raise_for_status()
+            comments = response.json()
+        except Exception:
+            return 0
+
+        removed = 0
+        for comment in comments:
+            if INLINE_MARKER not in (comment.get("body") or ""):
+                continue
+            try:
+                deleted = await client.delete(
+                    f"{GITHUB_API_BASE}/repos/{repo}/pulls/comments/{comment['id']}",
+                    headers=_headers(token),
+                )
+                if deleted.status_code in (200, 204):
+                    removed += 1
+            except Exception:
+                continue
+
+    return removed
+
+
+async def post_inline_comments(
+    token: str,
+    repo: str,
+    pr_number: int,
+    head_sha: str,
+    comments: list[dict],
+) -> tuple[int, list[str]]:
+    """
+    Post review comments anchored to specific lines of the diff.
+
+    This is the only place a ```suggestion block does anything useful: GitHub
+    renders the Apply button on an inline review comment, and renders the same
+    fence as an ordinary code block in the issue-style summary comment.
+
+    Posted individually rather than as one review. A single review request is
+    rejected in full if any one of its comments has a bad anchor, which would
+    lose every good suggestion alongside the bad one; posting one at a time
+    means a rejected anchor costs only its own comment.
+
+    Args:
+        comments: dicts of {path, line, body}, already checked against
+            `get_diff_line_positions`.
+
+    Returns:
+        (how many posted, non-fatal error notes)
+    """
+    posted = 0
+    notes: list[str] = []
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for comment in comments:
+            payload = {
+                "body": f"{INLINE_MARKER}\n{comment['body']}",
+                "commit_id": head_sha,
+                "path": comment["path"],
+                "line": comment["line"],
+                "side": "RIGHT",
+            }
+            # A suggestion spanning several lines has to declare where it
+            # starts, or GitHub anchors it to the last line only and applying
+            # it drops the rest of the range.
+            if comment.get("start_line") is not None:
+                payload["start_line"] = comment["start_line"]
+                payload["start_side"] = "RIGHT"
+            try:
+                response = await client.post(
+                    f"{GITHUB_API_BASE}/repos/{repo}/pulls/{pr_number}/comments",
+                    headers=_headers(token),
+                    json=payload,
+                )
+            except Exception as e:
+                notes.append(f"inline comment on {comment['path']} failed: {e}")
+                continue
+
+            if response.status_code in (200, 201):
+                posted += 1
+            else:
+                # 422 is the common one: the line is not in the diff after all.
+                notes.append(
+                    f"inline comment on {comment['path']}:{comment['line']} "
+                    f"rejected ({response.status_code})"
+                )
+
+    return posted, notes

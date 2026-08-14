@@ -143,7 +143,7 @@ def linear_list_teams() -> str:
     if error:
         return f"❌ {error}"
     
-    teams = data.get("teams", {}).get("nodes", [])
+    teams = (data.get("teams") or {}).get("nodes") or []
     
     if not teams:
         return "📋 No teams found in this workspace."
@@ -215,7 +215,7 @@ def linear_list_issues(
     if error:
         return f"❌ {error}"
     
-    issues = data.get("issues", {}).get("nodes", [])
+    issues = (data.get("issues") or {}).get("nodes") or []
     
     if not issues:
         return "📋 No issues found matching the criteria."
@@ -322,7 +322,10 @@ def linear_get_issue(issue_id: str) -> str:
             desc += "..."
         output += f"\n📝 Description:\n{desc}\n"
     
-    comments = issue.get("comments", {}).get("nodes", [])
+    # Guarded the same way as `labels` above: GraphQL returns an explicit null
+    # for a connection it could not resolve, so the `.get` default never fires
+    # and the next subscript raises.
+    comments = (issue.get("comments") or {}).get("nodes") or []
     if comments:
         output += f"\n💬 Comments ({len(comments)}):\n"
         for c in comments[:3]:
@@ -540,7 +543,7 @@ def linear_list_states(team_id: str) -> str:
     if not team:
         return "❌ Team not found."
     
-    states = team.get("states", {}).get("nodes", [])
+    states = (team.get("states") or {}).get("nodes") or []
     
     if not states:
         return f"📊 No workflow states found for team {team.get('name')}."

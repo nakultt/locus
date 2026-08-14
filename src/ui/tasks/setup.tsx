@@ -110,6 +110,24 @@ export const GlobalDefaults = ({ docsConnected }: { docsConnected: boolean }) =>
 
   if (!values) return null;
 
+  /**
+   * Contact lines whose first field is not one of the configured reviewers.
+   *
+   * The parser reads that field as the GitHub login, so a line starting with
+   * an address is stored against a "login" that matches nobody. Nothing
+   * errors; the reviewer just silently shows as having no contact.
+   */
+  const reviewerLogins = new Set(
+    reviewersInput
+      .split(/[,\n]/)
+      .map((r) => r.trim().replace(/^@/, "").toLowerCase())
+      .filter(Boolean)
+  );
+  const unmatchedContacts = contactsInput
+    .split("\n")
+    .map((line) => line.split(",")[0]?.trim().replace(/^@/, "") ?? "")
+    .filter((login) => login && !reviewerLogins.has(login.toLowerCase()));
+
   const save = async () => {
     setSaving(true);
     setError(null);
@@ -232,8 +250,34 @@ export const GlobalDefaults = ({ docsConnected }: { docsConnected: boolean }) =>
             "senior-dev, @sr-dev, sr@company.com\ntech-lead, @lead, lead@company.com"
           }
           rows={2}
+          aria-describedby="reviewer-contacts-help"
           className="w-full rounded-lg border border-border bg-background px-3 py-2 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-primary"
         />
+        <p id="reviewer-contacts-help" className="mt-1 text-xs text-muted-foreground">
+          The first field must be the GitHub login — that is what a contact is
+          matched to. An address on its own cannot be matched to anyone.
+        </p>
+
+        {/* The mistake this catches is silent otherwise: the line is stored,
+            no error is raised, and the dashboard simply says "no contact
+            configured" against a reviewer who looks configured. */}
+        {unmatchedContacts.length > 0 && (
+          <div className="mt-1.5 flex items-start gap-1.5 rounded-lg border border-yellow-500/40 bg-yellow-500/5 px-2.5 py-1.5">
+            <AlertTriangle size={12} className="mt-0.5 shrink-0 text-yellow-600" />
+            <p className="text-xs text-foreground">
+              {unmatchedContacts.map((c) => `"${c}"`).join(", ")}{" "}
+              {unmatchedContacts.length === 1 ? "is not a" : "are not"} reviewer
+              login{unmatchedContacts.length === 1 ? "" : "s"} listed above, so{" "}
+              {unmatchedContacts.length === 1 ? "it" : "they"} will never be
+              matched. Write it as{" "}
+              <span className="font-mono">
+                {(reviewersInput.split(/[,\n]/)[0] || "login").trim() || "login"},{" "}
+                {unmatchedContacts[0]}
+              </span>
+              .
+            </p>
+          </div>
+        )}
       </div>
 
       <div className="mt-3">

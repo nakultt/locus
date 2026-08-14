@@ -83,3 +83,64 @@ class TestLinearIssueDetail:
         assert "Unknown" in output          # the null state, and the bot author
         assert "Posted by a bot" in output
         assert "Nakul" in output
+
+    def test_a_null_comments_connection_renders(self):
+        """
+        Regression: `labels` was guarded with `or {}` and `comments` was not,
+        though both are connections GraphQL nulls the same way. The issue
+        detail crashed instead of rendering.
+        """
+        issue = {
+            "identifier": "LOC-2",
+            "title": "No comments",
+            "priority": 1,
+            "assignee": None,
+            "state": None,
+            "team": None,
+            "project": None,
+            "labels": None,
+            "comments": None,
+            "url": "https://linear.app/x/LOC-2",
+        }
+
+        with patch.object(
+            linear, "_execute_query", return_value=({"issue": issue}, None)
+        ):
+            output = linear.linear_get_issue.invoke({"issue_id": "LOC-2"})
+
+        assert "LOC-2" in output
+        assert "No comments" in output
+
+
+class TestLinearNullConnections:
+    """
+    A partial GraphQL error resolves the data it could and nulls the rest, so
+    a top-level connection can arrive as None on an otherwise-successful
+    response. Each of these crashed on the `.get(key, {})` form.
+    """
+
+    def test_null_teams_connection(self):
+        with patch.object(
+            linear, "_execute_query", return_value=({"teams": None}, None)
+        ):
+            output = linear.linear_list_teams.invoke({})
+
+        assert "No teams found" in output
+
+    def test_null_issues_connection(self):
+        with patch.object(
+            linear, "_execute_query", return_value=({"issues": None}, None)
+        ):
+            output = linear.linear_list_issues.invoke({})
+
+        assert "No issues found" in output
+
+    def test_null_states_connection(self):
+        with patch.object(
+            linear,
+            "_execute_query",
+            return_value=({"team": {"name": "Core", "states": None}}, None),
+        ):
+            output = linear.linear_list_states.invoke({"team_id": "t"})
+
+        assert "No workflow states" in output
