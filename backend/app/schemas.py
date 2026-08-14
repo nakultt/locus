@@ -532,6 +532,12 @@ class CommunicationEvent(BaseModel):
     succeeded: bool = True
     created_at: datetime | None = None
 
+    # True when this message was found on a sibling pull request for the same
+    # work item and reused as context, rather than found on this one. The
+    # reviewer was given it either way, so it belongs on the timeline -- but
+    # labelled, so it does not read as discussion about this pull request.
+    inherited: bool = False
+
 
 class PRActivity(BaseModel):
     """
@@ -614,6 +620,166 @@ class Worklist(BaseModel):
     needs_you: list[WorklistTask] = []
     waiting_on_others: list[WorklistTask] = []
     total_needs_you: int = 0
+
+
+class TaskSource(str, Enum):
+    """Where an assigned work item came from."""
+    github = "github"
+    jira = "jira"
+
+
+class AssignedItem(BaseModel):
+    """
+    One issue or ticket assigned to the user, as the source reported it.
+
+    Deliberately source-shaped rather than normalized into `RelatedTicket`:
+    that type describes a ticket found *from* a pull request, where this
+    describes work that may have no pull request at all yet.
+    """
+    source: TaskSource
+    key: str = Field(..., description='Jira key, or "owner/repo#N" for a GitHub issue')
+    title: str
+    url: str
+    state: str | None = None
+    status: str | None = Field(None, description="Jira status name, or GitHub state")
+    assignee: str | None = None
+    repo: str | None = Field(None, description="Only set for GitHub issues")
+    number: int | None = Field(None, description="Only set for GitHub issues")
+    issue_type: str | None = None
+    priority: str | None = None
+    body: str | None = None
+    updated_at: datetime | None = None
+
+
+class TaskStage(str, Enum):
+    """
+    How far along the automated pipeline one task has travelled.
+
+    This is the spine of the task card: everything between `assigned` and
+    `done` is automated, so a stage that has not been reached is a statement
+    about where the work actually is, not about what Locus failed to do.
+
+    `blocked` is deliberately not a stage -- a task is blocked *at* a stage,
+    and collapsing the two would lose where it stalled.
+    """
+    assigned = "assigned"
+    in_progress = "in_progress"
+    analyzed = "analyzed"
+    in_review = "in_review"
+    changes_requested = "changes_requested"
+    approved = "approved"
+    merged = "merged"
+    testing = "testing"
+    done = "done"
+
+
+# Display order. The card renders every stage, so one not yet reached reads as
+# "not there yet" rather than being absent from the picture entirely.
+TASK_STAGE_ORDER: list[TaskStage] = [
+    TaskStage.assigned,
+    TaskStage.in_progress,
+    TaskStage.analyzed,
+    TaskStage.in_review,
+    TaskStage.changes_requested,
+    TaskStage.approved,
+    TaskStage.merged,
+    TaskStage.testing,
+    TaskStage.done,
+]
+
+
+class TaskStageStatus(BaseModel):
+    """One step of the task pipeline, as the card's stepper renders it."""
+    stage: TaskStage
+    label: str
+    state: StageState = StageState.pending
+    detail: str | None = None
+
+
+class TaskPullRequest(BaseModel):
+    """A pull request opened against a task, with its review position."""
+    repo: str
+    pr_number: int
+    url: str | None = None
+    title: str | None = None
+    author: str | None = None
+    review_state: ReviewState | None = None
+    round_number: int = 1
+    last_reviewer: str | None = None
+
+
+class TaskCard(BaseModel):
+    """
+    One assigned work item and everything Locus knows about its progress.
+
+    The card is keyed by work item rather than pull request for the same
+    reason `WorklistTask` is: one ticket routinely spans several pull
+    requests, and a per-PR card shows a two-week round trip as three young
+    items.
+    """
+    key: str
+    source: TaskSource
+    title: str
+    url: str
+    status: str | None = None
+    assignee: str | None = None
+    issue_type: str | None = None
+    priority: str | None = None
+    updated_at: datetime | None = None
+
+    stage: TaskStage = TaskStage.assigned
+    stages: list[TaskStageStatus] = Field(default_factory=list)
+    pull_requests: list[TaskPullRequest] = Field(default_factory=list)
+
+    # Reused verbatim from `worklist.build` so the board and the worklist
+    # cannot disagree about what needs attention.
+    items: list[WorklistItem] = Field(default_factory=list)
+    needs_you: bool = False
+    blocked_reason: str | None = None
+    age_hours: float = 0.0
+    round_number: int = 1
+
+
+class TaskBoard(BaseModel):
+    """Every assigned task, ordered by whether it is waiting on you."""
+    needs_you: list[TaskCard] = []
+    in_flight: list[TaskCard] = []
+    total: int = 0
+
+    # Which sources actually answered. A source that failed is reported rather
+    # than rendered as "nothing assigned", which would read as an empty queue.
+    github_available: bool = True
+    jira_available: bool = True
+    unavailable: list[str] = []
+
+
+class TaskDetail(BaseModel):
+    """
+    One task's full pipeline: every stage, every message, every round.
+
+    Returned as a single payload rather than stitched client-side for the same
+    reason `PRActivity` is -- the UI shows these interleaved on one timeline,
+    and separate requests would let the halves disagree about ordering.
+    """
+    card: TaskCard
+
+    # The analysis of the most recent pull request on this task. Findings are
+    # never carried across rounds; this is whatever the latest run produced.
+    analysis: PRAnalysisResult | None = None
+    job_status: str | None = None
+    job_error: str | None = None
+
+    reviews: list[PRReviewDetail] = []
+    reviewer_contacts: list[ReviewerContact] = []
+
+    qa_notified: bool = False
+    qa_resolved: bool | None = None
+    qa_channel: str | None = None
+    qa_recipients: list[str] = []
+
+    # Every message searched, sent and received for this work item, across
+    # every pull request that touched it.
+    events: list[CommunicationEvent] = []
 
 
 class MergeMethod(str, Enum):
@@ -727,6 +893,13 @@ class PRAgentDefaultsUpdate(BaseModel):
     )
     merge_method: MergeMethod = Field(
         MergeMethod.squash, description="Default auto-merge method"
+    )
+    context_docs: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Google Docs read as context on every run, for every repo. These "
+            "accumulate with a repo's own rather than being overridden by them"
+        ),
     )
 
 

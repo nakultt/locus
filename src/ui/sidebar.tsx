@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Home, Settings, Bell, Grid, GitPullRequest } from "lucide-react";
+import { Home, Settings, Bell, Grid, ClipboardList } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 const locusLogo = "/locus_logo.png";
 
@@ -245,10 +245,10 @@ const Sidebar = () => {
             <li className="mb-2">
               <button
                 className="flex gap-2 font-medium text-sm items-center w-full py-2 px-4 rounded-xl hover:bg-gray-100"
-                onClick={() => navigate("/pr-agent")}
+                onClick={() => navigate("/tasks")}
               >
-                <GitPullRequest className="h-5 w-5" />
-                PR Agent
+                <ClipboardList className="h-5 w-5" />
+                Tasks
               </button>
             </li>
             <li className="mb-2">

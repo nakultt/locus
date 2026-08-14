@@ -154,11 +154,28 @@ def resolve_settings(
         resolved.close_issues_on_merge = True
         resolved.sources["close_issues_on_merge"] = "unset"
 
-    # Context docs are repo-specific by nature -- they describe that codebase.
-    resolved.context_doc_ids = (
-        _lines(registration.context_doc_ids) if registration else []
-    )
-    resolved.sources["context_doc_ids"] = "repo" if resolved.context_doc_ids else "unset"
+    # Context docs are the one setting that accumulates rather than overrides.
+    # The account-level docs are the standards that apply everywhere -- an API
+    # style guide, a security policy -- while a repo's own describe that
+    # codebase. A repo that adds a spec should be reviewed against both, so
+    # letting the repo value win would silently drop the global standards.
+    # Order puts the global ones first and dedupes, since the reviewer reads
+    # them in order under a context budget.
+    account_docs = _lines(defaults.context_doc_ids) if defaults else []
+    repo_docs = _lines(registration.context_doc_ids) if registration else []
+    seen: set[str] = set()
+    resolved.context_doc_ids = [
+        doc for doc in account_docs + repo_docs
+        if not (doc in seen or seen.add(doc))
+    ]
+    if account_docs and repo_docs:
+        resolved.sources["context_doc_ids"] = "both"
+    elif repo_docs:
+        resolved.sources["context_doc_ids"] = "repo"
+    elif account_docs:
+        resolved.sources["context_doc_ids"] = "defaults"
+    else:
+        resolved.sources["context_doc_ids"] = "unset"
 
     resolved.reviewers = pick(
         "reviewers",

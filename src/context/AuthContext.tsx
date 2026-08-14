@@ -11,7 +11,12 @@ import {
   type ReactNode,
 } from "react";
 import type { User, UserUpdate } from "@/lib/api";
-import { login as apiLogin, signup as apiSignup, updateUser as apiUpdateUser } from "@/lib/api";
+import {
+  login as apiLogin,
+  onSessionExpired,
+  signup as apiSignup,
+  updateUser as apiUpdateUser,
+} from "@/lib/api";
 
 // ============== Types ==============
 
@@ -66,6 +71,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Use lazy initialization to avoid useEffect for initial load
   const [user, setUser] = useState<User | null>(() => getStoredUser());
   const [rememberMe, setRememberMe] = useState<boolean>(() => isRemembered());
+
+  // A 401 anywhere in the app means this session is dead -- the token expired,
+  // or it names an account that no longer exists (a wiped database is the
+  // common case in development). The API layer has already cleared storage;
+  // dropping the user here is what makes ProtectedRoute redirect to /login
+  // instead of leaving the UI signed in against a backend that refuses it.
+  useEffect(() => onSessionExpired(() => setUser(null)), []);
 
   // Save user to appropriate storage whenever it changes
   useEffect(() => {

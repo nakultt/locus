@@ -30,6 +30,12 @@ def _headers(token: str, accept: str = "application/vnd.github+json") -> dict[st
     }
 
 
+# Public alias. Other modules calling the GitHub REST API should send the same
+# headers -- including the pinned API version -- rather than assembling their
+# own and drifting when it changes.
+build_headers = _headers
+
+
 async def get_pull_request(token: str, repo: str, pr_number: int) -> dict:
     """
     Fetch pull request metadata.

@@ -110,6 +110,21 @@ its own prior comment instead of appending one per push.
 enumerate other people's conversations. Identity always comes from the JWT — no endpoint
 accepts a `user_id` parameter.
 
+**Context documents accumulate; every other setting overrides.** The account-level docs are the
+standards that apply everywhere — a style guide, a security policy — while a repo's own describe
+that codebase. `resolve_settings` therefore concatenates the two (global first, deduped) rather
+than letting the repo value win: a repo that pins its own spec should still be reviewed against
+the org's standards, and overriding would silently drop them. This is the single exception to the
+"repo wins" rule below, and `tests/test_agent_defaults.py` pins it.
+
+**The written report is linked where someone is being asked to read the change.** A Google Doc
+nobody links to is work nobody reads: the QA brief and the review ping are deliberately short,
+and the analysis behind them is where the findings and requirement context live. `doc_url` is
+threaded into the QA email, the QA Slack thread, the review request and each resubmission — but
+deliberately *not* into the approval or changes-requested messages, which report a verdict the
+reviewer has already reached. A review event runs no analysis of its own, so it links the last
+completed run's report via `_latest_doc_url`. `tests/test_report_delivery.py` pins both halves.
+
 **PR agent settings resolve in exactly one place.** Every setting exists both on the repo
 registration and on the account-wide defaults. `app/services/agent_settings.py` is the sole
 arbiter of which wins — a repo value that is set wins, blank or unset falls back — so the
@@ -142,6 +157,61 @@ analysis across a round would resubmit round two carrying round one's findings a
 two's code — a vulnerability introduced while fixing something else would pass unreported.
 `build()` takes the current run's analysis as an argument for exactly that reason; it never
 reads a stored one.
+
+**The Slack cache has no expiry; it has a watermark.** There is deliberately no freshness
+window on the cached discussion — a requirement debated two days ago is still the requirement,
+and a window would hide anything said inside it until the window lapsed. `comms_log.cached_search()`
+returns `(searched_at, matches)`: the matches are always reused, and `searched_at` is passed to
+`search_slack_threads(since=…)`, which asks Slack only for what was posted after it and merges
+the result. One Tier-2 call per run, and nothing said between runs is missed. Slack's `after:`
+operator is date-granular and excludes its own day, so it is set a day early and the exact
+cutoff is applied per match against `ts` — a match whose `ts` will not parse is kept, because a
+duplicate is recoverable in a way a silently dropped message is not. A watermark of `None`
+means the work item was never searched and the run does a full search; an incremental search
+from an unknown point would skip whatever fell before it.
+
+**The activity timeline shows inherited context, marked.** `comms_log.timeline()` takes an
+optional `ticket_key` and folds in the Slack discussion cached under that work item by sibling
+PRs, flagged `inherited`. The analysis hands that discussion to the reviewer every round, so a
+timeline restricted to rows stamped with this PR's number would omit context the run
+demonstrably used — and showing it unmarked would read as discussion about this PR. Both the
+cache read and the timeline dedupe by permalink: the same message is recorded under each PR on
+the ticket, and repeating it reads as several people saying it.
+
+**The task board is keyed by work item, and the key already exists.** `/tasks` answers "what is
+assigned to me and how far has it got", which is the pipeline Locus actually automates — a ticket
+lands on someone, and everything from there to the testing team signing off runs without them
+except the coding. A ticket with no pull request yet is real work and is invisible to every
+PR-shaped view, which is why the board exists. The join needs nothing new: `PRReview.ticket_keys`
+and `CommunicationEvent.ticket_key` have stored keys since the review loop was built, and
+`worklist._task_key` already groups on that space with a `repo#N` fallback, so an assigned Jira
+ticket finds its PRs, its Slack discussion and its QA thread by a key recorded when the analysis
+ran. `task_board.build()` reuses `worklist.build()` for attention rather than recomputing it —
+the two must not be able to disagree about what is blocked on you — and reuses
+`comms_log.ticket_timeline()` for the message log, which is deliberately wider than one PR's.
+
+**The task stage is derived, never stored.** A stored stage would need writing from three loops
+that already run concurrently, and would go stale exactly when someone is watching. It is cheap
+to recompute from the review state, the QA thread and the job status. Two rules in
+`task_board._build_stages` are deliberate: every stage is rendered including the unreached ones,
+so the card shows what happens next and not only what happened; and `changes_requested` is
+omitted entirely when it never occurred, because a greyed-out step implies a round trip that did
+not happen.
+
+**Assigned-work identity comes from the token, not from configuration.** GitHub's
+`filter=assigned` and Jira's `currentUser()` both resolve against whoever the stored credential
+belongs to, so there is no login or account id to configure and nothing that can drift from the
+connected integration. `assigned.py` queries each source independently and each swallows its own
+failure: a dead Jira must cost only the Jira half, because a board that blanks reads as "nothing
+assigned", which is the one wrong answer. A source that did not answer is reported in
+`unavailable` rather than rendered as an empty queue. Note the credential asymmetry that is easy
+to get backwards — the Jira API token is in `api_key` while `url` and `email` are under
+`credentials`.
+
+**The board offers exactly one write.** `POST /tasks/analyze` re-runs the analysis; everything
+else the pipeline does reaches other people — a Slack post, a QA email, a merge — and stays
+driven by webhooks and the background loops. A dashboard refresh must never be able to notify a
+team twice.
 
 **The worklist is grouped by task and ordered by staleness.** `worklist.build()` answers
 "what is waiting on me", which the per-PR views cannot. Grouped by `ticket_key` because one

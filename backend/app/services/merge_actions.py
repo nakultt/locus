@@ -242,13 +242,20 @@ def _qa_email_text(result: PRAnalysisResult, brief: str) -> str:
     Built here rather than inline at the send so the copy recorded in the
     timeline is the same string that was sent, not a reconstruction that can
     drift from it.
+
+    The full report is linked when one was written. A tester deciding what to
+    exercise wants the findings and the requirement context behind the change,
+    and the brief is deliberately short -- without the link that detail exists
+    but is unreachable from the message that asks for the work.
     """
     ctx = result.context
+    report = f"Full analysis: {result.doc_url}\n\n" if result.doc_url else ""
     return (
         f"{ctx.title}\n"
         f"{ctx.url}\n\n"
         f"Merged by {ctx.author} · +{ctx.additions}/-{ctx.deletions} "
         f"across {ctx.files_changed} files\n\n"
+        f"{report}"
         f"What to test\n------------\n{brief}\n\n"
         f"Reply to this email if something does not work — Locus will reopen "
         f"the ticket.\n"
@@ -260,7 +267,7 @@ async def email_test_team(
     recipients: list[str],
     result: PRAnalysisResult,
     brief: str,
-) -> tuple[bool, str, str | None]:
+) -> tuple[bool, str, str | None, str]:
     """
     Send the QA notification via the Gmail API.
 
@@ -268,18 +275,24 @@ async def email_test_team(
     In-Reply-To, which is the only reliable way to tie that reply back to this
     PR. Subject matching would break the moment someone edits the subject.
 
+    The body is returned too, so the caller records the exact string that was
+    sent rather than rendering it a second time -- a reconstruction drifts
+    from what the recipient actually read.
+
     Returns:
-        (succeeded, detail, message_id)
+        (succeeded, detail, message_id, body)
     """
     import base64
     from email.message import EmailMessage
 
     credentials = gmail_config.get("credentials", {}) or {}
     access_token = credentials.get("access_token")
+    body = _qa_email_text(result, brief)
+
     if not access_token:
-        return False, "Gmail is not connected", None
+        return False, "Gmail is not connected", None, body
     if not recipients:
-        return False, "No test team recipients configured", None
+        return False, "No test team recipients configured", None, body
 
     ctx = result.context
 
@@ -293,7 +306,7 @@ async def email_test_team(
     message["Message-ID"] = message_id
     message["To"] = ", ".join(recipients)
     message["Subject"] = f"[Ready to test] {ctx.repo}#{ctx.pr_number} — {ctx.title}"
-    message.set_content(_qa_email_text(result, brief))
+    message.set_content(body)
 
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
 
@@ -307,9 +320,14 @@ async def email_test_team(
             json={"raw": raw},
         )
         if response.status_code not in (200, 202):
-            return False, f"Gmail rejected the message ({response.status_code})", None
+            return (
+                False,
+                f"Gmail rejected the message ({response.status_code})",
+                None,
+                body,
+            )
 
-    return True, f"Notified {', '.join(recipients)}", message_id
+    return True, f"Notified {', '.join(recipients)}", message_id, body
 
 
 async def post_qa_thread(
@@ -335,9 +353,13 @@ async def post_qa_thread(
         what the channel actually saw.
     """
     ctx = result.context
+    # Linked when a report was written, for the same reason the email carries
+    # it: the brief is short by design, and the detail behind it is otherwise
+    # unreachable from the message asking for the work.
+    report = f"\n:page_facing_up: <{result.doc_url}|Full analysis>" if result.doc_url else ""
     text = (
         f":test_tube: *Ready to test* - <{ctx.url}|{ctx.repo}#{ctx.pr_number}>\n"
-        f"{ctx.title}\n\n"
+        f"{ctx.title}{report}\n\n"
         f"*What to test*\n{brief}\n\n"
         "_Reply in this thread if something does not work._"
     )
@@ -431,7 +453,7 @@ async def run_merge_actions(
         if gmail_config:
             try:
                 brief = outcome.qa_brief or await draft_qa_brief(result)
-                ok, detail, message_id = await email_test_team(
+                ok, detail, message_id, body = await email_test_team(
                     gmail_config, qa_recipients, result, brief
                 )
                 # Recorded whether or not the send succeeded: a QA email that
@@ -442,7 +464,10 @@ async def run_merge_actions(
                     f"[Ready to test] {result.context.repo}"
                     f"#{result.context.pr_number} — {result.context.title}"
                 )
-                outcome.qa_email_body = _qa_email_text(result, brief)
+                # The body the send actually used, not a second render of it.
+                # A reconstruction drifts from what the recipient saw, which
+                # makes the record worse than useless.
+                outcome.qa_email_body = body
                 if ok:
                     outcome.qa_notified = True
                     outcome.qa_brief = brief

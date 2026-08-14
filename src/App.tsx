@@ -10,7 +10,7 @@ import { AuthProvider, useAuth } from "@/context/AuthContext";
 // carry the chat bundle (react-markdown and friends are ~45 kB gzipped).
 const Chatbot = lazy(() => import("@/pages/chatbot"));
 const Settings = lazy(() => import("@/pages/settings"));
-const PRAgentDashboard = lazy(() => import("@/pages/pr-agent"));
+const TasksPage = lazy(() => import("@/pages/tasks"));
 const SchedulerPage = lazy(() => import("@/pages/scheduler"));
 const IntegrationsSection = lazy(() => import("@/ui/integrations/integration-components"));
 
@@ -67,15 +67,18 @@ export default function App() {
           }
         />
         <Route
-          path="/pr-agent"
+          path="/tasks"
           element={
             <ProtectedRoute>
               <WithLayout>
-                <PRAgentDashboard />
+                <TasksPage />
               </WithLayout>
             </ProtectedRoute>
           }
         />
+        {/* The PR agent dashboard became the task board. Kept as a redirect
+            so existing links and bookmarks do not break. */}
+        <Route path="/pr-agent" element={<Navigate to="/tasks" replace />} />
         <Route
           path="/scheduler"
           element={

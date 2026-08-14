@@ -57,13 +57,6 @@ REVIEW_SUBMITTED_ACTION = "review_submitted"
 REVIEW_REQUESTED_ACTION = "review_requested"
 REVIEW_ACTIONS = {REVIEW_SUBMITTED_ACTION, REVIEW_REQUESTED_ACTION}
 
-# How long a Slack search stays good for. Discussion about what a change is
-# meant to do does not move because the author pushed a fix, and the search is
-# Tier 2 (~20 requests/minute) -- a PR with five pushes would otherwise search
-# six times for the same terms. The diff scan and both review passes are
-# deliberately outside this window; they are derived from code that changed.
-SLACK_FRESHNESS_HOURS = 12
-
 
 def verify_github_signature(payload: bytes, signature: str, secret: str) -> bool:
     """
@@ -432,6 +425,9 @@ async def get_defaults(
         review_slack_channel=row.review_slack_channel,
         auto_merge_on_approval=bool(row.auto_merge_on_approval),
         merge_method=row.merge_method or "squash",
+        context_docs=[
+            d for d in (row.context_doc_ids or "").splitlines() if d.strip()
+        ],
     )
 
 
@@ -451,6 +447,13 @@ async def save_defaults(
     emails = [e.strip() for e in request.qa_emails if e.strip() and "@" in e]
     reviewers = [r.strip().lstrip("@") for r in request.reviewers if r.strip()]
 
+    # Accept full Docs URLs or bare ids; store ids only, as registration does.
+    doc_ids = [
+        doc_id
+        for raw in request.context_docs
+        if (doc_id := extract_document_id(raw))
+    ]
+
     row = db.query(models.PRAgentDefaults).filter(
         models.PRAgentDefaults.owner_id == current_user.id
     ).first()
@@ -469,6 +472,7 @@ async def save_defaults(
     row.review_slack_channel = (request.review_slack_channel or "").strip() or None
     row.auto_merge_on_approval = 1 if request.auto_merge_on_approval else 0
     row.merge_method = request.merge_method.value
+    row.context_doc_ids = "\n".join(doc_ids) if doc_ids else None
 
     db.commit()
     db.refresh(row)
@@ -484,6 +488,7 @@ async def save_defaults(
         review_slack_channel=row.review_slack_channel,
         auto_merge_on_approval=bool(row.auto_merge_on_approval),
         merge_method=row.merge_method or "squash",
+        context_docs=doc_ids,
     )
 
 
@@ -736,8 +741,15 @@ async def get_pr_activity(
         models.QAThread.owner_id == current_user.id,
     ).order_by(models.QAThread.created_at.desc()).first()
 
+    # The work item, so the timeline can include the Slack discussion cached
+    # under it by earlier PRs -- context this PR's analysis was actually given.
+    activity_ticket = None
+    if review and review.ticket_keys:
+        activity_ticket = review.ticket_keys.splitlines()[0].strip() or None
+
     events = comms_log.timeline(
-        db, owner_id=current_user.id, repo=repo, pr_number=pr_number
+        db, owner_id=current_user.id, repo=repo, pr_number=pr_number,
+        ticket_key=activity_ticket,
     )
 
     # A PR with no review, no QA thread, and no messages was never seen at
@@ -874,6 +886,38 @@ async def agent_summary(
     )
 
 
+def _latest_doc_url(db: SessionLocal, job: models.PRJob) -> str | None:
+    """
+    The report written by the most recent completed run on this pull request.
+
+    A review event does not re-analyze -- the diff has not changed since the
+    last run -- so there is no fresh report to link and the stored one is the
+    correct thing to point at. Returns None when no run wrote a document,
+    which is the common case with Docs export off.
+    """
+    previous = (
+        db.query(models.PRJob)
+        .filter(
+            models.PRJob.owner_id == job.owner_id,
+            models.PRJob.repo == job.repo,
+            models.PRJob.pr_number == job.pr_number,
+            models.PRJob.status == schemas.PRJobStatus.completed.value,
+            models.PRJob.result_json.isnot(None),
+        )
+        .order_by(models.PRJob.created_at.desc())
+        .first()
+    )
+    if previous is None:
+        return None
+
+    try:
+        return json.loads(previous.result_json).get("doc_url")
+    except (json.JSONDecodeError, AttributeError):
+        # A result stored under an older schema must not break the notification
+        # it was only meant to decorate.
+        return None
+
+
 async def _run_review_job(
     db: SessionLocal,
     job: models.PRJob,
@@ -966,7 +1010,10 @@ async def _run_review_job(
     expected = [payload["reviewer"]] if payload.get("reviewer") else settings.reviewers
 
     text = review_flow.format_review_notification(
-        review, outcome, review.last_reviewer, asks, expected
+        review, outcome, review.last_reviewer, asks, expected,
+        # A review event runs no analysis of its own -- the diff has not
+        # changed -- so the report to link is the one the last run wrote.
+        doc_url=_latest_doc_url(db, job),
     )
     if gate is not None:
         text += "\n" + review_flow.format_merge_gate(gate)
@@ -1085,19 +1132,20 @@ async def run_pr_job(job_id: int) -> None:
             pr_number=job.pr_number, ticket_key=prior_ticket,
         ) or None
 
-        # Skip the Slack search when this work item was searched recently and
-        # reuse what it found. Reusing rather than merely skipping matters:
-        # skipping alone would hand the reviewer empty context, which is worse
-        # than the redundant call.
-        is_fresh, cached_matches = comms_log.recent_search(
+        # Everything Slack has already told us about this work item, and when
+        # we last asked. The cache is always used; the timestamp makes the
+        # search that follows incremental, so a run costs one call and still
+        # sees anything said since the last one.
+        searched_at, cached_matches = comms_log.cached_search(
             db, owner_id=job.owner_id, repo=job.repo, pr_number=job.pr_number,
-            ticket_key=prior_ticket, within_hours=SLACK_FRESHNESS_HOURS,
+            ticket_key=prior_ticket,
         )
 
         comms: dict = {}
         result = await analyze_pull_request(
             accumulated_context=accumulated,
-            cached_slack=cached_matches if is_fresh else None,
+            cached_slack=cached_matches,
+            slack_searched_at=searched_at,
             comms=comms,
             repo=job.repo,
             pr_number=job.pr_number,
@@ -1181,6 +1229,9 @@ async def run_pr_job(job_id: int) -> None:
                     prior_asks,
                     settings.reviewers,
                     changed_files=changed_files,
+                    # This round's report, written moments ago by the run
+                    # above -- not a stored one from an earlier round.
+                    doc_url=result.doc_url,
                 )
                 sent = await review_flow.post_review_notification(
                     integration_configs["slack"], channel, resubmit_text

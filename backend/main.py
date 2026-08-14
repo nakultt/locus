@@ -20,6 +20,7 @@ from app.routers import (
     schedule,
     settings,
     slack_events,
+    tasks,
     webhooks,
 )
 from app.services.worker import merge_gate_loop, qa_email_loop, worker_loop
@@ -93,6 +94,7 @@ app.include_router(chat.router, prefix="/api", tags=["Chat"])
 app.include_router(conversations.router, prefix="/api", tags=["Conversations"])
 app.include_router(settings.router, prefix="/api/settings", tags=["Settings"])
 app.include_router(schedule.router, prefix="/api/schedule", tags=["Scheduler"])
+app.include_router(tasks.router, prefix="/tasks", tags=["Tasks"])
 app.include_router(webhooks.router, prefix="/webhooks", tags=["Webhooks"])
 app.include_router(slack_events.router, prefix="/webhooks", tags=["Webhooks"])
 
