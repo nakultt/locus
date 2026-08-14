@@ -30,6 +30,10 @@ class EffectiveSettings:
     context_doc_ids: list[str] = field(default_factory=list)
     # GitHub logins expected to review this repo.
     reviewers: list[str] = field(default_factory=list)
+    # login -> {"slack": ..., "email": ...}. Empty when nobody configured
+    # contacts, which is fine: the loop still works, the UI just cannot say
+    # where a given reviewer was reached.
+    reviewer_contacts: dict[str, dict[str, str]] = field(default_factory=dict)
     # Where review-loop notifications go. Falls back to slack_channel only if
     # explicitly unset, so a team can keep review pings out of the summary feed.
     review_slack_channel: str | None = None
@@ -43,6 +47,38 @@ class EffectiveSettings:
 
 def _lines(value: str | None) -> list[str]:
     return [line.strip() for line in (value or "").splitlines() if line.strip()]
+
+
+def parse_contacts(value: str | None) -> dict[str, dict[str, str]]:
+    """
+    Parse reviewer contacts, one per line:
+
+        github-login, @slack-handle, someone@company.com
+
+    Slack and email are both optional and order-independent -- an entry is
+    recognised as an address by the "@" plus a dot, and as a Slack handle
+    otherwise. Getting this wrong is cheap (the UI shows the wrong label) and
+    demanding a strict field order is not, since this is typed by hand.
+    """
+    contacts: dict[str, dict[str, str]] = {}
+
+    for line in _lines(value):
+        parts = [p.strip() for p in line.split(",") if p.strip()]
+        if not parts:
+            continue
+
+        login = parts[0].lstrip("@")
+        entry: dict[str, str] = {}
+
+        for part in parts[1:]:
+            if "@" in part and "." in part.split("@")[-1]:
+                entry["email"] = part
+            else:
+                entry["slack"] = part if part.startswith("@") else f"@{part}"
+
+        contacts[login] = entry
+
+    return contacts
 
 
 def resolve_settings(
@@ -152,6 +188,13 @@ def resolve_settings(
     else:
         resolved.auto_merge_on_approval = False
         resolved.sources["auto_merge_on_approval"] = "unset"
+
+    resolved.reviewer_contacts = pick(
+        "reviewer_contacts",
+        parse_contacts(registration.reviewer_contacts) if registration else {},
+        parse_contacts(defaults.reviewer_contacts) if defaults else {},
+        {},
+    )
 
     resolved.merge_method = pick(
         "merge_method",

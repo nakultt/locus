@@ -383,6 +383,12 @@ class MergeActionResult(BaseModel):
     qa_thread_ts: str | None = Field(
         None, description="Slack thread timestamp; ties later replies to this PR"
     )
+    qa_slack_text: str | None = Field(
+        None, description="Exactly what was posted to Slack, for the timeline"
+    )
+    qa_email_subject: str | None = None
+    qa_email_body: str | None = None
+    qa_email_to: list[str] = []
     qa_channel_id: str | None = Field(
         None,
         description=(
@@ -501,6 +507,57 @@ class PRReviewList(BaseModel):
     approved: int = 0
 
 
+class ReviewerContact(BaseModel):
+    """Where one reviewer is reachable, beyond their GitHub login."""
+    login: str
+    slack: str | None = None
+    email: str | None = None
+
+
+class CommunicationEvent(BaseModel):
+    """One message searched, sent, or received about a pull request."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    loop: str = Field(..., description='"review", "qa", or "context"')
+    direction: str = Field(..., description='"searched", "sent", or "received"')
+    channel: str = Field(..., description='"slack", "email", or "github"')
+    participant: str | None = None
+    target: str | None = None
+    subject: str | None = None
+    body: str | None = None
+    query: str | None = None
+    permalink: str | None = None
+    outcome: str | None = None
+    succeeded: bool = True
+    created_at: datetime | None = None
+
+
+class PRActivity(BaseModel):
+    """
+    Everything that happened on one pull request, both loops together.
+
+    The review state and QA state are included alongside the message log so
+    the UI can render "what is happening now" and "what happened" from one
+    request rather than stitching three.
+    """
+    repo: str
+    pr_number: int
+    pr_url: str | None = None
+    pr_title: str | None = None
+
+    review: PRReviewDetail | None = None
+    reviewer_contacts: list[ReviewerContact] = []
+
+    # QA side. Absent until the PR merges and the test team is notified.
+    qa_notified: bool = False
+    qa_resolved: bool | None = None
+    qa_channel: str | None = None
+    qa_recipients: list[str] = []
+
+    events: list[CommunicationEvent] = []
+
+
 class MergeMethod(str, Enum):
     """How an auto-merge lands the branch. Mirrors GitHub's own options."""
     squash = "squash"
@@ -548,6 +605,13 @@ class RepoRegister(BaseModel):
         default_factory=list,
         description="GitHub logins of the senior devs who review this repo",
     )
+    reviewer_contacts: str | None = Field(
+        None,
+        description=(
+            "Where each reviewer is reachable, one per line: "
+            "github-login, @slack-handle, email@company.com"
+        ),
+    )
     review_slack_channel: str | None = Field(
         None,
         description=(
@@ -594,6 +658,9 @@ class PRAgentDefaultsUpdate(BaseModel):
         default_factory=list,
         description="Default senior-dev GitHub logins, for every repo",
     )
+    reviewer_contacts: str | None = Field(
+        None, description="Default reviewer contact lines"
+    )
     review_slack_channel: str | None = Field(
         None, description="Default channel for review-loop notifications"
     )
@@ -629,6 +696,7 @@ class RepoRegistration(BaseModel):
     jira_done_status: str = "Done"
     close_issues_on_merge: bool = True
     reviewers: list[str] = []
+    reviewer_contacts: str | None = None
     review_slack_channel: str | None = None
     auto_merge_on_approval: bool = False
     merge_method: MergeMethod = MergeMethod.squash

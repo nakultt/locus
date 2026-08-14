@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from app import crud, models
 from app.database import get_db
+from app.services import comms_log
 from app.services.qa_feedback import handle_qa_reply
 
 logger = logging.getLogger(__name__)
@@ -192,6 +193,19 @@ async def slack_events(
     except Exception as e:
         logger.exception("QA reply handling failed for %s", thread.repo)
         return {"ok": True, "error": str(e)}
+
+    # The tester's own words, with the verdict the classifier reached. Stored
+    # together because "why did it reopen the ticket" is only answerable if
+    # both are visible side by side.
+    comms_log.record(
+        db, owner_id=thread.owner_id, repo=thread.repo,
+        pr_number=thread.pr_number,
+        loop="qa", direction="received", channel="slack",
+        participant=event.get("user"),
+        target=channel,
+        body=event.get("text", ""),
+        outcome=outcome["verdict"],
+    )
 
     if outcome["verdict"] == "broken":
         thread.resolved = 0  # Back in play until a later reply says otherwise.

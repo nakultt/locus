@@ -1,0 +1,197 @@
+"""
+The communication log: what was searched, sent, and received.
+
+The dashboard could already say Slack was searched and the test team emailed.
+It could not say what was searched for, what came back, or what was actually
+sent -- the first questions anyone asks about a surprising run.
+
+Two properties matter more than the storage itself. Logging must never break
+the thing it describes, and a search that found nothing must be
+distinguishable from a search that never ran.
+"""
+
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from app import models
+from app.services import agent_settings, comms_log
+
+REPO, PR, OWNER = "acme/widget", 42, 1
+
+
+@pytest.fixture
+def db(tmp_path):
+    from app.database import Base
+
+    engine = create_engine(
+        f"sqlite:///{tmp_path}/c.db", connect_args={"check_same_thread": False}
+    )
+    Base.metadata.create_all(bind=engine)
+    session = sessionmaker(bind=engine)()
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+class TestRecording:
+    def test_a_sent_message_is_stored_verbatim(self, db):
+        body = "📝 @senior-dev requested changes on acme/widget#42\n• Add a test"
+
+        comms_log.record(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR,
+            loop="review", direction="sent", channel="slack",
+            target="#code-review", body=body,
+        )
+
+        event = db.query(models.CommunicationEvent).one()
+        # Verbatim, not summarized: a truncated record answers the easy
+        # questions and none of the hard ones.
+        assert event.body == body
+        assert event.target == "#code-review"
+
+    def test_a_failed_send_is_recorded_as_failed(self, db):
+        """A message that did not go out is the one worth surfacing."""
+        comms_log.record(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR,
+            loop="qa", direction="sent", channel="email",
+            body="Ready to test", succeeded=False,
+        )
+
+        assert db.query(models.CommunicationEvent).one().succeeded == 0
+
+    def test_an_enormous_body_is_clipped_not_rejected(self, db):
+        """One pasted logfile must not be able to fill the table."""
+        comms_log.record(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR,
+            loop="qa", direction="received", channel="slack",
+            body="x" * 60_000,
+        )
+
+        stored = db.query(models.CommunicationEvent).one().body
+        assert len(stored) < 60_000
+        assert stored.endswith("(truncated)")
+
+    def test_logging_failure_does_not_raise(self, db, monkeypatch):
+        """
+        Bookkeeping must never break the thing it describes.
+
+        A Slack message that was genuinely sent must not be reported as failed
+        because the record of it could not be written.
+        """
+        def boom(*_a, **_kw):
+            raise RuntimeError("database is gone")
+
+        monkeypatch.setattr(db, "add", boom)
+
+        # No exception escapes.
+        comms_log.record(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR,
+            loop="review", direction="sent", channel="slack", body="hi",
+        )
+
+
+class TestSearchVisibility:
+    def test_queries_are_recorded_even_when_nothing_matched(self, db):
+        """
+        A search that found nothing looks identical to one that never ran.
+
+        Only the query makes the difference visible, which is the whole point
+        of storing it.
+        """
+        comms_log.record_search_matches(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR,
+            queries=['"LOC-42"', "retry logic"],
+            matches=[],
+        )
+
+        events = db.query(models.CommunicationEvent).all()
+        assert len(events) == 2
+        assert {e.query for e in events} == {'"LOC-42"', "retry logic"}
+        assert all(e.outcome == "no matches" for e in events)
+
+    def test_matches_store_the_full_message_and_its_query(self, db):
+        comms_log.record_search_matches(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR,
+            queries=['"LOC-42"'],
+            matches=[{
+                "channel": "eng", "participant": "jane",
+                "text": "we agreed retries cap at 3",
+                "permalink": "https://slack.com/archives/x",
+                "query": '"LOC-42"',
+            }],
+        )
+
+        received = db.query(models.CommunicationEvent).filter(
+            models.CommunicationEvent.direction == "received"
+        ).one()
+
+        assert received.body == "we agreed retries cap at 3"
+        assert received.participant == "jane"
+        # Which query surfaced it, so a noisy match can be traced to the term
+        # that found it.
+        assert received.query == '"LOC-42"'
+
+
+class TestTimeline:
+    def test_both_loops_come_back_in_one_ordered_story(self, db):
+        for loop, direction, body in [
+            ("context", "searched", None),
+            ("review", "sent", "review requested"),
+            ("review", "received", "please add a test"),
+            ("qa", "sent", "ready to test"),
+            ("qa", "received", "works fine"),
+        ]:
+            comms_log.record(
+                db, owner_id=OWNER, repo=REPO, pr_number=PR,
+                loop=loop, direction=direction, channel="slack", body=body,
+            )
+
+        events = comms_log.timeline(db, owner_id=OWNER, repo=REPO, pr_number=PR)
+
+        assert [e.loop for e in events] == [
+            "context", "review", "review", "qa", "qa"
+        ]
+
+    def test_another_users_messages_are_not_returned(self, db):
+        comms_log.record(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR,
+            loop="review", direction="sent", channel="slack", body="mine",
+        )
+        comms_log.record(
+            db, owner_id=OWNER + 1, repo=REPO, pr_number=PR,
+            loop="review", direction="sent", channel="slack", body="theirs",
+        )
+
+        events = comms_log.timeline(db, owner_id=OWNER, repo=REPO, pr_number=PR)
+
+        assert [e.body for e in events] == ["mine"]
+
+
+class TestReviewerContacts:
+    def test_slack_and_email_are_recognised_in_any_order(self):
+        """
+        This is typed by hand, so demanding a strict field order is a cost
+        with no benefit. An address is recognised by its shape.
+        """
+        parsed = agent_settings.parse_contacts(
+            "jane, @jane-slack, jane@acme.com\n"
+            "bob, bob@acme.com, @bobby"
+        )
+
+        assert parsed["jane"] == {"slack": "@jane-slack", "email": "jane@acme.com"}
+        assert parsed["bob"] == {"slack": "@bobby", "email": "bob@acme.com"}
+
+    def test_a_bare_handle_gets_its_sigil(self):
+        assert agent_settings.parse_contacts("jane, jane-slack") == {
+            "jane": {"slack": "@jane-slack"}
+        }
+
+    def test_a_login_alone_is_valid(self):
+        """Contacts are optional; the loop works without them."""
+        assert agent_settings.parse_contacts("jane") == {"jane": {}}
+
+    def test_blank_input_is_empty_not_an_error(self):
+        assert agent_settings.parse_contacts(None) == {}
+        assert agent_settings.parse_contacts("  \n \n") == {}

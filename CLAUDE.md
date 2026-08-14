@@ -119,6 +119,19 @@ row per user behind `GET`/`PUT /webhooks/defaults`; a merge run must read the *s
 registration, not form state, which `tests/test_merge_uses_registration.py` pins after a bug
 where ticked-but-unsubmitted settings were silently skipped.
 
+**Every message is recorded, not summarized.** `communication_events` stores what was searched
+for, what came back, and what was actually sent, per PR, across both loops.
+`app/services/comms_log.py` is the only writer. Two rules there: logging never fails the work
+it describes (every helper swallows its own errors — a message that was genuinely sent must
+not be reported as failed because the record could not be written), and search *queries* are
+stored even when nothing matched, because a search that found nothing is otherwise
+indistinguishable from one that never ran.
+
+Bodies that get sent are built once and returned to the caller rather than reconstructed for
+the log — `merge_actions._qa_email_text` and `post_qa_thread`'s third return value exist for
+that reason. A reconstruction drifts from what the channel actually saw, which makes the
+record worse than useless.
+
 **The review loop accumulates state GitHub does not keep.** GitHub reports each review as an
 isolated event; nothing in any payload says "this PR is on its third round". `PRReview` holds
 the current state and round number, `PRReviewRound` is the append-only history, and

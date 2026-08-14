@@ -297,6 +297,27 @@ alongside and are canonical. The summarizer has no tools bound and returns nothi
 model is unavailable — an empty checklist reads as "see the review", where an invented one
 would not.
 
+#### Seeing what happened
+
+Expand any PR in the review queue and switch to **Messages & loops** for the full record: both
+loops' current state, who is reachable where, and every message — with its actual text.
+
+| Shown | Includes |
+|---|---|
+| Searched | The Slack query, and whether it matched. A search that found nothing looks identical to one that never ran without this |
+| Received | Prior discussion found, review bodies, tester replies — each with the verdict it produced |
+| Sent | Review pings, the QA Slack post, the QA email with its subject — verbatim, as the channel saw it |
+
+Messages that failed to send are shown and marked, since an undelivered QA notification
+matters more than a delivered one.
+
+Reviewer contacts are optional, one per line: `login, @slack, email@company.com`. A GitHub
+login is neither a Slack handle nor an address, so without them the dashboard can say a review
+was requested but not who was actually reached.
+
+The log starts empty — runs from before it existed have nothing to recover, because the
+messages themselves were never stored.
+
 #### Auto-merge on approval
 
 Optional, **off by default**. When enabled, an approving review merges the PR — and because
@@ -414,6 +435,7 @@ classifier has no tools bound — it returns a verdict and nothing else.
 | `DELETE` | `/webhooks/repos/{owner}/{name}` | Unregister |
 | `GET` | `/webhooks/reviews` | Pull requests in the review loop; `?include_merged=true` for all |
 | `GET` | `/webhooks/reviews/{owner}/{name}/{pr_number}` | One PR's full round history |
+| `GET` | `/webhooks/activity/{owner}/{name}/{pr_number}` | Both loops plus every message searched, sent, and received |
 | `POST` | `/webhooks/analyze/{owner}/{name}/{pr_number}` | Analyze a PR now, no webhook needed |
 | `GET` | `/webhooks/jobs` | Recent analysis jobs and their errors |
 | `GET` | `/webhooks/jobs/{job_id}` | One run with findings, context, and tools used |

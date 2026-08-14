@@ -20,6 +20,7 @@ import httpx
 
 from app import crud, models
 from app.database import SessionLocal
+from app.services import comms_log
 from app.services.qa_feedback import handle_qa_reply
 
 logger = logging.getLogger(__name__)
@@ -222,6 +223,16 @@ async def poll_once() -> int:
                 except Exception:
                     logger.exception("QA email reply handling failed for %s", thread.repo)
                     continue
+
+                comms_log.record(
+                    db, owner_id=owner_id, repo=thread.repo,
+                    pr_number=thread.pr_number,
+                    loop="qa", direction="received", channel="email",
+                    participant=_header(message, "From") or None,
+                    target=thread.pr_url,
+                    body=body,
+                    outcome=outcome["verdict"],
+                )
 
                 processed += 1
                 logger.info(
