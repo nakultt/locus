@@ -554,6 +554,10 @@ export interface RepoRegistration {
   qa_emails?: string[];
   jira_done_status?: string;
   close_issues_on_merge?: boolean;
+  /** GitHub logins expected to review this repo. */
+  reviewers?: string[];
+  /** Review pings go here; falls back to slack_channel when unset. */
+  review_slack_channel?: string | null;
   enabled: boolean;
   /** Returned only when registering. */
   webhook_url?: string;
@@ -643,6 +647,71 @@ export async function getPRAgentSummary(): Promise<PRAgentSummary> {
   return apiRequest<PRAgentSummary>("/webhooks/summary");
 }
 
+/** Where a PR sits in the senior-dev loop. Only `approved` clears the gate. */
+export type ReviewState =
+  | "awaiting_review"
+  | "changes_requested"
+  | "approved"
+  | "merged";
+
+export type ReviewOutcome =
+  | "review_requested"
+  | "approved"
+  | "changes_requested"
+  | "commented"
+  | "resubmitted";
+
+export interface ReviewRound {
+  round_number: number;
+  outcome: ReviewOutcome;
+  reviewer?: string | null;
+  /** The reviewer's own words. Canonical; the checklist is derived from it. */
+  body?: string | null;
+  head_sha?: string | null;
+  created_at?: string | null;
+}
+
+export interface PRReviewSummary {
+  id: number;
+  repo: string;
+  pr_number: number;
+  pr_url?: string | null;
+  pr_title?: string | null;
+  author?: string | null;
+  state: ReviewState;
+  /** Increments on each changes-requested -> re-review cycle. Starts at 1. */
+  round_number: number;
+  last_reviewer?: string | null;
+  updated_at?: string | null;
+}
+
+export interface PRReviewDetail extends PRReviewSummary {
+  pending_asks: string[];
+  rounds: ReviewRound[];
+}
+
+export interface PRReviewList {
+  reviews: PRReviewSummary[];
+  total: number;
+  awaiting_review: number;
+  changes_requested: number;
+  approved: number;
+}
+
+/** Merged PRs are excluded unless asked for: the loop is over for them. */
+export async function listReviews(includeMerged = false): Promise<PRReviewList> {
+  return apiRequest<PRReviewList>(
+    `/webhooks/reviews?include_merged=${includeMerged}`
+  );
+}
+
+export async function getReview(
+  repo: string,
+  prNumber: number
+): Promise<PRReviewDetail> {
+  return apiRequest<PRReviewDetail>(`/webhooks/reviews/${repo}/${prNumber}`);
+}
+
 export async function listPRJobs(limit = 20): Promise<PRJob[]> {
   return apiRequest<PRJob[]>(`/webhooks/jobs?limit=${limit}`);
 }
@@ -665,7 +734,9 @@ export async function registerRepo(
   contextDocs: string[] = [],
   qaEmails: string[] = [],
   jiraDoneStatus = "Done",
-  closeIssuesOnMerge = true
+  closeIssuesOnMerge = true,
+  reviewers: string[] = [],
+  reviewSlackChannel?: string
 ): Promise<RepoRegistration> {
   return apiRequest<RepoRegistration>("/webhooks/repos", {
     method: "POST",
@@ -677,6 +748,8 @@ export async function registerRepo(
       qa_emails: qaEmails,
       jira_done_status: jiraDoneStatus,
       close_issues_on_merge: closeIssuesOnMerge,
+      reviewers,
+      review_slack_channel: reviewSlackChannel || null,
     }),
   });
 }
@@ -687,6 +760,8 @@ export interface PRAgentDefaults {
   qa_emails: string[];
   jira_done_status: string;
   close_issues_on_merge: boolean;
+  reviewers: string[];
+  review_slack_channel?: string | null;
 }
 
 /** Account-wide fallbacks used by any repo that does not set its own. */

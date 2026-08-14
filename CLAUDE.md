@@ -90,9 +90,11 @@ clean one.
 this" — a judgement about this change — not a CVSS-style rating. Don't collapse the two.
 
 **Models that read attacker-influenced text have no tools bound.** Diff text, Slack messages,
-and QA replies are controlled by anyone who can open a PR or post in a channel. The security
-scanner, the code reviewer, and the QA classifier return findings or a verdict and nothing
-else — they cannot act on what they read.
+QA replies, and review bodies are controlled by anyone who can open a PR, post in a channel,
+or review. The security scanner, the code reviewer, the QA classifier, and the review-asks
+summarizer return findings or a verdict and nothing else — they cannot act on what they read.
+The asks summarizer degrades to an empty list when the model is unavailable: an empty
+checklist reads as "see the review itself", where a fabricated one would not.
 
 **Semgrep scans reconstructed files, not the diff.** Handed a unified diff it silently finds
 nothing, because a `.diff` is not valid source in any language. The agent fetches post-change
@@ -116,6 +118,26 @@ settings through it rather than reaching into either source directly. Defaults a
 row per user behind `GET`/`PUT /webhooks/defaults`; a merge run must read the *saved*
 registration, not form state, which `tests/test_merge_uses_registration.py` pins after a bug
 where ticked-but-unsubmitted settings were silently skipped.
+
+**The review loop accumulates state GitHub does not keep.** GitHub reports each review as an
+isolated event; nothing in any payload says "this PR is on its third round". `PRReview` holds
+the current state and round number, `PRReviewRound` is the append-only history, and
+`app/services/review_flow.py` is the only thing that writes either. Three rules there are
+deliberate:
+
+- **Only a push that follows a changes-requested review opens a new round.** A push to a PR
+  nobody has reviewed is ordinary development; counting it would turn the round number into a
+  commit counter and make every PR look stalled.
+- **A `commented` review is recorded but moves nothing.** It carries no verdict, and letting
+  drive-by remarks bump the round count would make a converging review look stuck.
+- **A review request never un-approves.** Asking for a second opinion is normal, and silently
+  dropping the approval would make a merge-ready PR look blocked.
+
+**The review loop does not move Jira backwards.** A changes-requested review is a genuine
+backward step, but `merge_actions.is_forward_transition` refuses backward transitions so a
+misconfigured status cannot drag a team's board into an earlier stage. Rather than carve an
+exception into that guard, the review loop notifies and records, and leaves the board alone.
+The board follows the merge, not the round trip.
 
 **Third-party APIs return explicit `null`, so `.get(key, default)` does not save you.** The key
 is present; its value is `None`, so the default never fires and the next subscript raises
@@ -160,7 +182,7 @@ for m in migrations/0*.py; do uv run python "$m"; done
 ```
 
 Note that `migrations/README.md`'s table is stale — it lists two scripts under old names while
-nine exist on disk. Trust the directory.
+ten exist on disk. Trust the directory.
 
 ## Conventions
 

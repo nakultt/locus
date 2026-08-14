@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from app import crud, models, schemas, security
 from app.database import SessionLocal, get_db
 from app.dependencies import get_current_user, get_integration_configs
+from app.services import review_flow
 from app.services.agent_settings import resolve_settings
 from app.services.capabilities import build_readiness
 from app.services.google_docs_context import extract_document_id
@@ -42,6 +43,12 @@ ANALYZED_ACTIONS = {"opened", "reopened", "synchronize", "ready_for_review"}
 
 # A merged PR triggers the post-merge actions instead of a fresh analysis.
 MERGE_ACTION = "merged"
+
+# Review-loop actions. These do not re-run the analysis pipeline -- the diff
+# has not changed -- they advance the review state and notify.
+REVIEW_SUBMITTED_ACTION = "review_submitted"
+REVIEW_REQUESTED_ACTION = "review_requested"
+REVIEW_ACTIONS = {REVIEW_SUBMITTED_ACTION, REVIEW_REQUESTED_ACTION}
 
 
 def verify_github_signature(payload: bytes, signature: str, secret: str) -> bool:
@@ -115,7 +122,7 @@ async def github_webhook(
     if x_github_event == "ping":
         return {"message": "pong"}
 
-    if x_github_event != "pull_request":
+    if x_github_event not in ("pull_request", "pull_request_review"):
         return {"message": f"Ignoring event: {x_github_event}"}
 
     payload = _parse_webhook_body(raw_body, request.headers.get("content-type", ""))
@@ -153,10 +160,34 @@ async def github_webhook(
         )
 
     action = payload.get("action", "")
-    pr = payload.get("pull_request", {})
+    pr = payload.get("pull_request", {}) or {}
+    review_payload: dict | None = None
 
-    # "closed" with merged=true is the only signal GitHub gives for a merge.
-    if action == "closed":
+    if x_github_event == "pull_request_review":
+        # "edited" rewrites a review body and "dismissed" revokes a verdict
+        # without supplying a new one; neither is a fresh decision to record.
+        if action != "submitted":
+            return {"message": f"Ignoring review action: {action}"}
+
+        review = payload.get("review", {}) or {}
+        action = REVIEW_SUBMITTED_ACTION
+        review_payload = {
+            "review_state": review.get("state"),
+            "reviewer": (review.get("user") or {}).get("login"),
+            "body": review.get("body"),
+        }
+    elif action == "review_requested":
+        action = REVIEW_REQUESTED_ACTION
+        # GitHub sends requested_reviewer for a person and requested_team for
+        # a team; only one is present on any given event.
+        requested = payload.get("requested_reviewer") or {}
+        review_payload = {
+            "reviewer": requested.get("login") or (
+                payload.get("requested_team") or {}
+            ).get("slug"),
+        }
+    elif action == "closed":
+        # "closed" with merged=true is the only signal GitHub gives for a merge.
         if not pr.get("merged"):
             return {"message": "Ignoring closed-without-merge"}
         action = MERGE_ACTION
@@ -166,11 +197,20 @@ async def github_webhook(
     if pr.get("draft"):
         return {"message": "Ignoring draft PR"}
 
+    if review_payload is not None:
+        # Identity fields the review row needs but cannot look up later.
+        review_payload.update({
+            "pr_url": pr.get("html_url"),
+            "pr_title": pr.get("title"),
+            "author": (pr.get("user") or {}).get("login"),
+        })
+
     job = models.PRJob(
         repo=repo_full_name,
         pr_number=pr.get("number"),
         action=action,
         head_sha=pr.get("head", {}).get("sha"),
+        payload_json=json.dumps(review_payload) if review_payload else None,
         status=schemas.PRJobStatus.queued.value,
         owner_id=registration.owner_id,
     )
@@ -178,7 +218,8 @@ async def github_webhook(
     db.commit()
     db.refresh(job)
 
-    return {"message": "Analysis queued", "job_id": job.id}
+    queued = "Review event queued" if action in REVIEW_ACTIONS else "Analysis queued"
+    return {"message": queued, "job_id": job.id}
 
 
 @router.post(
@@ -212,6 +253,10 @@ async def register_repo(
     emails = [e.strip() for e in request.qa_emails if e.strip() and "@" in e]
     stored_emails = "\n".join(emails) if emails else None
 
+    # Accept "@octocat" or "octocat"; GitHub logins carry no leading sigil.
+    reviewers = [r.strip().lstrip("@") for r in request.reviewers if r.strip()]
+    stored_reviewers = "\n".join(reviewers) if reviewers else None
+
     existing = db.query(models.RepoWebhook).filter(
         models.RepoWebhook.repo == request.repo,
         models.RepoWebhook.owner_id == current_user.id,
@@ -226,6 +271,8 @@ async def register_repo(
         existing.qa_emails = stored_emails
         existing.jira_done_status = request.jira_done_status
         existing.close_issues_on_merge = 1 if request.close_issues_on_merge else 0
+        existing.reviewers = stored_reviewers
+        existing.review_slack_channel = request.review_slack_channel
         existing.enabled = 1
         registration = existing
     else:
@@ -238,6 +285,8 @@ async def register_repo(
             qa_emails=stored_emails,
             jira_done_status=request.jira_done_status,
             close_issues_on_merge=1 if request.close_issues_on_merge else 0,
+            reviewers=stored_reviewers,
+            review_slack_channel=request.review_slack_channel,
             enabled=1,
             owner_id=current_user.id,
         )
@@ -255,6 +304,8 @@ async def register_repo(
         qa_emails=emails,
         jira_done_status=registration.jira_done_status,
         close_issues_on_merge=bool(registration.close_issues_on_merge),
+        reviewers=reviewers,
+        review_slack_channel=registration.review_slack_channel,
         enabled=True,
         webhook_url=f"{PUBLIC_BASE_URL.rstrip('/')}/webhooks/github",
         webhook_secret=secret,
@@ -286,6 +337,8 @@ async def list_repos(
                 qa_emails=(r.qa_emails or "").splitlines() if r.qa_emails else [],
                 jira_done_status=r.jira_done_status or "Done",
                 close_issues_on_merge=bool(r.close_issues_on_merge),
+                reviewers=(r.reviewers or "").splitlines() if r.reviewers else [],
+                review_slack_channel=r.review_slack_channel,
                 enabled=bool(r.enabled),
             )
             for r in rows
@@ -348,6 +401,8 @@ async def get_defaults(
         qa_emails=[e for e in (row.qa_emails or "").splitlines() if e.strip()],
         jira_done_status=row.jira_done_status,
         close_issues_on_merge=bool(row.close_issues_on_merge),
+        reviewers=[r for r in (row.reviewers or "").splitlines() if r.strip()],
+        review_slack_channel=row.review_slack_channel,
     )
 
 
@@ -365,6 +420,7 @@ async def save_defaults(
     # Same leniency as repo registration: a malformed address surfaces as a
     # send failure rather than blocking the whole save.
     emails = [e.strip() for e in request.qa_emails if e.strip() and "@" in e]
+    reviewers = [r.strip().lstrip("@") for r in request.reviewers if r.strip()]
 
     row = db.query(models.PRAgentDefaults).filter(
         models.PRAgentDefaults.owner_id == current_user.id
@@ -379,6 +435,8 @@ async def save_defaults(
     row.qa_emails = "\n".join(emails) if emails else None
     row.jira_done_status = request.jira_done_status or "Done"
     row.close_issues_on_merge = 1 if request.close_issues_on_merge else 0
+    row.reviewers = "\n".join(reviewers) if reviewers else None
+    row.review_slack_channel = (request.review_slack_channel or "").strip() or None
 
     db.commit()
     db.refresh(row)
@@ -389,6 +447,8 @@ async def save_defaults(
         qa_emails=emails,
         jira_done_status=row.jira_done_status,
         close_issues_on_merge=bool(row.close_issues_on_merge),
+        reviewers=reviewers,
+        review_slack_channel=row.review_slack_channel,
     )
 
 
@@ -504,6 +564,86 @@ async def get_job(
 
 
 @router.get(
+    "/reviews",
+    response_model=schemas.PRReviewList,
+    summary="Pull requests in the senior-dev review loop",
+)
+async def list_reviews(
+    include_merged: bool = False,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> schemas.PRReviewList:
+    """
+    The review queue, most recently active first.
+
+    Merged PRs are excluded by default: the loop is over for them and the
+    queue is meant to show what still needs someone's attention.
+    """
+    query = db.query(models.PRReview).filter(
+        models.PRReview.owner_id == current_user.id
+    )
+
+    if not include_merged:
+        query = query.filter(
+            models.PRReview.state != schemas.ReviewState.merged.value
+        )
+
+    rows = query.order_by(
+        models.PRReview.updated_at.desc().nullslast(),
+        models.PRReview.created_at.desc(),
+    ).all()
+
+    return schemas.PRReviewList(
+        reviews=[schemas.PRReviewSummary.model_validate(r) for r in rows],
+        total=len(rows),
+        awaiting_review=sum(
+            1 for r in rows
+            if r.state == schemas.ReviewState.awaiting_review.value
+        ),
+        changes_requested=sum(
+            1 for r in rows
+            if r.state == schemas.ReviewState.changes_requested.value
+        ),
+        approved=sum(
+            1 for r in rows if r.state == schemas.ReviewState.approved.value
+        ),
+    )
+
+
+@router.get(
+    "/reviews/{owner}/{name}/{pr_number}",
+    response_model=schemas.PRReviewDetail,
+    summary="One pull request's full review history",
+)
+async def get_review(
+    owner: str,
+    name: str,
+    pr_number: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> schemas.PRReviewDetail:
+    """
+    Every round of the loop for one PR, oldest first.
+
+    A PR belonging to another account returns 404 rather than 403 -- a 403
+    would confirm the review exists, which is enough to enumerate other
+    people's repositories.
+    """
+    review = db.query(models.PRReview).filter(
+        models.PRReview.repo == f"{owner}/{name}",
+        models.PRReview.pr_number == pr_number,
+        models.PRReview.owner_id == current_user.id,
+    ).first()
+
+    if not review:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Review not found"
+        )
+
+    return review_flow.to_detail(review)
+
+
+@router.get(
     "/summary",
     response_model=schemas.PRAgentSummary,
     summary="PR agent dashboard summary",
@@ -591,6 +731,84 @@ async def agent_summary(
     )
 
 
+async def _run_review_job(
+    db: SessionLocal,
+    job: models.PRJob,
+    settings,
+    integration_configs: dict[str, dict],
+) -> None:
+    """
+    Advance the senior-dev review loop for one review event.
+
+    Kept separate from the analysis path because the two share nothing but the
+    job row: this reads a verdict and writes state, where the other reads a
+    diff and writes a comment.
+    """
+    payload = json.loads(job.payload_json) if job.payload_json else {}
+
+    if job.action == REVIEW_SUBMITTED_ACTION:
+        review = await review_flow.record_review_submitted(
+            db,
+            owner_id=job.owner_id,
+            repo=job.repo,
+            pr_number=job.pr_number,
+            review_state=payload.get("review_state") or "",
+            reviewer=payload.get("reviewer"),
+            body=payload.get("body"),
+            head_sha=job.head_sha,
+            pr_url=payload.get("pr_url"),
+            pr_title=payload.get("pr_title"),
+            author=payload.get("author"),
+        )
+        # A "commented" review records history but carries no verdict, so
+        # there is nothing to announce.
+        if review is None or review.state not in (
+            schemas.ReviewState.approved.value,
+            schemas.ReviewState.changes_requested.value,
+        ):
+            return
+
+        outcome = (
+            schemas.ReviewOutcome.approved
+            if review.state == schemas.ReviewState.approved.value
+            else schemas.ReviewOutcome.changes_requested
+        )
+        asks = [
+            line.strip()
+            for line in (review.pending_asks or "").splitlines()
+            if line.strip()
+        ]
+    else:
+        review = review_flow.record_review_requested(
+            db,
+            owner_id=job.owner_id,
+            repo=job.repo,
+            pr_number=job.pr_number,
+            reviewer=payload.get("reviewer"),
+            pr_url=payload.get("pr_url"),
+            pr_title=payload.get("pr_title"),
+            author=payload.get("author"),
+        )
+        outcome = schemas.ReviewOutcome.review_requested
+        asks = []
+
+    channel = settings.review_slack_channel
+    if not channel or "slack" not in integration_configs:
+        return
+
+    # A specific requested reviewer beats the configured list: the point of
+    # the message is to reach whoever the ball is actually with.
+    expected = [payload["reviewer"]] if payload.get("reviewer") else settings.reviewers
+
+    await review_flow.post_review_notification(
+        integration_configs["slack"],
+        channel,
+        review_flow.format_review_notification(
+            review, outcome, review.last_reviewer, asks, expected
+        ),
+    )
+
+
 async def run_pr_job(job_id: int) -> None:
     """
     Execute a queued PR analysis job.
@@ -622,6 +840,31 @@ async def run_pr_job(job_id: int) -> None:
         # rather than silently doing nothing.
         settings = resolve_settings(db, job.owner_id, registration)
 
+        # Review events advance the loop and notify. They deliberately skip
+        # the analysis pipeline: the diff has not changed since the last run,
+        # and re-scanning it would rewrite the PR comment with identical
+        # findings every time a reviewer clicks approve.
+        if job.action in REVIEW_ACTIONS:
+            await _run_review_job(db, job, settings, integration_configs)
+            job.status = schemas.PRJobStatus.completed.value
+            job.completed_at = datetime.now(UTC)
+            db.commit()
+            return
+
+        # A push to a PR whose review asked for changes opens the next round.
+        # Only that case counts: a push to a PR nobody has reviewed yet is
+        # ordinary development, and counting it would make the round number
+        # meaningless as a measure of how long the loop has run.
+        resubmitted = None
+        if job.action == "synchronize":
+            resubmitted = review_flow.record_resubmission(
+                db,
+                owner_id=job.owner_id,
+                repo=job.repo,
+                pr_number=job.pr_number,
+                head_sha=job.head_sha,
+            )
+
         result = await analyze_pull_request(
             repo=job.repo,
             pr_number=job.pr_number,
@@ -634,7 +877,33 @@ async def run_pr_job(job_id: int) -> None:
             context_doc_ids=settings.context_doc_ids,
         )
 
+        if resubmitted is not None:
+            result.stages.append(schemas.PipelineStage(
+                key="review_round", label="Open next review round", kind="write",
+                state=schemas.StageState.done,
+                detail=f"round {resubmitted.round_number}, awaiting review",
+            ))
+            channel = settings.review_slack_channel
+            if channel and "slack" in integration_configs:
+                await review_flow.post_review_notification(
+                    integration_configs["slack"],
+                    channel,
+                    review_flow.format_review_notification(
+                        resubmitted,
+                        schemas.ReviewOutcome.resubmitted,
+                        resubmitted.last_reviewer,
+                        [],
+                        settings.reviewers,
+                    ),
+                )
+
         if is_merge:
+            # Close the review loop before the QA loop opens. A merged PR must
+            # not keep showing up in a review queue.
+            review_flow.record_merged(
+                db, owner_id=job.owner_id, repo=job.repo, pr_number=job.pr_number
+            )
+
             result.merge_actions = await run_merge_actions(
                 result,
                 integration_configs,

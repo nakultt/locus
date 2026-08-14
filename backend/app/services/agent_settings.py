@@ -28,6 +28,11 @@ class EffectiveSettings:
     jira_done_status: str = "Done"
     close_issues_on_merge: bool = True
     context_doc_ids: list[str] = field(default_factory=list)
+    # GitHub logins expected to review this repo.
+    reviewers: list[str] = field(default_factory=list)
+    # Where review-loop notifications go. Falls back to slack_channel only if
+    # explicitly unset, so a team can keep review pings out of the summary feed.
+    review_slack_channel: str | None = None
 
     # Per key: "repo", "defaults", or "unset". The dashboard shows this so a
     # skipped stage can be traced to the setting responsible.
@@ -116,5 +121,21 @@ def resolve_settings(
         _lines(registration.context_doc_ids) if registration else []
     )
     resolved.sources["context_doc_ids"] = "repo" if resolved.context_doc_ids else "unset"
+
+    resolved.reviewers = pick(
+        "reviewers",
+        _lines(registration.reviewers) if registration else [],
+        _lines(defaults.reviewers) if defaults else [],
+        [],
+    )
+
+    # Falls back to the summary channel last: a review request with nowhere to
+    # go is worse than one in a busy channel.
+    resolved.review_slack_channel = pick(
+        "review_slack_channel",
+        (registration.review_slack_channel or "").strip() if registration else "",
+        (defaults.review_slack_channel or "").strip() if defaults else "",
+        resolved.slack_channel,
+    )
 
     return resolved

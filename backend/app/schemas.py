@@ -431,6 +431,76 @@ class PRJobStatus(str, Enum):
     failed = "failed"
 
 
+class ReviewState(str, Enum):
+    """
+    Where a pull request sits in the senior-dev loop.
+
+    Only `approved` clears the merge gate. `changes_requested` is not terminal
+    -- it is the state the loop spends most of its time in, and the one a push
+    from the author moves back out of.
+    """
+    awaiting_review = "awaiting_review"
+    changes_requested = "changes_requested"
+    approved = "approved"
+    merged = "merged"
+
+
+class ReviewOutcome(str, Enum):
+    """What happened in one leg of the loop."""
+    review_requested = "review_requested"
+    approved = "approved"
+    changes_requested = "changes_requested"
+    commented = "commented"
+    # The author pushed after changes were requested: a new round begins.
+    resubmitted = "resubmitted"
+
+
+class ReviewRound(BaseModel):
+    """One completed leg, as stored."""
+    model_config = ConfigDict(from_attributes=True)
+
+    round_number: int
+    outcome: ReviewOutcome
+    reviewer: str | None = None
+    body: str | None = None
+    head_sha: str | None = None
+    created_at: datetime | None = None
+
+
+class PRReviewSummary(BaseModel):
+    """A pull request's current position in the review loop."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    repo: str
+    pr_number: int
+    pr_url: str | None = None
+    pr_title: str | None = None
+    author: str | None = None
+    state: ReviewState
+    round_number: int
+    last_reviewer: str | None = None
+    updated_at: datetime | None = None
+
+
+class PRReviewDetail(PRReviewSummary):
+    """The same, plus the full round history and the outstanding asks."""
+    pending_asks: list[str] = Field(
+        default_factory=list,
+        description="Model-written checklist from the last changes-requested review",
+    )
+    rounds: list[ReviewRound] = Field(default_factory=list)
+
+
+class PRReviewList(BaseModel):
+    """The review queue, with a count per state for the dashboard header."""
+    reviews: list[PRReviewSummary] = []
+    total: int = 0
+    awaiting_review: int = 0
+    changes_requested: int = 0
+    approved: int = 0
+
+
 class RepoRegister(BaseModel):
     """Register a repository for PR analysis."""
     repo: str = Field(..., description='Repository as "owner/name"', pattern=r"^[\w.-]+/[\w.-]+$")
@@ -453,6 +523,17 @@ class RepoRegister(BaseModel):
     )
     close_issues_on_merge: bool = Field(
         True, description="Close linked GitHub issues when the PR merges"
+    )
+    reviewers: list[str] = Field(
+        default_factory=list,
+        description="GitHub logins of the senior devs who review this repo",
+    )
+    review_slack_channel: str | None = Field(
+        None,
+        description=(
+            "Channel for review requests and changes-requested pings. "
+            "Falls back to slack_channel when unset."
+        ),
     )
 
 
@@ -479,6 +560,13 @@ class PRAgentDefaultsUpdate(BaseModel):
     close_issues_on_merge: bool = Field(
         True, description="Close linked GitHub issues when a PR merges"
     )
+    reviewers: list[str] = Field(
+        default_factory=list,
+        description="Default senior-dev GitHub logins, for every repo",
+    )
+    review_slack_channel: str | None = Field(
+        None, description="Default channel for review-loop notifications"
+    )
 
 
 class PRAgentDefaults(PRAgentDefaultsUpdate):
@@ -504,6 +592,8 @@ class RepoRegistration(BaseModel):
     qa_emails: list[str] = []
     jira_done_status: str = "Done"
     close_issues_on_merge: bool = True
+    reviewers: list[str] = []
+    review_slack_channel: str | None = None
     enabled: bool = True
     webhook_url: str | None = Field(
         None, description="Payload URL to paste into GitHub"
