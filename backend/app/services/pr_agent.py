@@ -655,6 +655,8 @@ async def analyze_pull_request(
     export_to_docs: bool = False,
     context_doc_ids: list[str] | None = None,
     comms: dict | None = None,
+    accumulated_context: str | None = None,
+    cached_slack: list[dict] | None = None,
 ) -> PRAnalysisResult:
     """
     Run the full PR analysis pipeline.
@@ -800,25 +802,50 @@ async def analyze_pull_request(
                 ticket_keys, repo, pr_number, context.title, branch,
                 [i.number for i in context.linked_issues],
             )
-            slack_matches: list[dict] = []
-            slack_queries: list[str] = []
-            context.slack_threads = await search_slack_threads(
-                ticket_keys,
-                repo,
-                pr_number,
-                integration_configs["slack"],
-                title=context.title,
-                branch=branch,
-                issue_numbers=[i.number for i in context.linked_issues],
-                matches=slack_matches,
-                queries_tried=slack_queries,
-            )
-            if comms is not None:
-                comms["slack_matches"] = slack_matches
-                comms["slack_queries"] = slack_queries
-            has_user_token = bool(
-                (integration_configs["slack"].get("credentials") or {}).get("user_token")
-            )
+            if cached_slack is not None:
+                # Searched recently for this work item. Reuse what it found
+                # rather than spending a Tier-2 call (~20/min) to be told the
+                # same thing -- discussion about a requirement does not change
+                # because the author pushed a fix.
+                context.slack_threads = [
+                    RelatedSlackThread(
+                        channel=m.get("channel") or "unknown",
+                        permalink=m.get("permalink"),
+                        message_count=1,
+                        summary=(m.get("text") or "")[:280],
+                        participants=[m["participant"]] if m.get("participant") else [],
+                    )
+                    for m in cached_slack
+                ]
+                _record(tool_calls, "slack", "slack_search",
+                        query="(reused recent search)",
+                        result_count=len(context.slack_threads))
+                _stage(stages, "slack_search", "Search Slack history", "read",
+                       StageState.done,
+                       f"{len(context.slack_threads)} thread(s), reused")
+                has_user_token = True
+            else:
+                slack_matches: list[dict] = []
+                slack_queries: list[str] = []
+                context.slack_threads = await search_slack_threads(
+                    ticket_keys,
+                    repo,
+                    pr_number,
+                    integration_configs["slack"],
+                    title=context.title,
+                    branch=branch,
+                    issue_numbers=[i.number for i in context.linked_issues],
+                    matches=slack_matches,
+                    queries_tried=slack_queries,
+                )
+                if comms is not None:
+                    comms["slack_matches"] = slack_matches
+                    comms["slack_queries"] = slack_queries
+                has_user_token = bool(
+                    (integration_configs["slack"].get("credentials") or {})
+                    .get("user_token")
+                )
+
             _record(
                 tool_calls, "slack", "search_messages",
                 query=" | ".join(queries) if has_user_token else None,
@@ -953,9 +980,16 @@ async def analyze_pull_request(
     review_findings: list[ReviewFinding] = []
     if enable_llm_review and diff:
         try:
+            # The accumulated brief when the caller could build one -- it
+            # carries what reviewers asked on earlier rounds and what QA
+            # rejected, which this run's freshly-gathered context does not.
+            # Falls back to the single-run rendering so the pipeline still
+            # works when called without a database session.
             review_findings, review_error = await run_code_review(
                 diff_text=diff,
-                requirement_context=_render_requirement_context(context),
+                requirement_context=(
+                    accumulated_context or _render_requirement_context(context)
+                ),
                 document_context=document_context,
             )
             if review_error:
@@ -1068,5 +1102,15 @@ async def analyze_pull_request(
     # Rebind: the result was constructed before the write stages ran, and
     # Pydantic copied the list at that point rather than aliasing it.
     result.stages = stages
+
+    if comms is not None:
+        # The work items this PR belongs to, for keying the log and grouping
+        # pull requests into tasks. Issue references count: a repo with no
+        # tracker still has work items, they are just numbered differently.
+        comms["ticket_keys"] = (
+            [t.key for t in context.tickets]
+            or [f"#{i.number}" for i in context.linked_issues
+                if i.relation == "closes"]
+        )
 
     return result

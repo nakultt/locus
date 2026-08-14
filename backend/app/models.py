@@ -199,6 +199,13 @@ class PRReview(Base):
     state = Column(String(32), nullable=False, default="awaiting_review", index=True)
     # Increments on every changes_requested -> re-review cycle. Starts at 1.
     round_number = Column(Integer, nullable=False, default=1)
+    # Work items this PR belongs to, newline-separated ("LOC-42").
+    #
+    # Denormalized from the analysis so the worklist can group pull requests
+    # into tasks without parsing every stored result. A task that spans three
+    # PRs should read as one thing that has been running for two weeks, not as
+    # three unrelated young items.
+    ticket_keys = Column(Text, nullable=True)
     # Most recent reviewer to act, for "who is this waiting on".
     last_reviewer = Column(String(255), nullable=True)
     # Model-written checklist of what the reviewer asked for, refreshed each
@@ -279,6 +286,13 @@ class CommunicationEvent(Base):
     id = Column(Integer, primary_key=True, index=True)
     repo = Column(String(255), nullable=False, index=True)
     pr_number = Column(Integer, nullable=False, index=True)
+    # The work item this belongs to, when one is known -- "LOC-42", "#7".
+    #
+    # A ticket routinely spans several pull requests: the feature, the fix
+    # after QA rejected it, the follow-up. Keyed only by PR, each of those
+    # starts from an empty history and re-gathers everything. Nullable
+    # because a PR with no ticket is ordinary and must keep working.
+    ticket_key = Column(String(64), nullable=True, index=True)
 
     # review | qa | context -- which loop this belongs to. "context" is the
     # pre-review gathering pass, which searches but never sends.

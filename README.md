@@ -297,6 +297,27 @@ alongside and are canonical. The summarizer has no tools bound and returns nothi
 model is unavailable — an empty checklist reads as "see the review", where an invented one
 would not.
 
+#### What needs you
+
+The dashboard opens with **Needs you**: everything outstanding across every task, grouped by
+work item rather than pull request, ordered by whether the ball is with you and then by how
+long it has been sitting.
+
+| Shows | Because |
+|---|---|
+| Changes requested, with the reviewer's own words | The checklist is for scanning; the quote is what you act on |
+| Testing failed, with the tester's words | A merged PR that failed QA is squarely yours |
+| Approved but not merged | Either auto-merge is off, or the gate is holding |
+| A message that failed to send | An undelivered QA notification matters more than a delivered one |
+
+Grouping by task matters: a ticket spanning three PRs is one thing that has been running for
+two weeks, not three young items. Ordering is decided by the server so the UI cannot disagree
+with the API about what is most urgent.
+
+Deliberately absent: no mark-as-done (it would duplicate GitHub state and go stale — items
+disappear when the underlying state changes), no read/unread, and no new notification channel.
+Slack already pings; this is the durable view.
+
 #### Seeing what happened
 
 Expand any PR in the review queue and switch to **Messages & loops** for the full record: both
