@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from app import crud, models, schemas, security
 from app.database import SessionLocal, get_db
 from app.dependencies import get_current_user, get_integration_configs
-from app.services import github_pr, review_flow
+from app.services import comms_log, github_pr, review_flow
 from app.services.agent_settings import resolve_settings
 from app.services.capabilities import build_readiness
 from app.services.google_docs_context import extract_document_id
@@ -272,6 +272,7 @@ async def register_repo(
         existing.jira_done_status = request.jira_done_status
         existing.close_issues_on_merge = 1 if request.close_issues_on_merge else 0
         existing.reviewers = stored_reviewers
+        existing.reviewer_contacts = request.reviewer_contacts
         existing.review_slack_channel = request.review_slack_channel
         existing.auto_merge_on_approval = 1 if request.auto_merge_on_approval else 0
         existing.merge_method = request.merge_method.value
@@ -288,6 +289,7 @@ async def register_repo(
             jira_done_status=request.jira_done_status,
             close_issues_on_merge=1 if request.close_issues_on_merge else 0,
             reviewers=stored_reviewers,
+            reviewer_contacts=request.reviewer_contacts,
             review_slack_channel=request.review_slack_channel,
             auto_merge_on_approval=1 if request.auto_merge_on_approval else 0,
             merge_method=request.merge_method.value,
@@ -309,6 +311,7 @@ async def register_repo(
         jira_done_status=registration.jira_done_status,
         close_issues_on_merge=bool(registration.close_issues_on_merge),
         reviewers=reviewers,
+        reviewer_contacts=registration.reviewer_contacts,
         review_slack_channel=registration.review_slack_channel,
         auto_merge_on_approval=bool(registration.auto_merge_on_approval),
         merge_method=registration.merge_method or "squash",
@@ -344,6 +347,7 @@ async def list_repos(
                 jira_done_status=r.jira_done_status or "Done",
                 close_issues_on_merge=bool(r.close_issues_on_merge),
                 reviewers=(r.reviewers or "").splitlines() if r.reviewers else [],
+                reviewer_contacts=r.reviewer_contacts,
                 review_slack_channel=r.review_slack_channel,
                 auto_merge_on_approval=bool(r.auto_merge_on_approval),
                 merge_method=r.merge_method or "squash",
@@ -410,6 +414,7 @@ async def get_defaults(
         jira_done_status=row.jira_done_status,
         close_issues_on_merge=bool(row.close_issues_on_merge),
         reviewers=[r for r in (row.reviewers or "").splitlines() if r.strip()],
+        reviewer_contacts=row.reviewer_contacts,
         review_slack_channel=row.review_slack_channel,
         auto_merge_on_approval=bool(row.auto_merge_on_approval),
         merge_method=row.merge_method or "squash",
@@ -446,6 +451,7 @@ async def save_defaults(
     row.jira_done_status = request.jira_done_status or "Done"
     row.close_issues_on_merge = 1 if request.close_issues_on_merge else 0
     row.reviewers = "\n".join(reviewers) if reviewers else None
+    row.reviewer_contacts = (request.reviewer_contacts or "").strip() or None
     row.review_slack_channel = (request.review_slack_channel or "").strip() or None
     row.auto_merge_on_approval = 1 if request.auto_merge_on_approval else 0
     row.merge_method = request.merge_method.value
@@ -460,6 +466,7 @@ async def save_defaults(
         jira_done_status=row.jira_done_status,
         close_issues_on_merge=bool(row.close_issues_on_merge),
         reviewers=reviewers,
+        reviewer_contacts=row.reviewer_contacts,
         review_slack_channel=row.review_slack_channel,
         auto_merge_on_approval=bool(row.auto_merge_on_approval),
         merge_method=row.merge_method or "squash",
@@ -658,6 +665,94 @@ async def get_review(
 
 
 @router.get(
+    "/activity/{owner}/{name}/{pr_number}",
+    response_model=schemas.PRActivity,
+    summary="Both loops for one PR, with every message searched, sent, and received",
+)
+async def get_pr_activity(
+    owner: str,
+    name: str,
+    pr_number: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> schemas.PRActivity:
+    """
+    The full story of one pull request: review loop, QA loop, and the actual
+    message traffic behind both.
+
+    Returned as one payload rather than three endpoints because the UI shows
+    them interleaved on a single timeline -- fetching separately would make
+    ordering a client-side concern and let the two halves disagree about what
+    happened when.
+
+    Returns 404 rather than 403 for another account's PR, like every other
+    per-resource endpoint here.
+    """
+    repo = f"{owner}/{name}"
+
+    review = db.query(models.PRReview).filter(
+        models.PRReview.repo == repo,
+        models.PRReview.pr_number == pr_number,
+        models.PRReview.owner_id == current_user.id,
+    ).first()
+
+    qa = db.query(models.QAThread).filter(
+        models.QAThread.repo == repo,
+        models.QAThread.pr_number == pr_number,
+        models.QAThread.owner_id == current_user.id,
+    ).order_by(models.QAThread.created_at.desc()).first()
+
+    events = comms_log.timeline(
+        db, owner_id=current_user.id, repo=repo, pr_number=pr_number
+    )
+
+    # A PR with no review, no QA thread, and no messages was never seen at
+    # all -- distinct from one that was processed and produced nothing.
+    if review is None and qa is None and not events:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No activity recorded for this pull request",
+        )
+
+    registration = db.query(models.RepoWebhook).filter(
+        models.RepoWebhook.repo == repo,
+        models.RepoWebhook.owner_id == current_user.id,
+    ).first()
+    settings = resolve_settings(db, current_user.id, registration)
+
+    # Every configured reviewer, plus anyone who actually reviewed. Someone
+    # who reviewed without being on the list is exactly who you want to see.
+    logins = list(settings.reviewers)
+    if review and review.last_reviewer and review.last_reviewer not in logins:
+        logins.append(review.last_reviewer)
+
+    contacts = [
+        schemas.ReviewerContact(
+            login=login,
+            slack=settings.reviewer_contacts.get(login, {}).get("slack"),
+            email=settings.reviewer_contacts.get(login, {}).get("email"),
+        )
+        for login in logins
+    ]
+
+    return schemas.PRActivity(
+        repo=repo,
+        pr_number=pr_number,
+        pr_url=(review.pr_url if review else None) or (qa.pr_url if qa else None),
+        pr_title=review.pr_title if review else None,
+        review=review_flow.to_detail(review) if review else None,
+        reviewer_contacts=contacts,
+        qa_notified=qa is not None,
+        qa_resolved=bool(qa.resolved) if qa else None,
+        qa_channel=qa.slack_channel if qa else settings.slack_channel,
+        qa_recipients=settings.qa_emails,
+        events=[
+            schemas.CommunicationEvent.model_validate(e) for e in events
+        ],
+    )
+
+
+@router.get(
     "/summary",
     response_model=schemas.PRAgentSummary,
     summary="PR agent dashboard summary",
@@ -774,6 +869,20 @@ async def _run_review_job(
             pr_title=payload.get("pr_title"),
             author=payload.get("author"),
         )
+        # The reviewer's own words, recorded before any verdict handling --
+        # a commented review is still something a human said about this PR,
+        # and the timeline is the only place it would otherwise be visible.
+        if payload.get("body") or payload.get("reviewer"):
+            comms_log.record(
+                db, owner_id=job.owner_id, repo=job.repo,
+                pr_number=job.pr_number,
+                loop="review", direction="received", channel="github",
+                participant=payload.get("reviewer"),
+                target=f"PR #{job.pr_number}",
+                body=payload.get("body"),
+                outcome=payload.get("review_state"),
+            )
+
         # A "commented" review records history but carries no verdict, so
         # there is nothing to announce.
         if review is None or review.state not in (
@@ -828,8 +937,17 @@ async def _run_review_job(
     if gate is not None:
         text += "\n" + review_flow.format_merge_gate(gate)
 
-    await review_flow.post_review_notification(
+    sent = await review_flow.post_review_notification(
         integration_configs["slack"], channel, text
+    )
+    comms_log.record(
+        db, owner_id=job.owner_id, repo=job.repo, pr_number=job.pr_number,
+        loop="review", direction="sent", channel="slack",
+        target=channel,
+        participant=", ".join(expected) if expected else None,
+        body=text,
+        outcome=outcome.value,
+        succeeded=sent,
     )
 
 
@@ -985,7 +1103,9 @@ async def run_pr_job(job_id: int) -> None:
                 head_sha=job.head_sha,
             )
 
+        comms: dict = {}
         result = await analyze_pull_request(
+            comms=comms,
             repo=job.repo,
             pr_number=job.pr_number,
             integration_configs=integration_configs,
@@ -997,6 +1117,15 @@ async def run_pr_job(job_id: int) -> None:
             context_doc_ids=settings.context_doc_ids,
         )
 
+        # What was searched for in Slack, and every message it returned.
+        if comms.get("slack_queries") or comms.get("slack_matches"):
+            comms_log.record_search_matches(
+                db, owner_id=job.owner_id, repo=job.repo,
+                pr_number=job.pr_number,
+                queries=comms.get("slack_queries") or [],
+                matches=comms.get("slack_matches") or [],
+            )
+
         if resubmitted is not None:
             result.stages.append(schemas.PipelineStage(
                 key="review_round", label="Open next review round", kind="write",
@@ -1005,16 +1134,25 @@ async def run_pr_job(job_id: int) -> None:
             ))
             channel = settings.review_slack_channel
             if channel and "slack" in integration_configs:
-                await review_flow.post_review_notification(
-                    integration_configs["slack"],
-                    channel,
-                    review_flow.format_review_notification(
-                        resubmitted,
-                        schemas.ReviewOutcome.resubmitted,
-                        resubmitted.last_reviewer,
-                        [],
-                        settings.reviewers,
-                    ),
+                resubmit_text = review_flow.format_review_notification(
+                    resubmitted,
+                    schemas.ReviewOutcome.resubmitted,
+                    resubmitted.last_reviewer,
+                    [],
+                    settings.reviewers,
+                )
+                sent = await review_flow.post_review_notification(
+                    integration_configs["slack"], channel, resubmit_text
+                )
+                comms_log.record(
+                    db, owner_id=job.owner_id, repo=job.repo,
+                    pr_number=job.pr_number,
+                    loop="review", direction="sent", channel="slack",
+                    target=channel,
+                    participant=", ".join(settings.reviewers) or None,
+                    body=resubmit_text,
+                    outcome="resubmitted",
+                    succeeded=sent,
                 )
 
         if is_merge:
@@ -1062,6 +1200,31 @@ async def run_pr_job(job_id: int) -> None:
                     else "no QA channel or recipients configured"
                 ),
             ))
+
+            # What the test team was actually told, in both channels.
+            merge_out = result.merge_actions
+            if merge_out.qa_slack_text:
+                comms_log.record(
+                    db, owner_id=job.owner_id, repo=job.repo,
+                    pr_number=job.pr_number,
+                    loop="qa", direction="sent", channel="slack",
+                    target=settings.slack_channel,
+                    body=merge_out.qa_slack_text,
+                    outcome="ready_to_test",
+                    succeeded=bool(merge_out.qa_thread_ts),
+                )
+            if merge_out.qa_email_body:
+                comms_log.record(
+                    db, owner_id=job.owner_id, repo=job.repo,
+                    pr_number=job.pr_number,
+                    loop="qa", direction="sent", channel="email",
+                    target=", ".join(merge_out.qa_email_to),
+                    participant=", ".join(merge_out.qa_email_to),
+                    subject=merge_out.qa_email_subject,
+                    body=merge_out.qa_email_body,
+                    outcome="ready_to_test",
+                    succeeded=merge_out.qa_notified,
+                )
 
             # Record the thread so a tester's reply can be traced back to the
             # work items it should reopen -- a Slack reply carries none of that.

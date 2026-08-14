@@ -235,6 +235,26 @@ async def draft_qa_brief(result: PRAnalysisResult) -> str:
     )
 
 
+def _qa_email_text(result: PRAnalysisResult, brief: str) -> str:
+    """
+    The QA email body.
+
+    Built here rather than inline at the send so the copy recorded in the
+    timeline is the same string that was sent, not a reconstruction that can
+    drift from it.
+    """
+    ctx = result.context
+    return (
+        f"{ctx.title}\n"
+        f"{ctx.url}\n\n"
+        f"Merged by {ctx.author} · +{ctx.additions}/-{ctx.deletions} "
+        f"across {ctx.files_changed} files\n\n"
+        f"What to test\n------------\n{brief}\n\n"
+        f"Reply to this email if something does not work — Locus will reopen "
+        f"the ticket.\n"
+    )
+
+
 async def email_test_team(
     gmail_config: dict,
     recipients: list[str],
@@ -273,15 +293,7 @@ async def email_test_team(
     message["Message-ID"] = message_id
     message["To"] = ", ".join(recipients)
     message["Subject"] = f"[Ready to test] {ctx.repo}#{ctx.pr_number} — {ctx.title}"
-    message.set_content(
-        f"{ctx.title}\n"
-        f"{ctx.url}\n\n"
-        f"Merged by {ctx.author} · +{ctx.additions}/-{ctx.deletions} "
-        f"across {ctx.files_changed} files\n\n"
-        f"What to test\n------------\n{brief}\n\n"
-        f"Reply to this email if something does not work — Locus will reopen "
-        f"the ticket.\n"
-    )
+    message.set_content(_qa_email_text(result, brief))
 
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
 
@@ -305,9 +317,9 @@ async def post_qa_thread(
     channel: str,
     result: PRAnalysisResult,
     brief: str,
-) -> tuple[str | None, str | None]:
+) -> tuple[str | None, str | None, str]:
     """
-    Post the QA notification to Slack and return (thread_ts, channel_id).
+    Post the QA notification to Slack and return (thread_ts, channel_id, text).
 
     The timestamp is what later ties a tester's reply back to this PR -- a
     reply carries only a channel and thread_ts, nothing about the work items.
@@ -318,13 +330,10 @@ async def post_qa_thread(
     reply ever matches.
 
     Returns:
-        (ts, channel_id), or (None, None) if posting failed.
+        (ts, channel_id, text). The text is returned so the caller can record
+        exactly what was posted -- reconstructing it later would drift from
+        what the channel actually saw.
     """
-    credentials = slack_config.get("credentials", {}) or {}
-    bot_token = credentials.get("bot_token") or slack_config.get("api_key", "")
-    if not bot_token:
-        return None, None
-
     ctx = result.context
     text = (
         f":test_tube: *Ready to test* - <{ctx.url}|{ctx.repo}#{ctx.pr_number}>\n"
@@ -332,6 +341,11 @@ async def post_qa_thread(
         f"*What to test*\n{brief}\n\n"
         "_Reply in this thread if something does not work._"
     )
+
+    credentials = slack_config.get("credentials", {}) or {}
+    bot_token = credentials.get("bot_token") or slack_config.get("api_key", "")
+    if not bot_token:
+        return None, None, text
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
@@ -343,9 +357,9 @@ async def post_qa_thread(
 
     if not payload.get("ok"):
         logger.warning("QA thread post rejected: %s", payload.get("error"))
-        return None, None
+        return None, None, text
 
-    return payload.get("ts"), payload.get("channel")
+    return payload.get("ts"), payload.get("channel"), text
 
 
 async def run_merge_actions(
@@ -397,7 +411,11 @@ async def run_merge_actions(
         try:
             brief = outcome.qa_brief or await draft_qa_brief(result)
             outcome.qa_brief = brief
-            outcome.qa_thread_ts, outcome.qa_channel_id = await post_qa_thread(
+            (
+                outcome.qa_thread_ts,
+                outcome.qa_channel_id,
+                outcome.qa_slack_text,
+            ) = await post_qa_thread(
                 integration_configs["slack"], qa_slack_channel, result, brief
             )
             if outcome.qa_thread_ts:
@@ -416,6 +434,15 @@ async def run_merge_actions(
                 ok, detail, message_id = await email_test_team(
                     gmail_config, qa_recipients, result, brief
                 )
+                # Recorded whether or not the send succeeded: a QA email that
+                # failed to go out is more important to surface than one that
+                # went out fine.
+                outcome.qa_email_to = list(qa_recipients)
+                outcome.qa_email_subject = (
+                    f"[Ready to test] {result.context.repo}"
+                    f"#{result.context.pr_number} — {result.context.title}"
+                )
+                outcome.qa_email_body = _qa_email_text(result, brief)
                 if ok:
                     outcome.qa_notified = True
                     outcome.qa_brief = brief

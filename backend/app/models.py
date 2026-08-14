@@ -255,6 +255,68 @@ class PRReviewRound(Base):
         return f"<PRReviewRound(review_id={self.review_id}, round={self.round_number}, outcome={self.outcome})>"
 
 
+class CommunicationEvent(Base):
+    """
+    Every message Locus searched, sent, or received about one pull request.
+
+    The dashboard could already say *that* Slack was searched and *that* the
+    test team was emailed. It could not say what was searched for, what came
+    back, or what was actually sent -- which is the first thing anyone asks
+    when a run produces a surprising result, and the thing that decides
+    whether the agent is trusted.
+
+    One table rather than one per channel: the review loop and the QA loop
+    both want a single time-ordered story, and joining three tables to build
+    it would guarantee they drift.
+
+    Bodies are stored verbatim, including inbound text written by anyone who
+    can post in a channel or review a PR. Nothing here is fed back to a model
+    with tools bound -- it is a record, and the UI renders it as plain text.
+    """
+
+    __tablename__ = "communication_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    repo = Column(String(255), nullable=False, index=True)
+    pr_number = Column(Integer, nullable=False, index=True)
+
+    # review | qa | context -- which loop this belongs to. "context" is the
+    # pre-review gathering pass, which searches but never sends.
+    loop = Column(String(16), nullable=False, index=True)
+    # searched | sent | received
+    direction = Column(String(16), nullable=False)
+    # slack | email | github
+    channel = Column(String(16), nullable=False)
+
+    # Who, in that channel's own terms: a Slack display name, an email
+    # address, a GitHub login. Nullable because a search match may have none.
+    participant = Column(String(255), nullable=True)
+    # Where it went or came from: "#code-review", "qa@acme.com", "PR #42".
+    target = Column(String(255), nullable=True)
+    subject = Column(String(512), nullable=True)
+    # The message itself. The point of the table.
+    body = Column(Text, nullable=True)
+    # What was searched for, when direction is "searched". Kept because a
+    # search that returns nothing is only diagnosable if the query is visible.
+    query = Column(String(512), nullable=True)
+    permalink = Column(String(1024), nullable=True)
+    # Free-form label the UI shows as a chip: a QA verdict, a review state.
+    outcome = Column(String(32), nullable=True)
+    # False when a send was attempted and rejected. A message that failed to
+    # send is more important to show than one that succeeded.
+    succeeded = Column(Integer, nullable=False, default=1)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+
+    def __repr__(self) -> str:
+        return (
+            f"<CommunicationEvent({self.repo}#{self.pr_number} "
+            f"{self.direction} {self.channel})>"
+        )
+
+
 class Deadline(Base):
     """
     A due date the scheduler must protect.
@@ -340,6 +402,11 @@ class RepoWebhook(Base):
     # Used to address review notifications; reviews from anyone else are still
     # recorded, since GitHub does not restrict who may review.
     reviewers = Column(Text, nullable=True)
+    # Where each reviewer is actually reachable, one per line:
+    #   github-login, @slack-handle, email@company.com
+    # A GitHub login is not a Slack handle and not an address; without this
+    # the UI can only say "a review was requested" and not who was reached.
+    reviewer_contacts = Column(Text, nullable=True)
     # Channel for review-loop notifications. Separate from slack_channel: PR
     # summaries are for the team, a review request is for one person, and
     # collapsing them buries the request in the feed.
@@ -382,6 +449,7 @@ class PRAgentDefaults(Base):
     jira_done_status = Column(String(64), nullable=False, default="Done")
     close_issues_on_merge = Column(Integer, nullable=False, default=1)
     reviewers = Column(Text, nullable=True)  # newline-separated GitHub logins
+    reviewer_contacts = Column(Text, nullable=True)
     review_slack_channel = Column(String(255), nullable=True)
     auto_merge_on_approval = Column(Integer, nullable=False, default=0)
     merge_method = Column(String(16), nullable=False, default="squash")

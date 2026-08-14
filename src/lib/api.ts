@@ -556,6 +556,8 @@ export interface RepoRegistration {
   close_issues_on_merge?: boolean;
   /** GitHub logins expected to review this repo. */
   reviewers?: string[];
+  /** "login, @slack, email" per line. */
+  reviewer_contacts?: string | null;
   /** Review pings go here; falls back to slack_channel when unset. */
   review_slack_channel?: string | null;
   /** Merge automatically once approved and the gate passes. Off by default. */
@@ -708,6 +710,57 @@ export async function listReviews(includeMerged = false): Promise<PRReviewList> 
   );
 }
 
+/** Which loop a message belongs to. "context" is the pre-review gathering pass. */
+export type CommLoop = "review" | "qa" | "context";
+export type CommDirection = "searched" | "sent" | "received";
+export type CommChannel = "slack" | "email" | "github";
+
+export interface CommunicationEvent {
+  id: number;
+  loop: CommLoop;
+  direction: CommDirection;
+  channel: CommChannel;
+  participant?: string | null;
+  target?: string | null;
+  subject?: string | null;
+  /** The message itself, verbatim. */
+  body?: string | null;
+  /** What was searched for. Present when direction is "searched". */
+  query?: string | null;
+  permalink?: string | null;
+  outcome?: string | null;
+  succeeded: boolean;
+  created_at?: string | null;
+}
+
+export interface ReviewerContact {
+  login: string;
+  slack?: string | null;
+  email?: string | null;
+}
+
+export interface PRActivity {
+  repo: string;
+  pr_number: number;
+  pr_url?: string | null;
+  pr_title?: string | null;
+  review?: PRReviewDetail | null;
+  reviewer_contacts: ReviewerContact[];
+  qa_notified: boolean;
+  qa_resolved?: boolean | null;
+  qa_channel?: string | null;
+  qa_recipients: string[];
+  events: CommunicationEvent[];
+}
+
+/** Both loops and the full message traffic for one PR, in one request. */
+export async function getPRActivity(
+  repo: string,
+  prNumber: number
+): Promise<PRActivity> {
+  return apiRequest<PRActivity>(`/webhooks/activity/${repo}/${prNumber}`);
+}
+
 export async function getReview(
   repo: string,
   prNumber: number
@@ -740,6 +793,7 @@ export async function registerRepo(
   closeIssuesOnMerge = true,
   reviewers: string[] = [],
   reviewSlackChannel?: string,
+  reviewerContacts?: string,
   autoMergeOnApproval = false,
   mergeMethod: MergeMethod = "squash"
 ): Promise<RepoRegistration> {
@@ -754,6 +808,7 @@ export async function registerRepo(
       jira_done_status: jiraDoneStatus,
       close_issues_on_merge: closeIssuesOnMerge,
       reviewers,
+      reviewer_contacts: reviewerContacts || null,
       review_slack_channel: reviewSlackChannel || null,
       auto_merge_on_approval: autoMergeOnApproval,
       merge_method: mergeMethod,
@@ -770,6 +825,7 @@ export interface PRAgentDefaults {
   jira_done_status: string;
   close_issues_on_merge: boolean;
   reviewers: string[];
+  reviewer_contacts?: string | null;
   review_slack_channel?: string | null;
   auto_merge_on_approval: boolean;
   merge_method: MergeMethod;
