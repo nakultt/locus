@@ -501,6 +501,26 @@ class PRReviewList(BaseModel):
     approved: int = 0
 
 
+class MergeMethod(str, Enum):
+    """How an auto-merge lands the branch. Mirrors GitHub's own options."""
+    squash = "squash"
+    merge = "merge"
+    rebase = "rebase"
+
+
+class MergeGateResult(BaseModel):
+    """
+    Why an approved PR was or was not merged automatically.
+
+    Blockers are surfaced rather than swallowed: a PR that stays open after an
+    approval, with no explanation, reads as the feature being broken.
+    """
+    attempted: bool = False
+    merged: bool = False
+    blockers: list[str] = []
+    detail: str | None = None
+
+
 class RepoRegister(BaseModel):
     """Register a repository for PR analysis."""
     repo: str = Field(..., description='Repository as "owner/name"', pattern=r"^[\w.-]+/[\w.-]+$")
@@ -535,6 +555,16 @@ class RepoRegister(BaseModel):
             "Falls back to slack_channel when unset."
         ),
     )
+    auto_merge_on_approval: bool = Field(
+        False,
+        description=(
+            "Merge automatically once approved and the merge gate passes. "
+            "Off unless turned on deliberately."
+        ),
+    )
+    merge_method: MergeMethod = Field(
+        MergeMethod.squash, description="How an auto-merge lands the commits"
+    )
 
 
 class PRAgentDefaultsUpdate(BaseModel):
@@ -567,6 +597,12 @@ class PRAgentDefaultsUpdate(BaseModel):
     review_slack_channel: str | None = Field(
         None, description="Default channel for review-loop notifications"
     )
+    auto_merge_on_approval: bool = Field(
+        False, description="Auto-merge approved PRs by default"
+    )
+    merge_method: MergeMethod = Field(
+        MergeMethod.squash, description="Default auto-merge method"
+    )
 
 
 class PRAgentDefaults(PRAgentDefaultsUpdate):
@@ -594,6 +630,8 @@ class RepoRegistration(BaseModel):
     close_issues_on_merge: bool = True
     reviewers: list[str] = []
     review_slack_channel: str | None = None
+    auto_merge_on_approval: bool = False
+    merge_method: MergeMethod = MergeMethod.squash
     enabled: bool = True
     webhook_url: str | None = Field(
         None, description="Payload URL to paste into GitHub"

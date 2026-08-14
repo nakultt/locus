@@ -297,6 +297,31 @@ alongside and are canonical. The summarizer has no tools bound and returns nothi
 model is unavailable — an empty checklist reads as "see the review", where an invented one
 would not.
 
+#### Auto-merge on approval
+
+Optional, **off by default**. When enabled, an approving review merges the PR — and because
+Locus merges through GitHub's API, GitHub fires the same `closed`+`merged` webhook a human
+merge would, so the post-merge actions (Jira, issues, QA email) run through the ordinary path
+with nothing special-cased.
+
+An approval alone is not enough. This is the only thing that writes to your default branch
+with no human in the loop, so the gate is checked independently of the review:
+
+| Gate | Why |
+|---|---|
+| CI green | A reviewer can approve before the checks finish. Merging on pending makes approval race CI |
+| No merge conflict | GitHub returning `null` mergeability means *unknown*, which holds rather than assumes |
+| No confirmed security finding | Deterministic rule matches, not opinions — merging over one contradicts the confirmed/unverified split |
+| No P1 review finding | P1 means "do not merge this" by definition |
+
+Unverified findings and P2/P3 do **not** block. They are advisory, and blocking on a model's
+opinion would make the feature unusable — and would hand an unverified finding authority the
+confirmed/unverified split exists to deny it.
+
+Anything held is reported to Slack with every reason at once, so a fixed CI failure does not
+lead to a fresh surprise on the next round. An approved PR that quietly stays open reads as a
+broken feature, so the loop always says why.
+
 **Jira is not moved backwards when changes are requested.** That is a real backward step, but
 transitions are forward-only so a misconfigured status cannot drag a team's board into an
 earlier stage. The review loop notifies and records; the board follows the merge.

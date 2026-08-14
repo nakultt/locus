@@ -133,6 +133,21 @@ deliberate:
 - **A review request never un-approves.** Asking for a second opinion is normal, and silently
   dropping the approval would make a merge-ready PR look blocked.
 
+**Auto-merge is off by default and gated on more than the approval.** It is the only path
+that writes to a repo's default branch with no human in the loop. An approval means "the
+change is right" — not that CI passed, which the reviewer may not have checked and which may
+not have finished when they clicked. `review_flow.evaluate_merge_gate` independently requires
+green CI, no merge conflict, no confirmed security finding, and no `p1` review finding.
+Unverified findings and `p2`/`p3` deliberately do not block: blocking on a model's opinion
+would both make the feature unusable and hand an unverified finding the authority the
+confirmed/unverified split exists to deny it. Every refusal is reported to Slack with the
+reason — an approved PR that silently stays open reads as a broken feature.
+
+**Auto-merge does not special-case the post-merge path.** Locus merges through GitHub's API,
+GitHub fires `closed` + `merged=true` exactly as it does for a human merge, and the ordinary
+merge job runs. Do not add a direct call to `run_merge_actions` from the review path; it would
+double-fire against the webhook.
+
 **The review loop does not move Jira backwards.** A changes-requested review is a genuine
 backward step, but `merge_actions.is_forward_transition` refuses backward transitions so a
 misconfigured status cannot drag a team's board into an earlier stage. Rather than carve an

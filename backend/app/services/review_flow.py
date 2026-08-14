@@ -378,6 +378,85 @@ def format_review_notification(
     return f"Update on {link}{title}"
 
 
+def evaluate_merge_gate(
+    review: models.PRReview,
+    analysis: schemas.PRAnalysisResult | None,
+    ci_state: str,
+    failing_checks: list[str],
+    mergeable: bool | None,
+) -> tuple[bool, list[str]]:
+    """
+    Decide whether an approved PR may be merged automatically.
+
+    Approval is necessary but not sufficient. A human clicking approve is
+    saying "the change is right", not "every check passed" -- they may not
+    have looked, and on a fast-moving PR the checks may not have finished when
+    they clicked. Auto-merge is the one place Locus writes to a repo's default
+    branch without a human in the loop, so each of these is checked
+    independently of the approval.
+
+    Returns:
+        (allowed, blockers). `blockers` is empty when allowed, and is written
+        to be read by a human in Slack -- these get reported, never swallowed.
+    """
+    blockers: list[str] = []
+
+    if review.state != schemas.ReviewState.approved.value:
+        blockers.append(f"not approved (state is {review.state})")
+
+    if ci_state == "failure":
+        blockers.append(f"CI failing: {', '.join(failing_checks)}")
+    elif ci_state == "pending":
+        blockers.append("CI has not finished")
+
+    # GitHub reports None while it recomputes mergeability, which is a
+    # genuinely unknown answer -- treated as "not now" rather than assumed
+    # either way. The next event re-evaluates.
+    if mergeable is False:
+        blockers.append("merge conflict with the base branch")
+    elif mergeable is None:
+        blockers.append("GitHub has not computed mergeability yet")
+
+    if analysis is not None:
+        # Confirmed findings are deterministic rule matches, not model
+        # opinions. Auto-merging over one would contradict the reason the
+        # confirmed/unverified split exists at all.
+        if analysis.confirmed_findings:
+            blockers.append(
+                f"{len(analysis.confirmed_findings)} confirmed security "
+                f"finding(s)"
+            )
+
+        # p1 means "do not merge this" by definition. Unverified findings and
+        # p2/p3 do not block: they are advisory, and blocking on a model's
+        # opinion would make auto-merge unusable.
+        p1s = [
+            f for f in analysis.review_findings
+            if f.priority == schemas.ReviewPriority.p1
+        ]
+        if p1s:
+            blockers.append(f"{len(p1s)} P1 review finding(s)")
+
+    return (not blockers), blockers
+
+
+def format_merge_gate(gate: schemas.MergeGateResult) -> str:
+    """
+    One line saying what auto-merge did, or why it held.
+
+    Always says something. An approved PR that quietly stays open reads as the
+    feature being broken, which costs more trust than a noisy channel.
+    """
+    if gate.merged:
+        return ":rocket: Auto-merged. Post-merge actions are running."
+
+    if gate.attempted:
+        return f":warning: Auto-merge failed — {gate.detail}"
+
+    reasons = "; ".join(gate.blockers) or "gate not satisfied"
+    return f":hourglass: Not auto-merged — {reasons}"
+
+
 async def post_review_notification(
     slack_config: dict,
     channel: str,

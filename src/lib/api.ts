@@ -558,6 +558,9 @@ export interface RepoRegistration {
   reviewers?: string[];
   /** Review pings go here; falls back to slack_channel when unset. */
   review_slack_channel?: string | null;
+  /** Merge automatically once approved and the gate passes. Off by default. */
+  auto_merge_on_approval?: boolean;
+  merge_method?: MergeMethod;
   enabled: boolean;
   /** Returned only when registering. */
   webhook_url?: string;
@@ -736,7 +739,9 @@ export async function registerRepo(
   jiraDoneStatus = "Done",
   closeIssuesOnMerge = true,
   reviewers: string[] = [],
-  reviewSlackChannel?: string
+  reviewSlackChannel?: string,
+  autoMergeOnApproval = false,
+  mergeMethod: MergeMethod = "squash"
 ): Promise<RepoRegistration> {
   return apiRequest<RepoRegistration>("/webhooks/repos", {
     method: "POST",
@@ -750,9 +755,13 @@ export async function registerRepo(
       close_issues_on_merge: closeIssuesOnMerge,
       reviewers,
       review_slack_channel: reviewSlackChannel || null,
+      auto_merge_on_approval: autoMergeOnApproval,
+      merge_method: mergeMethod,
     }),
   });
 }
+
+export type MergeMethod = "squash" | "merge" | "rebase";
 
 export interface PRAgentDefaults {
   slack_channel?: string | null;
@@ -762,6 +771,8 @@ export interface PRAgentDefaults {
   close_issues_on_merge: boolean;
   reviewers: string[];
   review_slack_channel?: string | null;
+  auto_merge_on_approval: boolean;
+  merge_method: MergeMethod;
 }
 
 /** Account-wide fallbacks used by any repo that does not set its own. */

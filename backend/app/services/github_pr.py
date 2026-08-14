@@ -51,6 +51,110 @@ async def get_pull_request(token: str, repo: str, pr_number: int) -> dict:
         return response.json()
 
 
+async def get_combined_ci_state(token: str, repo: str, head_sha: str) -> tuple[str, list[str]]:
+    """
+    Whether CI is green on a commit, across both systems GitHub offers.
+
+    GitHub reports CI two ways and a repo can use either or both: the older
+    commit *statuses* API, and the newer *check runs*. A repo whose CI posts
+    check runs reports "pending" with zero statuses on the statuses endpoint
+    forever, so reading only that would either block every merge or, if
+    treated as success, wave through a red build.
+
+    Returns:
+        (state, failing) where state is "success", "failure", or "pending".
+        A commit with no CI configured at all is "success" -- absent CI is not
+        failing CI, and refusing to merge would make the feature unusable on
+        repos that have none.
+    """
+    failing: list[str] = []
+    saw_any = False
+    pending = False
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        statuses = await client.get(
+            f"{GITHUB_API_BASE}/repos/{repo}/commits/{head_sha}/status",
+            headers=_headers(token),
+        )
+        if statuses.status_code == 200:
+            body = statuses.json()
+            # total_count of 0 means "no statuses posted", which arrives as
+            # state "pending" -- not a real pending build.
+            if body.get("total_count", 0) > 0:
+                saw_any = True
+                for status in body.get("statuses") or []:
+                    state = status.get("state")
+                    if state == "failure" or state == "error":
+                        failing.append(status.get("context") or "status")
+                    elif state == "pending":
+                        pending = True
+
+        checks = await client.get(
+            f"{GITHUB_API_BASE}/repos/{repo}/commits/{head_sha}/check-runs",
+            headers=_headers(token),
+        )
+        if checks.status_code == 200:
+            runs = checks.json().get("check_runs") or []
+            if runs:
+                saw_any = True
+            for run in runs:
+                if run.get("status") != "completed":
+                    pending = True
+                    continue
+                conclusion = run.get("conclusion")
+                # "neutral", "skipped", and "success" all pass. "cancelled"
+                # is not a failure of the code, but it is not a pass either,
+                # so it holds rather than merges.
+                if conclusion in ("failure", "timed_out", "action_required"):
+                    failing.append(run.get("name") or "check")
+                elif conclusion == "cancelled":
+                    pending = True
+
+    if failing:
+        return "failure", failing
+    if pending:
+        return "pending", []
+    return "success", [] if saw_any else []
+
+
+async def merge_pull_request(
+    token: str,
+    repo: str,
+    pr_number: int,
+    merge_method: str = "squash",
+    commit_title: str | None = None,
+) -> tuple[bool, str]:
+    """
+    Merge a pull request.
+
+    Returns:
+        (merged, detail). A 405 means GitHub itself refused -- branch
+        protection unsatisfied, or the PR is not mergeable -- and a 409 means
+        the head moved since we checked. Both are reported rather than
+        retried: something changed, and re-deciding is the caller's job.
+    """
+    payload: dict = {"merge_method": merge_method}
+    if commit_title:
+        payload["commit_title"] = commit_title
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.put(
+            f"{GITHUB_API_BASE}/repos/{repo}/pulls/{pr_number}/merge",
+            headers=_headers(token),
+            json=payload,
+        )
+
+    if response.status_code == 200:
+        return True, response.json().get("message", "Merged")
+
+    try:
+        detail = response.json().get("message", response.text)
+    except Exception:
+        detail = response.text
+
+    return False, f"GitHub refused the merge ({response.status_code}): {detail}"
+
+
 async def get_pr_diff(token: str, repo: str, pr_number: int) -> str:
     """
     Fetch the unified diff for a pull request.

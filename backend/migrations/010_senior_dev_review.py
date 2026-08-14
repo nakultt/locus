@@ -40,6 +40,16 @@ COLUMNS = [
     ("pr_jobs", "payload_json", "TEXT"),
 ]
 
+# Columns that need a value on existing rows. Auto-merge defaults to off, so
+# enabling it stays a deliberate act rather than something a migration turns
+# on for every repo already registered.
+COLUMNS_WITH_DEFAULT = [
+    ("repo_webhooks", "auto_merge_on_approval", "INTEGER", "0"),
+    ("repo_webhooks", "merge_method", "VARCHAR(16)", "'squash'"),
+    ("pr_agent_defaults", "auto_merge_on_approval", "INTEGER", "0"),
+    ("pr_agent_defaults", "merge_method", "VARCHAR(16)", "'squash'"),
+]
+
 
 def main() -> None:
     before = set(inspect(engine).get_table_names())
@@ -65,6 +75,23 @@ def main() -> None:
         with engine.begin() as conn:
             conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))
         print(f"+ {table}.{column}")
+
+    for table, column, ddl_type, default in COLUMNS_WITH_DEFAULT:
+        if table not in existing_tables:
+            print(f"= {table}.{column} (table newly created)")
+            continue
+
+        columns = {c["name"] for c in inspector.get_columns(table)}
+        if column in columns:
+            print(f"= {table}.{column} already present")
+            continue
+
+        with engine.begin() as conn:
+            conn.execute(text(
+                f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type} "
+                f"NOT NULL DEFAULT {default}"
+            ))
+        print(f"+ {table}.{column} (default {default})")
 
     print("\nMigration complete.")
 

@@ -46,6 +46,7 @@ import {
   type ReviewFinding,
   type ReviewPriority,
   type ReviewState,
+  type MergeMethod,
   type SecurityFinding,
   type ToolInvocation,
   type ServiceStatus,
@@ -831,6 +832,36 @@ const GlobalDefaults = ({ docsConnected }: { docsConnected: boolean }) => {
           />
           Close linked GitHub issues on merge
         </label>
+        <label className="flex items-center gap-2 text-xs text-foreground">
+          <input
+            type="checkbox"
+            checked={values.auto_merge_on_approval}
+            onChange={(e) =>
+              setValues({ ...values, auto_merge_on_approval: e.target.checked })
+            }
+            className="rounded border-border"
+          />
+          Merge automatically when a review approves
+          <select
+            value={values.merge_method}
+            onChange={(e) =>
+              setValues({
+                ...values,
+                merge_method: e.target.value as PRAgentDefaults["merge_method"],
+              })
+            }
+            disabled={!values.auto_merge_on_approval}
+            className="rounded border border-border bg-background px-1.5 py-0.5 text-xs disabled:opacity-50"
+          >
+            <option value="squash">squash</option>
+            <option value="merge">merge</option>
+            <option value="rebase">rebase</option>
+          </select>
+        </label>
+        <p className="text-xs text-muted-foreground">
+          Still gated on green CI, no conflict, no confirmed security finding, and no
+          P1 review finding. Held merges are reported in Slack with the reason.
+        </p>
       </div>
 
       {error && <p className="mt-2 text-xs text-red-500">{error}</p>}
@@ -1097,6 +1128,8 @@ export default function PRAgentDashboard() {
   const [closeIssues, setCloseIssues] = useState(true);
   const [reviewersInput, setReviewersInput] = useState("");
   const [reviewChannelInput, setReviewChannelInput] = useState("");
+  const [autoMerge, setAutoMerge] = useState(false);
+  const [mergeMethod, setMergeMethod] = useState<MergeMethod>("squash");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [justRegistered, setJustRegistered] = useState<RepoRegistration | null>(null);
@@ -1137,6 +1170,8 @@ export default function PRAgentDashboard() {
     setCloseIssues(reg.close_issues_on_merge ?? true);
     setReviewersInput((reg.reviewers ?? []).join(", "));
     setReviewChannelInput(reg.review_slack_channel ?? "");
+    setAutoMerge(reg.auto_merge_on_approval ?? false);
+    setMergeMethod(reg.merge_method ?? "squash");
   }, []);
 
   const refresh = useCallback(async () => {
@@ -1205,7 +1240,9 @@ export default function PRAgentDashboard() {
         jiraDoneStatus.trim() || "Done",
         closeIssues,
         reviewers,
-        reviewChannelInput.trim() || undefined
+        reviewChannelInput.trim() || undefined,
+        autoMerge,
+        mergeMethod
       );
       setJustRegistered(reg);
       setRepoInput("");
@@ -1396,6 +1433,33 @@ export default function PRAgentDashboard() {
               GitHub does not restrict that, and a review from anyone else is still
               recorded. Falls back to the summary channel when no review channel is
               set.
+            </p>
+
+            <label className="mt-2 flex items-center gap-2 text-xs text-foreground">
+              <input
+                type="checkbox"
+                checked={autoMerge}
+                onChange={(e) => setAutoMerge(e.target.checked)}
+                className="rounded border-border"
+              />
+              Merge automatically when approved
+              <select
+                value={mergeMethod}
+                onChange={(e) => setMergeMethod(e.target.value as MergeMethod)}
+                disabled={!autoMerge}
+                className="rounded border border-border bg-background px-1.5 py-0.5 text-xs disabled:opacity-50"
+              >
+                <option value="squash">squash</option>
+                <option value="merge">merge</option>
+                <option value="rebase">rebase</option>
+              </select>
+            </label>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Off unless you turn it on — this is the only thing that writes to your
+              default branch with no human in the loop. An approval alone is not
+              enough: the merge also needs green CI, no merge conflict, no confirmed
+              security finding, and no P1 review finding. Anything held is reported in
+              Slack with the reason.
             </p>
           </div>
 

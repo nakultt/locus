@@ -33,6 +33,8 @@ class EffectiveSettings:
     # Where review-loop notifications go. Falls back to slack_channel only if
     # explicitly unset, so a team can keep review pings out of the summary feed.
     review_slack_channel: str | None = None
+    auto_merge_on_approval: bool = False
+    merge_method: str = "squash"
 
     # Per key: "repo", "defaults", or "unset". The dashboard shows this so a
     # skipped stage can be traced to the setting responsible.
@@ -136,6 +138,26 @@ def resolve_settings(
         (registration.review_slack_channel or "").strip() if registration else "",
         (defaults.review_slack_channel or "").strip() if defaults else "",
         resolved.slack_channel,
+    )
+
+    # Same shape as close_issues_on_merge: a boolean whose False is a real
+    # choice, so the repo row wins whenever it exists rather than when truthy.
+    # The final fallback is off -- an unconfigured repo must never auto-merge.
+    if registration is not None:
+        resolved.auto_merge_on_approval = bool(registration.auto_merge_on_approval)
+        resolved.sources["auto_merge_on_approval"] = "repo"
+    elif defaults is not None:
+        resolved.auto_merge_on_approval = bool(defaults.auto_merge_on_approval)
+        resolved.sources["auto_merge_on_approval"] = "defaults"
+    else:
+        resolved.auto_merge_on_approval = False
+        resolved.sources["auto_merge_on_approval"] = "unset"
+
+    resolved.merge_method = pick(
+        "merge_method",
+        (registration.merge_method or "") if registration else "",
+        (defaults.merge_method or "") if defaults else "",
+        "squash",
     )
 
     return resolved

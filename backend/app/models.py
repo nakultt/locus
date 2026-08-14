@@ -344,6 +344,11 @@ class RepoWebhook(Base):
     # summaries are for the team, a review request is for one person, and
     # collapsing them buries the request in the feed.
     review_slack_channel = Column(String(255), nullable=True)
+    # Merge automatically once a review approves and the gate passes. Off by
+    # default: this is the only path that writes to a default branch with no
+    # human in the loop, and it must be turned on deliberately.
+    auto_merge_on_approval = Column(Integer, nullable=False, default=0)
+    merge_method = Column(String(16), nullable=False, default="squash")
     enabled = Column(Integer, nullable=False, default=1)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -378,6 +383,8 @@ class PRAgentDefaults(Base):
     close_issues_on_merge = Column(Integer, nullable=False, default=1)
     reviewers = Column(Text, nullable=True)  # newline-separated GitHub logins
     review_slack_channel = Column(String(255), nullable=True)
+    auto_merge_on_approval = Column(Integer, nullable=False, default=0)
+    merge_method = Column(String(16), nullable=False, default="squash")
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
