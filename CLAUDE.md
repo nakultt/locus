@@ -343,6 +343,20 @@ is verified over the raw body before parsing either way.
 refused, so a misconfigured status cannot drag a team's board backwards. Unrecognized statuses
 pass through, since custom workflows are common.
 
+**Timestamps are stored as UTC instants and displayed in IST.** The two halves are
+separate and both matter. Postgres sessions are pinned to UTC in `app/database.py` rather
+than inheriting the server's zone — a session that inherits it serialized the same row as
+`+05:30` on a developer's machine and `+00:00` in production, both naming the same instant,
+with the difference invisible until something compared or cached them. Display is applied
+once, in `src/lib/datetime.ts`, which passes an explicit `timeZone` so every viewer reads the
+same wall clock regardless of where their browser thinks it is. `toLocaleString(undefined, …)`
+is what that replaced: these are shared events people discuss with each other, and "the build
+broke at 3" has to mean one moment. `parseInstant` reads a timestamp with no offset as UTC,
+because SQLite stores UTC without labelling it and resolving against the browser's zone would
+reintroduce exactly the drift being removed. Anything the backend formats into text for a
+human names its zone — `google_meet` used to stamp "UTC" onto server-local times, which is
+the same class of bug `datetimes.py` was written to fix.
+
 **Scheduling goes through a real timezone library, never integer offsets.** The default zone
 is `Asia/Kolkata` (UTC+05:30) and the half-hour offset breaks naive hour arithmetic. Times are
 sent to Google with the zone attached rather than converted to UTC, which keeps recurring
