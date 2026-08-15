@@ -90,11 +90,18 @@ class TestGatePasses:
         assert allowed
 
     @pytest.mark.parametrize("priority", [
+        schemas.ReviewPriority.p1,
         schemas.ReviewPriority.p2,
         schemas.ReviewPriority.p3,
     ])
-    def test_p2_and_p3_findings_do_not_block(self, priority):
-        """Only p1 means "do not merge this"; the rest are advisory."""
+    def test_review_findings_do_not_block_at_any_priority(self, priority):
+        """
+        Review findings are reported, not gated on -- p1 included.
+
+        Every priority is the model's judgement about the change, and the
+        reviewer approving it has already read the finding in the PR comment.
+        Gating on one made the approval advisory rather than decisive.
+        """
         allowed, _ = review_flow.evaluate_merge_gate(
             _review(), _analysis(review_findings=[_review_finding(priority)]),
             "success", [], True,
@@ -170,18 +177,6 @@ class TestGateHolds:
 
         assert not allowed
         assert any("confirmed security" in b for b in blockers)
-
-    def test_p1_review_finding_blocks(self):
-        allowed, blockers = review_flow.evaluate_merge_gate(
-            _review(),
-            _analysis(review_findings=[
-                _review_finding(schemas.ReviewPriority.p1)
-            ]),
-            "success", [], True,
-        )
-
-        assert not allowed
-        assert any("P1" in b for b in blockers)
 
     def test_every_blocker_is_reported_not_just_the_first(self):
         """

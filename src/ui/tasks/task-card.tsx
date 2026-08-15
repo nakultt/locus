@@ -4,6 +4,7 @@ import {
   ChevronDown,
   ChevronRight,
   ExternalLink,
+  GitBranch,
   Loader2,
   Play,
   RefreshCw,
@@ -200,6 +201,23 @@ export const TaskCard = ({
           <div className="mt-2.5">
             <StageStepper stages={card.stages} />
           </div>
+
+          {/* Linked branches carry the card while no pull request exists yet.
+              Hidden once one does: the PR is the better handle on the same
+              work, and showing both reads as two separate things happening. */}
+          {card.pull_requests.length === 0 && card.linked_branches.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {card.linked_branches.map((branch) => (
+                <span
+                  key={branch.name}
+                  className="flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"
+                >
+                  <GitBranch size={10} />
+                  {branch.name}
+                </span>
+              ))}
+            </div>
+          )}
 
           {card.pull_requests.length > 0 && (
             <div className="mt-2 flex flex-wrap gap-1.5">

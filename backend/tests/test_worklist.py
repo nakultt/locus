@@ -246,3 +246,104 @@ class TestIsolation:
 
         assert len(result.needs_you) == 1
         assert result.needs_you[0].items[0].pr_number == 42
+
+
+def _qa_thread(db, *, pr, days_ago, resolved=0, ticket=None):
+    """A QA notification posted `days_ago`, optionally already answered."""
+    thread = models.QAThread(
+        repo=REPO, pr_number=pr,
+        pr_url=f"https://github.com/{REPO}/pull/{pr}",
+        slack_channel="C1", slack_thread_ts=f"{pr}.0",
+        ticket_keys_json=f'["{ticket}"]' if ticket else "[]",
+        issue_numbers_json="[]",
+        resolved=resolved, owner_id=OWNER,
+        created_at=datetime.now(UTC) - timedelta(days=days_ago),
+    )
+    db.add(thread)
+    db.commit()
+    return thread
+
+
+def _all_items(result):
+    """Every item across both sections of the worklist."""
+    return [
+        i
+        for t in result.needs_you + result.waiting_on_others
+        for i in t.items
+    ]
+
+
+class TestUnansweredTestingThread:
+    """
+    The safety net for closing on sign-off rather than at merge.
+
+    A work item now stays open until a tester replies, so a thread nobody
+    answers would leave it open forever with nothing chasing it -- trading a
+    ticket that closed too early for one that never closes.
+    """
+
+    def test_a_silent_thread_becomes_something_waiting_on_you(self, db):
+        _qa_thread(db, pr=7, days_ago=5)
+
+        result = worklist.build(db, owner_id=OWNER)
+
+        items = _all_items(result)
+        assert any(
+            i.kind == schemas.WorklistKind.qa_unanswered for i in items
+        )
+        assert any(i.blocked_on_you for i in items)
+
+    def test_a_fresh_thread_is_left_alone(self, db):
+        """QA replying next morning is ordinary, not a problem to report."""
+        _qa_thread(db, pr=7, days_ago=1)
+
+        result = worklist.build(db, owner_id=OWNER)
+
+        items = _all_items(result)
+        assert not any(
+            i.kind == schemas.WorklistKind.qa_unanswered for i in items
+        )
+
+    def test_an_answered_thread_is_not_reported(self, db):
+        """Resolved means a tester signed off; there is nothing to chase."""
+        _qa_thread(db, pr=7, days_ago=10, resolved=1)
+
+        result = worklist.build(db, owner_id=OWNER)
+
+        items = _all_items(result)
+        assert not any(
+            i.kind == schemas.WorklistKind.qa_unanswered for i in items
+        )
+
+    def test_a_rejection_is_not_also_reported_as_silence(self, db):
+        """
+        A thread answered "broken" is already a rejection item. Listing it
+        again as unanswered would show one conversation as two problems.
+        """
+        _qa_thread(db, pr=7, days_ago=6)
+        comms_log.record(
+            db, owner_id=OWNER, repo=REPO, pr_number=7,
+            loop="qa", direction="received", channel="slack",
+            participant="tester", body="the heading is gone",
+            outcome="broken",
+        )
+
+        result = worklist.build(db, owner_id=OWNER)
+
+        items = _all_items(result)
+        kinds = [i.kind for i in items]
+        assert schemas.WorklistKind.qa_rejected in kinds
+        assert schemas.WorklistKind.qa_unanswered not in kinds
+
+    def test_it_groups_onto_the_ticket_not_a_second_card(self, db):
+        """
+        A thread carries no ticket key of its own. Without the lookup the
+        board would show one piece of work as two separate tasks.
+        """
+        _review(db, pr=7, state="merged", tickets="LOC-1")
+        _qa_thread(db, pr=7, days_ago=5, ticket="LOC-1")
+
+        result = worklist.build(db, owner_id=OWNER)
+
+        keys = [t.key for t in result.needs_you + result.waiting_on_others]
+        assert keys == ["LOC-1"]

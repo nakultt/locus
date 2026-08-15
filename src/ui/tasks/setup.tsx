@@ -331,6 +331,22 @@ export const GlobalDefaults = ({ docsConnected }: { docsConnected: boolean }) =>
         <label className="flex items-center gap-2 text-xs text-foreground">
           <input
             type="checkbox"
+            checked={values.close_on_qa_signoff}
+            onChange={(e) =>
+              setValues({ ...values, close_on_qa_signoff: e.target.checked })
+            }
+            className="rounded border-border"
+          />
+          Wait for the testing team before closing the ticket
+        </label>
+        <p className="-mt-1 pl-5 text-xs text-muted-foreground">
+          The merge leaves the ticket and its issues alone; they close when a
+          tester signs off. A thread nobody answers for three days shows up in
+          Needs you, so nothing is left open silently.
+        </p>
+        <label className="flex items-center gap-2 text-xs text-foreground">
+          <input
+            type="checkbox"
             checked={values.auto_merge_on_approval}
             onChange={(e) =>
               setValues({ ...values, auto_merge_on_approval: e.target.checked })

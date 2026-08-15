@@ -21,6 +21,7 @@ import httpx
 from app import crud, models
 from app.database import SessionLocal
 from app.services import comms_log, integration_health
+from app.services.agent_settings import resolve_settings
 from app.services.qa_feedback import handle_qa_reply
 
 logger = logging.getLogger(__name__)
@@ -220,6 +221,19 @@ async def poll_once() -> int:
                     if config:
                         integration_configs[integration.service_name] = config
 
+                # A sign-off by email closes the work item exactly as one in
+                # Slack does; the channel the tester chose must not change the
+                # outcome.
+                registration = (
+                    db.query(models.RepoWebhook)
+                    .filter(
+                        models.RepoWebhook.repo == thread.repo,
+                        models.RepoWebhook.owner_id == thread.owner_id,
+                    )
+                    .first()
+                )
+                settings = resolve_settings(db, thread.owner_id, registration)
+
                 try:
                     outcome = await handle_qa_reply(
                         reply_text=body,
@@ -230,6 +244,9 @@ async def poll_once() -> int:
                         issue_numbers=json.loads(thread.issue_numbers_json or "[]"),
                         slack_channel=thread.slack_channel,
                         thread_ts=thread.slack_thread_ts,
+                        done_status=settings.jira_done_status,
+                        pr_number=thread.pr_number,
+                        close_on_signoff=settings.close_on_qa_signoff,
                     )
                 except Exception:
                     logger.exception("QA email reply handling failed for %s", thread.repo)

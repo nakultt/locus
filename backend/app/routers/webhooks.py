@@ -297,6 +297,7 @@ async def register_repo(
         existing.qa_emails = stored_emails
         existing.jira_done_status = request.jira_done_status
         existing.close_issues_on_merge = 1 if request.close_issues_on_merge else 0
+        existing.close_on_qa_signoff = 1 if request.close_on_qa_signoff else 0
         existing.reviewers = stored_reviewers
         existing.reviewer_contacts = request.reviewer_contacts
         existing.review_slack_channel = request.review_slack_channel
@@ -314,6 +315,7 @@ async def register_repo(
             qa_emails=stored_emails,
             jira_done_status=request.jira_done_status,
             close_issues_on_merge=1 if request.close_issues_on_merge else 0,
+            close_on_qa_signoff=1 if request.close_on_qa_signoff else 0,
             reviewers=stored_reviewers,
             reviewer_contacts=request.reviewer_contacts,
             review_slack_channel=request.review_slack_channel,
@@ -336,6 +338,7 @@ async def register_repo(
         qa_emails=emails,
         jira_done_status=registration.jira_done_status,
         close_issues_on_merge=bool(registration.close_issues_on_merge),
+        close_on_qa_signoff=bool(registration.close_on_qa_signoff),
         reviewers=reviewers,
         reviewer_contacts=registration.reviewer_contacts,
         review_slack_channel=registration.review_slack_channel,
@@ -372,6 +375,7 @@ async def list_repos(
                 qa_emails=(r.qa_emails or "").splitlines() if r.qa_emails else [],
                 jira_done_status=r.jira_done_status or "Done",
                 close_issues_on_merge=bool(r.close_issues_on_merge),
+                close_on_qa_signoff=bool(r.close_on_qa_signoff),
                 reviewers=(r.reviewers or "").splitlines() if r.reviewers else [],
                 reviewer_contacts=r.reviewer_contacts,
                 review_slack_channel=r.review_slack_channel,
@@ -439,6 +443,7 @@ async def get_defaults(
         qa_emails=[e for e in (row.qa_emails or "").splitlines() if e.strip()],
         jira_done_status=row.jira_done_status,
         close_issues_on_merge=bool(row.close_issues_on_merge),
+        close_on_qa_signoff=bool(row.close_on_qa_signoff),
         reviewers=[r for r in (row.reviewers or "").splitlines() if r.strip()],
         reviewer_contacts=row.reviewer_contacts,
         review_slack_channel=row.review_slack_channel,
@@ -486,6 +491,7 @@ async def save_defaults(
     row.qa_emails = "\n".join(emails) if emails else None
     row.jira_done_status = request.jira_done_status or "Done"
     row.close_issues_on_merge = 1 if request.close_issues_on_merge else 0
+    row.close_on_qa_signoff = 1 if request.close_on_qa_signoff else 0
     row.reviewers = "\n".join(reviewers) if reviewers else None
     row.reviewer_contacts = (request.reviewer_contacts or "").strip() or None
     row.review_slack_channel = (request.review_slack_channel or "").strip() or None
@@ -502,6 +508,7 @@ async def save_defaults(
         qa_emails=emails,
         jira_done_status=row.jira_done_status,
         close_issues_on_merge=bool(row.close_issues_on_merge),
+        close_on_qa_signoff=bool(row.close_on_qa_signoff),
         reviewers=reviewers,
         reviewer_contacts=row.reviewer_contacts,
         review_slack_channel=row.review_slack_channel,
@@ -1513,6 +1520,14 @@ async def run_pr_job(job_id: int) -> None:
                 )
 
         if is_merge:
+            # Read before record_merged, which clears pending_asks on its way
+            # past. What the reviewer asked for is the most concrete statement
+            # of what this change had to do, and the testing team is who needs
+            # it -- a brief built only from the diff and the ticket drops it.
+            review_asks = review_flow.asks_for_qa(
+                db, owner_id=job.owner_id, repo=job.repo, pr_number=job.pr_number
+            )
+
             # Close the review loop before the QA loop opens. A merged PR must
             # not keep showing up in a review queue.
             review_flow.record_merged(
@@ -1526,6 +1541,8 @@ async def run_pr_job(job_id: int) -> None:
                 qa_recipients=settings.qa_emails,
                 close_issues=settings.close_issues_on_merge,
                 qa_slack_channel=settings.slack_channel,
+                review_asks=review_asks,
+                close_on_qa_signoff=settings.close_on_qa_signoff,
             )
 
             # Surface merge outcomes in the same stage timeline as the reads.

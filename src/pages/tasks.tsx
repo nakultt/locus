@@ -164,6 +164,7 @@ export default function TasksPage() {
   const [qaEmailsInput, setQaEmailsInput] = useState("");
   const [jiraDoneStatus, setJiraDoneStatus] = useState("Done");
   const [closeIssues, setCloseIssues] = useState(true);
+  const [closeOnSignoff, setCloseOnSignoff] = useState(false);
   const [reviewersInput, setReviewersInput] = useState("");
   const [reviewChannelInput, setReviewChannelInput] = useState("");
   const [reviewerContactsInput, setReviewerContactsInput] = useState("");
@@ -195,7 +196,8 @@ export default function TasksPage() {
             .filter((e) => e.includes("@"))
             .join(",") ||
         (savedForInput.slack_channel ?? "") !== channelInput.trim() ||
-        (savedForInput.close_issues_on_merge ?? true) !== closeIssues)
+        (savedForInput.close_issues_on_merge ?? true) !== closeIssues ||
+        (savedForInput.close_on_qa_signoff ?? false) !== closeOnSignoff)
   );
 
   /** Load a registered repo's real settings into the form. */
@@ -207,6 +209,7 @@ export default function TasksPage() {
     setQaEmailsInput((reg.qa_emails ?? []).join(", "));
     setJiraDoneStatus(reg.jira_done_status ?? "Done");
     setCloseIssues(reg.close_issues_on_merge ?? true);
+    setCloseOnSignoff(reg.close_on_qa_signoff ?? false);
     setReviewersInput((reg.reviewers ?? []).join(", "));
     setReviewChannelInput(reg.review_slack_channel ?? "");
     setReviewerContactsInput(reg.reviewer_contacts ?? "");
@@ -288,7 +291,8 @@ export default function TasksPage() {
         reviewChannelInput.trim() || undefined,
         reviewerContactsInput.trim() || undefined,
         autoMerge,
-        mergeMethod
+        mergeMethod,
+        closeOnSignoff
       );
       setJustRegistered(reg);
       setRepoInput("");
@@ -596,6 +600,15 @@ export default function TasksPage() {
                   />
                   Close linked GitHub issues on merge
                 </label>
+                <label className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={closeOnSignoff}
+                    onChange={(e) => setCloseOnSignoff(e.target.checked)}
+                    className="rounded border-border"
+                  />
+                  Wait for the testing team before closing the ticket
+                </label>
                 <p className="mt-1 text-xs text-muted-foreground">
                   Transitions are forward-only — a ticket already past this status is left
                   alone. Only issues the PR formally closes are touched.
@@ -685,7 +698,14 @@ export default function TasksPage() {
                       on={!!summary?.jira_connected}
                       label={`Move Jira ticket to "${jiraDoneStatus || "Done"}"`}
                     />
-                    <PlanItem on={closeIssues} label="Close linked GitHub issues" />
+                    <PlanItem
+                      on={closeIssues && !closeOnSignoff}
+                      label={
+                        closeOnSignoff
+                          ? "Close work item when testing signs off"
+                          : "Close linked GitHub issues"
+                      }
+                    />
                     <PlanItem
                       on={!!channelInput.trim() || !!qaEmailsInput.trim()}
                       label="Notify test team"

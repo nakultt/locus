@@ -175,6 +175,36 @@ than letting the repo value win: a repo that pins its own spec should still be r
 the org's standards, and overriding would silently drop them. This is the single exception to the
 "repo wins" rule below, and `tests/test_agent_defaults.py` pins it.
 
+**A work item can close on QA sign-off instead of at merge.** "Merged" and "done" are different
+claims, and the pipeline exists because a human still confirms the second. Closing at merge is
+right whenever QA passes and wrong in both cases that need attention — a rejected change, and a
+thread nobody answered — and a ticket closed while a bug is live drops off the board, which is
+the one place anyone would look for it. With `close_on_qa_signoff` set, `run_merge_actions`
+neither transitions the ticket nor closes linked issues, and `qa_feedback.handle_qa_reply` does
+both on a `works` verdict. Four rules hold it together. The close only fires when the merge
+actually deferred it, since re-closing an item someone deliberately reopened would undo their
+decision. It runs identically for a Slack reply and a Gmail one — the channel a tester chose
+must not change the outcome. The merge is left with nothing to say about the ticket rather than
+moved to an intermediate status, because most boards have no such stage. And the cost of
+holding an item open is that silence keeps it open forever, so `worklist` reports a thread
+unanswered for `QA_SILENT_DAYS` as blocked on you — without that the change trades a ticket
+that closed too early for one that never closes, which is no better for being quieter. A thread
+already answered "broken" is reported as a rejection and not also as silence. Off by default:
+holding work open is only safe for a team whose QA loop replies. `tests/test_qa_feedback.py`,
+`tests/test_merge_actions.py` and `tests/test_worklist.py` pin it.
+
+**What the reviewer asked for reaches the testing team.** The QA brief is built from the diff,
+the ticket and the security findings — none of which contain the requirement a human stated in
+plain words. A reviewer asking for "add the word orange too" is the most concrete statement of
+what the change had to do, and QA is exactly who verifies it, so `review_flow.asks_for_qa`
+threads the changes-requested bodies into `draft_qa_brief`. Two rules: the asks are read from
+the append-only `PRReviewRound` rather than `review.pending_asks`, because `record_merged`
+clears that field on its way past and does so immediately before the QA loop opens — and every
+round is carried rather than only the last, since a request satisfied in round two is still
+something QA should check. The fallback brief lists them verbatim: with no model to fold them
+into prose, stating them plainly is the whole point. `tests/test_review_flow.py` and
+`tests/test_merge_actions.py` pin it.
+
 **The written report is linked where someone is being asked to read the change.** A Google Doc
 nobody links to is work nobody reads: the QA brief and the review ping are deliberately short,
 and the analysis behind them is where the findings and requirement context live. `doc_url` is
@@ -248,6 +278,35 @@ ran. `task_board.build()` reuses `worklist.build()` for attention rather than re
 the two must not be able to disagree about what is blocked on you — and reuses
 `comms_log.ticket_timeline()` for the message log, which is deliberately wider than one PR's.
 
+**An issue's links are read from the issue, not only from the pull request.**
+`github_pr.get_linked_issues` reads `closingIssuesReferences` during an analysis, which
+sees only what a PR's *body* declares it closes. That misses the two cases a task board is
+asked about: a pull request attached through GitHub's Development panel, which writes a real
+edge but no closing keyword, and a branch created from that panel before any pull request
+exists — the state a ticket sits in for as long as someone is writing the code, and which
+used to render as `assigned`, i.e. as though nobody had started. `issue_links.fetch` queries
+`closedByPullRequestsReferences` and `linkedBranches` from the issue side, one aliased
+GraphQL request for the whole board. The two fields are complementary: `linkedBranches`
+returns only affirmatively linked branches and never PRs, so neither subsumes the other.
+Repository names are escaped into the query rather than passed as variables, since one
+variable set per alias reads worse than an escaped literal — but escaping is then mandatory.
+An older GitHub rejecting `closedByPullRequestsReferences` retries without it rather than
+costing the board, and a total failure returns empty: the links are context, and a board that
+blanks because one call failed is the one wrong answer. `tests/test_issue_links.py` pins it.
+
+**A linked branch ranks below every pull-request stage.** The branch stays linked after its PR
+opens, so a rule that let it win would walk a reviewed card backwards to `branch_created` on
+every refresh. `branch_created` is also conditional like `changes_requested`: it is observable
+only for GitHub issues, and rendering it greyed-out on every Jira ticket would show most tasks
+permanently skipping a step that was never available to them.
+
+**A discovered link is recorded, and only ever added.** `task_board._persist_links` writes the
+issue key onto the review rows GitHub names, so the pull request becomes findable as a sibling
+of the work item and the board stops depending on the links call having succeeded. This is
+recording what GitHub's graph reports, not inferring a work item — the distinction `work_item`
+draws. It appends rather than replaces, because a PR routinely belongs to several work items
+and overwriting would drop the Jira key an analysis read off the branch.
+
 **The task stage is derived, never stored.** A stored stage would need writing from three loops
 that already run concurrently, and would go stale exactly when someone is watching. It is cheap
 to recompute from the review state, the QA thread and the job status. Two rules in
@@ -319,11 +378,14 @@ never reviewed used to store no keys at all and so could never be found as a sib
 that writes to a repo's default branch with no human in the loop. An approval means "the
 change is right" — not that CI passed, which the reviewer may not have checked and which may
 not have finished when they clicked. `review_flow.evaluate_merge_gate` independently requires
-green CI, no merge conflict, no confirmed security finding, and no `p1` review finding.
-Unverified findings and `p2`/`p3` deliberately do not block: blocking on a model's opinion
-would both make the feature unusable and hand an unverified finding the authority the
-confirmed/unverified split exists to deny it. Every refusal is reported to Slack with the
-reason — an approved PR that silently stays open reads as a broken feature.
+green CI, no merge conflict, and no confirmed security finding. Review findings do not block at
+any priority, `p1` included: every priority is a model's judgement about the change, and the
+reviewer approving it has already read the finding — findings render in the PR comment and in
+the Slack notification whatever the gate decides. Gating on one as well made the approval
+advisory rather than decisive, since a `p1` the reviewer had seen and accepted still could not
+merge without being dismissed by hand first. Unverified security findings likewise do not
+block, which is what keeps the confirmed/unverified split meaningful. Every refusal is reported
+to Slack with the reason — an approved PR that silently stays open reads as a broken feature.
 
 **The merge gate must be retried, not evaluated once.** GitHub computes mergeability lazily:
 the first read after any change returns `mergeable: null`, and the approval webhook fires

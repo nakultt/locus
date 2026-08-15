@@ -27,6 +27,8 @@ class EffectiveSettings:
     qa_emails: list[str] = field(default_factory=list)
     jira_done_status: str = "Done"
     close_issues_on_merge: bool = True
+    # Hold the work item open until QA signs off, rather than closing at merge.
+    close_on_qa_signoff: bool = False
     context_doc_ids: list[str] = field(default_factory=list)
     # GitHub logins expected to review this repo.
     reviewers: list[str] = field(default_factory=list)
@@ -153,6 +155,19 @@ def resolve_settings(
     else:
         resolved.close_issues_on_merge = True
         resolved.sources["close_issues_on_merge"] = "unset"
+
+    # Same shape again. Off by default: holding a work item open is only safe
+    # for a team whose QA loop actually replies, and a repo that has not opted
+    # in must keep the behaviour it had.
+    if registration is not None:
+        resolved.close_on_qa_signoff = bool(registration.close_on_qa_signoff)
+        resolved.sources["close_on_qa_signoff"] = "repo"
+    elif defaults is not None:
+        resolved.close_on_qa_signoff = bool(defaults.close_on_qa_signoff)
+        resolved.sources["close_on_qa_signoff"] = "defaults"
+    else:
+        resolved.close_on_qa_signoff = False
+        resolved.sources["close_on_qa_signoff"] = "unset"
 
     # Context docs are the one setting that accumulates rather than overrides.
     # The account-level docs are the standards that apply everywhere -- an API
