@@ -427,13 +427,96 @@ async def export_to_google_doc(
     ctx = result.context
     title = f"PR Review — {ctx.repo}#{ctx.pr_number}: {ctx.title}"[:200]
 
+    # The full record, not the PR comment. The comment is short by design --
+    # read in a diff view while deciding whether to approve -- while this is
+    # what someone reads when they were not there: the requirement, the
+    # discussion, both analysis passes, every review round, and every message
+    # sent or received. Plain text because Docs stores text; Markdown headings
+    # would appear as literal `##`.
+    body = full_report.render(
+        result,
+        events=timeline_events,
+        review=review_row,
+        timezone_name=timezone_name,
+    )
+
+    # The document this PR already has, if any. Rewritten in place rather than
+    # replaced: every link already sent -- in the review request, in the QA
+    # brief -- points at this id, and a new document per push would leave all
+    # of them pointing at a stale snapshot.
+    existing = None
+    if db is not None and user_id is not None:
+        existing = (
+            db.query(models.PRReport)
+            .filter(
+                models.PRReport.repo == ctx.repo,
+                models.PRReport.pr_number == ctx.pr_number,
+                models.PRReport.owner_id == user_id,
+            )
+            .first()
+        )
+
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+    }
+
     async with httpx.AsyncClient(timeout=30.0) as client:
+        document_id = existing.document_id if existing else None
+
+        if document_id:
+            # Read the current length so the old body can be deleted. Docs has
+            # no "replace all"; the content is a range that must be removed
+            # before the new text is inserted.
+            current = await client.get(
+                f"https://docs.googleapis.com/v1/documents/{document_id}",
+                headers=headers,
+            )
+            if current.status_code == 404:
+                # Someone deleted the document. Fall through and make a new one
+                # rather than failing the export for the rest of the run.
+                logger.info(
+                    "Report document %s is gone; creating a replacement",
+                    document_id,
+                )
+                document_id = None
+            elif current.status_code != 200:
+                raise RuntimeError(
+                    f"Google Docs read returned {current.status_code}: "
+                    f"{current.text[:200]}"
+                )
+            else:
+                end = _document_end_index(current.json())
+                requests: list[dict] = []
+                # A document holding only its final newline has nothing to
+                # delete, and Docs rejects an empty range.
+                if end > 1:
+                    requests.append({
+                        "deleteContentRange": {
+                            "range": {"startIndex": 1, "endIndex": end}
+                        }
+                    })
+                requests.append(
+                    {"insertText": {"location": {"index": 1}, "text": body}}
+                )
+
+                updated = await client.post(
+                    f"https://docs.googleapis.com/v1/documents/{document_id}"
+                    f":batchUpdate",
+                    headers=headers,
+                    json={"requests": requests},
+                )
+                if updated.status_code != 200:
+                    raise RuntimeError(
+                        f"Google Docs update returned {updated.status_code}: "
+                        f"{updated.text[:200]}"
+                    )
+
+                return f"https://docs.google.com/document/d/{document_id}/edit"
+
         create = await client.post(
             "https://docs.googleapis.com/v1/documents",
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/json",
-            },
+            headers=headers,
             json={"title": title},
         )
         if create.status_code != 200:
@@ -452,25 +535,9 @@ async def export_to_google_doc(
         if not document_id:
             return None
 
-        # The full record, not the PR comment. The comment is short by design
-        # -- read in a diff view while deciding whether to approve -- while
-        # this is what someone reads when they were not there: the requirement,
-        # the discussion, both analysis passes, every review round, and every
-        # message sent or received. Rendered as plain text because Docs stores
-        # it as text; Markdown headings would appear as literal `##`.
-        body = full_report.render(
-            result,
-            events=timeline_events,
-            review=review_row,
-            timezone_name=timezone_name,
-        )
-
         await client.post(
             f"https://docs.googleapis.com/v1/documents/{document_id}:batchUpdate",
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/json",
-            },
+            headers=headers,
             json={
                 "requests": [
                     {"insertText": {"location": {"index": 1}, "text": body}}
@@ -478,7 +545,39 @@ async def export_to_google_doc(
             },
         )
 
+    # Recorded so the next event rewrites this document instead of making
+    # another one.
+    if db is not None and user_id is not None:
+        try:
+            if existing is not None:
+                existing.document_id = document_id
+            else:
+                db.add(models.PRReport(
+                    repo=ctx.repo, pr_number=ctx.pr_number,
+                    document_id=document_id, owner_id=user_id,
+                ))
+            db.commit()
+        except Exception as e:
+            # The document exists and its URL is about to be returned; failing
+            # the export because the row could not be written would discard
+            # work that succeeded.
+            logger.warning("Could not record report document: %s", e)
+            db.rollback()
+
     return f"https://docs.google.com/document/d/{document_id}/edit"
+
+
+def _document_end_index(document: dict) -> int:
+    """
+    The index just past the document's last deletable character.
+
+    Docs always keeps a trailing newline that cannot be removed, so the
+    deletable range ends one before the reported end.
+    """
+    content = (document.get("body") or {}).get("content") or []
+    if not content:
+        return 1
+    return max(1, content[-1].get("endIndex", 1) - 1)
 
 
 _PRIORITY_RANK = {
