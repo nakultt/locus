@@ -175,6 +175,22 @@ than letting the repo value win: a repo that pins its own spec should still be r
 the org's standards, and overriding would silently drop them. This is the single exception to the
 "repo wins" rule below, and `tests/test_agent_defaults.py` pins it.
 
+**One report document per pull request, rewritten in place.** The export used to POST to
+`/v1/documents` on every run, which creates a new file each time — a PR pushed to five times
+ended up with five documents, each frozen where it was written, and every link already sent to
+a reviewer or the testing team pointing at a stale one. The link is the entire reason the
+document is worth writing, so `PRReport` stores the document id and the export deletes the
+body and re-inserts rather than creating. `report_sync.refresh` is called from the review path
+and the QA reply path too: those events run no analysis — the diff has not changed — but they
+carry the verdict, the round trip and the tester's answer, which is most of the story. It
+reuses the last completed run's analysis, since that is still the truth about the code, and
+re-reads only the history around it. Three rules: the first document is created by an analysis
+and never by a refresh, because a review event has no code to describe and rendering from no
+analysis would replace a real document with an empty one; a refresh that fails returns the
+stored URL rather than raising, since the notification it decorates is worth sending either
+way; and a document someone deleted (404) is replaced rather than failing the export.
+`tests/test_report_sync.py` pins it.
+
 **The Google Doc is the whole record; the PR comment is the summary.** They are different
 documents for different readers. The comment is read in a diff view by someone deciding whether
 to approve, so it is short. The report is read by the senior dev and the testing team, who are

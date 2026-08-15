@@ -229,6 +229,41 @@ class SuppressedFinding(Base):
         )
 
 
+class PRReport(Base):
+    """
+    The Google Doc holding one pull request's written record.
+
+    One row per (owner, repo, pr_number), so the document is rewritten in place
+    on every event rather than created again. A new doc per push scatters the
+    history across a dozen files and, worse, makes every link anyone already
+    sent point at a stale one -- the review request and the QA brief carry that
+    link, and the whole reason it is worth reading is that it is current.
+
+    The same reasoning as the PR comment's hidden marker: the record is a
+    living document, not an append-only stream of snapshots.
+    """
+
+    __tablename__ = "pr_reports"
+
+    id = Column(Integer, primary_key=True, index=True)
+    repo = Column(String(255), nullable=False, index=True)
+    pr_number = Column(Integer, nullable=False, index=True)
+
+    # Google's document id. The URL is derived from it rather than stored, so
+    # there is one source of truth for which document this is.
+    document_id = Column(String(128), nullable=False)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+
+    def __repr__(self) -> str:
+        return f"<PRReport({self.repo}#{self.pr_number} -> {self.document_id})>"
+
+
 class QAThread(Base):
     """
     A QA notification Locus posted, and the PR state it refers to.

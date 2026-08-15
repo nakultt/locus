@@ -29,6 +29,7 @@ from app.services import (
     context_brief,
     finding_diff,
     github_pr,
+    report_sync,
     review_flow,
     suppression,
     work_item,
@@ -914,13 +915,26 @@ async def agent_summary(
 
 def _latest_doc_url(db: SessionLocal, job: models.PRJob) -> str | None:
     """
-    The report written by the most recent completed run on this pull request.
+    The URL of this pull request's report document.
 
-    A review event does not re-analyze -- the diff has not changed since the
-    last run -- so there is no fresh report to link and the stored one is the
-    correct thing to point at. Returns None when no run wrote a document,
-    which is the common case with Docs export off.
+    Read from the report row rather than from an old job payload: the document
+    is rewritten in place, so its id is stable and one row is the truth. Falls
+    back to the last completed run's stored URL for pull requests whose report
+    predates that row. Returns None when no run wrote a document, the common
+    case with Docs export off.
     """
+    report = (
+        db.query(models.PRReport)
+        .filter(
+            models.PRReport.owner_id == job.owner_id,
+            models.PRReport.repo == job.repo,
+            models.PRReport.pr_number == job.pr_number,
+        )
+        .first()
+    )
+    if report is not None:
+        return f"https://docs.google.com/document/d/{report.document_id}/edit"
+
     previous = (
         db.query(models.PRJob)
         .filter(
@@ -1038,8 +1052,13 @@ async def _run_review_job(
     text = review_flow.format_review_notification(
         review, outcome, review.last_reviewer, asks, expected,
         # A review event runs no analysis of its own -- the diff has not
-        # changed -- so the report to link is the one the last run wrote.
-        doc_url=_latest_doc_url(db, job),
+        # changed -- but the verdict it carries is new, so the document is
+        # rewritten with it before the link goes out.
+        doc_url=await report_sync.refresh(
+            db, owner_id=job.owner_id, repo=job.repo,
+            pr_number=job.pr_number,
+            integration_configs=integration_configs,
+        ),
     )
     if gate is not None:
         text += "\n" + review_flow.format_merge_gate(gate)

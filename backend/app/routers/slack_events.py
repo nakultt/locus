@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 
 from app import crud, models
 from app.database import get_db
-from app.services import comms_log
+from app.services import comms_log, report_sync
 from app.services.agent_settings import resolve_settings
 from app.services.qa_feedback import handle_qa_reply
 
@@ -230,6 +230,15 @@ async def slack_events(
     elif outcome["verdict"] == "works":
         thread.resolved = 1
         db.commit()
+
+    # The tester's answer is the last thing that happens to a change, and it is
+    # exactly what someone reading the record later wants: whether it actually
+    # worked. Rewritten after the reply is logged so the document includes it.
+    await report_sync.refresh(
+        db, owner_id=thread.owner_id, repo=thread.repo,
+        pr_number=thread.pr_number,
+        integration_configs=integration_configs,
+    )
 
     logger.info(
         "QA reply on %s#%s: %s (%s)",
