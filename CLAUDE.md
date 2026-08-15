@@ -284,13 +284,36 @@ the current state and round number, `PRReviewRound` is the append-only history, 
 `app/services/review_flow.py` is the only thing that writes either. Three rules there are
 deliberate:
 
-- **Only a push that follows a changes-requested review opens a new round.** A push to a PR
-  nobody has reviewed is ordinary development; counting it would turn the round number into a
-  commit counter and make every PR look stalled.
+- **A push to a pull request someone has already looked at goes back to the reviewer.** All
+  three reviewed states send it back, and they differ only in the round count and the wording.
+  The approval case is a safety property, not a nicety: an approval describes a diff, and when
+  the diff changes the approval no longer covers it. Leaving the state `approved` meant
+  `automerge.sweep_once` — which re-evaluates the gate every minute — merged commits no human
+  had read, and the result was indistinguishable from a properly approved merge. A push after
+  approval therefore revokes it, and the notification says so rather than reading as "round 3
+  is ready". A push arriving *while* the reviewer is still deciding is reported but does not
+  increment the round: they have not finished round one.
+- **A push to a PR nobody has ever reviewed still counts for nothing.** That is ordinary
+  development; counting it would turn the round number into a commit counter and make every PR
+  look stalled. The analysis re-runs regardless — the review loop simply does not hear about it.
 - **A `commented` review is recorded but moves nothing.** It carries no verdict, and letting
   drive-by remarks bump the round count would make a converging review look stuck.
 - **A review request never un-approves.** Asking for a second opinion is normal, and silently
   dropping the approval would make a merge-ready PR look blocked.
+
+**A reopened ticket's next pull request inherits its lineage.** The pipeline records
+`ticket_keys` on the review row once an analysis completes, which covers every push after the
+first. It does not cover the *first* run on a new pull request — which is exactly the reopened
+-ticket case: a change merges, QA rejects it, the ticket goes back to In Progress, and the fix
+arrives on a fresh branch as a new PR. That PR has no review row and no recorded keys, so it
+started cold, missing the one thing it most needed: why the last attempt was rejected.
+`work_item.resolve_key` falls back to reading the branch, title and body, and the siblings are
+then a lookup. Two rules: a work item is never guessed — no ticket in the branch or title means
+the run proceeds as genuinely new work, because attaching a guessed key would put one team's
+rejection history in front of another team's PR; and only an earlier *merged* pull request
+makes this a retry, since two PRs open in parallel on one ticket is ordinary. The review row is
+now created at analysis time rather than waiting for a review event, because a PR analyzed but
+never reviewed used to store no keys at all and so could never be found as a sibling.
 
 **Auto-merge is off by default and gated on more than the approval.** It is the only path
 that writes to a repo's default branch with no human in the loop. An approval means "the

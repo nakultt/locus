@@ -262,13 +262,33 @@ def record_resubmission(
     author: str | None = None,
 ) -> models.PRReview | None:
     """
-    The author pushed after changes were requested: open the next round.
+    The author pushed to a pull request someone has already looked at.
 
-    This is the step that makes the loop a loop. Only a push that follows a
-    changes-requested review counts -- a push to a PR nobody has reviewed yet
-    is just development, and counting it would make round numbers meaningless.
+    What that means depends on where the review had got to, and all three
+    cases send it back to the reviewer:
 
-    Returns None when the push does not advance a round.
+    **After changes were requested** -- the loop's main step. Round number
+    increments: this is the round trip the count exists to measure.
+
+    **After approval** -- the approval no longer describes the code. A reviewer
+    approved a diff; the diff has changed. Leaving the state `approved` meant
+    the auto-merge sweep, which runs on a timer and re-evaluates the gate
+    every minute, would merge commits no human ever saw. That is the one path
+    that writes to a default branch with nobody in the loop, so a push has to
+    revoke the approval. The round increments here too -- a re-review after
+    approval is a genuine extra trip.
+
+    **While awaiting review** -- the reviewer has been asked but has not
+    answered. Recorded and reported so they learn the code moved under them,
+    but the round does *not* increment: they have not finished round one, and
+    counting each push would turn the round number into a commit counter and
+    make an ordinary PR look stalled.
+
+    A push to a pull request nobody has ever reviewed still returns None. That
+    is ordinary development, and the analysis re-runs on its own without the
+    review loop needing to hear about it.
+
+    Returns None when the push does not concern the review loop.
     """
     review = (
         db.query(models.PRReview)
@@ -280,14 +300,48 @@ def record_resubmission(
         .first()
     )
 
-    if review is None or review.state != schemas.ReviewState.changes_requested.value:
+    if review is None:
         return None
 
-    review.round_number += 1
+    # A merged pull request is terminal. A push to its branch after the merge
+    # belongs to whatever comes next, not to a review that is over.
+    if review.state == schemas.ReviewState.merged.value:
+        return None
+
+    # Never reviewed by anyone: no verdict to invalidate, nobody waiting.
+    if review.state == schemas.ReviewState.awaiting_review.value and not any(
+        r.outcome in (
+            schemas.ReviewOutcome.approved.value,
+            schemas.ReviewOutcome.changes_requested.value,
+            schemas.ReviewOutcome.review_requested.value,
+        )
+        for r in review.rounds
+    ):
+        return None
+
+    was_approved = review.state == schemas.ReviewState.approved.value
+    # Only a completed verdict opens a new round. A push arriving while the
+    # reviewer is still deciding is part of the round already running.
+    opens_new_round = review.state in (
+        schemas.ReviewState.changes_requested.value,
+        schemas.ReviewState.approved.value,
+    )
+
+    if opens_new_round:
+        review.round_number += 1
+
     review.state = schemas.ReviewState.awaiting_review.value
     review.pr_url = pr_url or review.pr_url
     review.pr_title = pr_title or review.pr_title
     review.author = author or review.author
+
+    if was_approved:
+        # The approval is gone, so anything it cleared is gone with it. Asks
+        # were already cleared when the approval landed.
+        logger.info(
+            "Push to approved %s#%s revoked the approval; back to review",
+            repo, pr_number,
+        )
 
     db.add(models.PRReviewRound(
         review_id=review.id,
@@ -344,9 +398,18 @@ def format_review_notification(
     expected_reviewers: list[str],
     changed_files: list[dict] | None = None,
     doc_url: str | None = None,
+    resubmit_reason: str | None = None,
 ) -> str:
     """
     Build the Slack message for one review event.
+
+    Args:
+        resubmit_reason: Why a resubmission is being reported --
+            "approval_revoked" when a push invalidated an approval,
+            "updated_during_review" when the diff moved while the reviewer was
+            still deciding, or None for the ordinary next round. A revoked
+            approval reads very differently from "round 3 is ready", and
+            reporting both the same way would bury the one that matters.
 
     Addressed to whoever the ball is now with: the author on
     changes-requested, the reviewers on a request.
@@ -384,10 +447,30 @@ def format_review_notification(
 
     if outcome is schemas.ReviewOutcome.resubmitted:
         mentions = " ".join(f"@{r}" for r in expected_reviewers) or "reviewers"
-        lines = [
-            f":arrows_counterclockwise: {link}{title} ready for "
-            f"round {review.round_number} — {mentions}{report}"
-        ]
+
+        if resubmit_reason == "approval_revoked":
+            # Materially different from an ordinary re-review: someone had
+            # already said yes, and that yes no longer covers what is there.
+            # Auto-merge is held until it is given again, and saying so stops
+            # the message reading as noise on a PR the reviewer thought was
+            # finished.
+            lines = [
+                f":warning: New commits on {link}{title} *after approval* — "
+                f"the approval no longer covers this code and has been "
+                f"withdrawn. {mentions} please take another look."
+                f"{report}"
+            ]
+        elif resubmit_reason == "updated_during_review":
+            # They are mid-review; the diff moved under them. Not a new round.
+            lines = [
+                f":arrows_counterclockwise: {link}{title} was updated while "
+                f"you were reviewing it — {mentions}{report}"
+            ]
+        else:
+            lines = [
+                f":arrows_counterclockwise: {link}{title} ready for "
+                f"round {review.round_number} — {mentions}{report}"
+            ]
         # What the reviewer asked for last time, so re-review is "check these
         # two things" rather than "read the whole diff again". This is the
         # expensive re-read in the loop, and it is a person's time.
@@ -408,6 +491,54 @@ def format_review_notification(
         return "\n".join(lines)
 
     return f"Update on {link}{title}"
+
+
+def format_retry_notice(
+    *,
+    repo: str,
+    pr_number: int,
+    pr_url: str | None,
+    pr_title: str | None,
+    ticket_key: str,
+    previous: models.PRReview,
+    qa_rejected: bool,
+    reviewers: list[str],
+    doc_url: str | None = None,
+) -> str:
+    """
+    Announce a pull request that retries work already merged once.
+
+    The reopened-ticket shape: the first attempt merged, QA rejected it, the
+    ticket went back to In Progress, and the fix arrives on a fresh branch as
+    a new pull request. To the review loop that PR looks new -- different
+    branch, different number, no history -- and a reviewer given it without
+    context re-reviews from scratch, missing that this exact change already
+    failed once and why.
+
+    Names the earlier pull request so the reviewer can read what was wrong
+    with it rather than being told there is history and left to find it.
+    """
+    pr_ref = f"{repo}#{pr_number}"
+    link = f"<{pr_url}|{pr_ref}>" if pr_url else pr_ref
+    title = f" — {pr_title}" if pr_title else ""
+    mentions = " ".join(f"@{r}" for r in reviewers) or "reviewers"
+    report = f"\n:page_facing_up: <{doc_url}|Full analysis>" if doc_url else ""
+
+    previous_ref = f"{previous.repo}#{previous.pr_number}"
+    previous_link = (
+        f"<{previous.pr_url}|{previous_ref}>" if previous.pr_url else previous_ref
+    )
+
+    reason = (
+        "which QA rejected" if qa_rejected
+        else "which merged earlier"
+    )
+
+    return (
+        f":repeat: {link}{title} is another attempt at *{ticket_key}*, "
+        f"previously {previous_link} {reason}. {mentions} — worth reading "
+        f"the earlier round before this one.{report}"
+    )
 
 
 def evaluate_merge_gate(
