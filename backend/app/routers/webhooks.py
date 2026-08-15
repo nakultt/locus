@@ -31,6 +31,7 @@ from app.services import (
     github_pr,
     review_flow,
     suppression,
+    work_item,
     worklist,
 )
 from app.services.agent_settings import resolve_settings
@@ -1221,12 +1222,23 @@ async def run_pr_job(job_id: int) -> None:
             db.commit()
             return
 
-        # A push to a PR whose review asked for changes opens the next round.
-        # Only that case counts: a push to a PR nobody has reviewed yet is
-        # ordinary development, and counting it would make the round number
-        # meaningless as a measure of how long the loop has run.
+        # A push to a pull request someone has already looked at goes back to
+        # the reviewer, whatever state the review was in. Why it is going back
+        # has to be captured *before* the call, which overwrites the state.
+        #
+        # The approval case is the one that matters most: a reviewer approved
+        # a diff, the diff changed, and the auto-merge sweep re-evaluates the
+        # gate every minute -- so leaving the approval standing merges commits
+        # nobody read.
         resubmitted = None
+        resubmit_reason = None
         if job.action == "synchronize":
+            state_before = db.query(models.PRReview.state).filter(
+                models.PRReview.repo == job.repo,
+                models.PRReview.pr_number == job.pr_number,
+                models.PRReview.owner_id == job.owner_id,
+            ).scalar()
+
             resubmitted = review_flow.record_resubmission(
                 db,
                 owner_id=job.owner_id,
@@ -1235,17 +1247,52 @@ async def run_pr_job(job_id: int) -> None:
                 head_sha=job.head_sha,
             )
 
+            if resubmitted is not None:
+                if state_before == schemas.ReviewState.approved.value:
+                    resubmit_reason = "approval_revoked"
+                elif state_before == schemas.ReviewState.awaiting_review.value:
+                    resubmit_reason = "updated_during_review"
+
+        # The branch and title, for reading the work item off a pull request
+        # that has never been analyzed. Cheap next to the pipeline that
+        # follows, and its failure costs only the inherited context.
+        job_pr_title = job_branch = job_pr_body = None
+        gh_key = (integration_configs.get("github") or {}).get("api_key")
+        if gh_key:
+            try:
+                pr_meta = await github_pr.get_pull_request(
+                    gh_key, job.repo, job.pr_number
+                )
+                job_pr_title = pr_meta.get("title")
+                job_pr_body = pr_meta.get("body")
+                job_branch = (pr_meta.get("head") or {}).get("ref")
+            except Exception as e:
+                logger.info(
+                    "Could not read %s#%s for work-item lookup: %s",
+                    job.repo, job.pr_number, e,
+                )
+
         # Everything already known about this work item, so the reviewer sees
         # what earlier rounds asked for and what QA rejected -- not just what
         # this run happened to gather.
-        prior_review = db.query(models.PRReview).filter(
-            models.PRReview.repo == job.repo,
-            models.PRReview.pr_number == job.pr_number,
-            models.PRReview.owner_id == job.owner_id,
-        ).first()
-        prior_ticket = None
-        if prior_review and prior_review.ticket_keys:
-            prior_ticket = prior_review.ticket_keys.splitlines()[0].strip() or None
+        #
+        # A previous run on this same pull request recorded the key, which
+        # covers every push after the first. The first run on a *new* pull
+        # request has no such row, and that is precisely the reopened-ticket
+        # case: QA rejects a merged change, the ticket goes back to In
+        # Progress, and the fix arrives on a new branch. Reading the key off
+        # the branch and title instead lets that PR inherit the history --
+        # including why QA rejected the last attempt, which is the one thing
+        # it most needs.
+        prior_ticket = work_item.resolve_key(
+            db,
+            owner_id=job.owner_id,
+            repo=job.repo,
+            pr_number=job.pr_number,
+            title=job_pr_title,
+            branch=job_branch,
+            body=job_pr_body,
+        )
 
         accumulated = context_brief.requirement_context(
             db, owner_id=job.owner_id, repo=job.repo,
@@ -1305,9 +1352,79 @@ async def run_pr_job(job_id: int) -> None:
                 models.PRReview.pr_number == job.pr_number,
                 models.PRReview.owner_id == job.owner_id,
             ).first()
-            if review_row is not None:
-                review_row.ticket_keys = "\n".join(ticket_keys)
-                db.commit()
+            if review_row is None:
+                # Created here rather than waiting for a review event. The
+                # keys are what makes this pull request findable as a sibling
+                # of the work item, and a PR analyzed but never reviewed used
+                # to store none -- so the next attempt on a reopened ticket
+                # could not find it and started with no history.
+                review_row = models.PRReview(
+                    repo=job.repo,
+                    pr_number=job.pr_number,
+                    pr_url=result.context.url,
+                    pr_title=result.context.title,
+                    author=result.context.author,
+                    state=schemas.ReviewState.awaiting_review.value,
+                    round_number=1,
+                    owner_id=job.owner_id,
+                )
+                db.add(review_row)
+            review_row.ticket_keys = "\n".join(ticket_keys)
+            db.commit()
+
+        # A new pull request retrying work that already merged once. This is
+        # the reopened-ticket shape: the first attempt merged, QA rejected it,
+        # the ticket went back to In Progress, and the fix arrives on a fresh
+        # branch. The reviewer is being asked to look at something that has
+        # been through the loop before, and the reason it came back is the
+        # context they most need -- so it is announced rather than left for
+        # them to reconstruct from the ticket.
+        if job.action == "opened" and primary_ticket:
+            retry, previous = work_item.is_retry(
+                db, owner_id=job.owner_id, repo=job.repo,
+                pr_number=job.pr_number, ticket_key=primary_ticket,
+            )
+            if retry and previous is not None:
+                rejection = work_item.qa_rejection(
+                    db, owner_id=job.owner_id, ticket_key=primary_ticket,
+                )
+                result.stages.append(schemas.PipelineStage(
+                    key="retry_of", label="Retry of earlier work", kind="read",
+                    state=schemas.StageState.done,
+                    detail=(
+                        f"{primary_ticket} was previously merged as "
+                        f"{previous.repo}#{previous.pr_number}"
+                        + (" and rejected by QA" if rejection else "")
+                    ),
+                ))
+
+                channel = settings.review_slack_channel
+                if channel and "slack" in integration_configs:
+                    retry_text = review_flow.format_retry_notice(
+                        repo=job.repo,
+                        pr_number=job.pr_number,
+                        pr_url=result.context.url,
+                        pr_title=result.context.title,
+                        ticket_key=primary_ticket,
+                        previous=previous,
+                        qa_rejected=rejection is not None,
+                        reviewers=settings.reviewers,
+                        doc_url=result.doc_url,
+                    )
+                    sent = await review_flow.post_review_notification(
+                        integration_configs["slack"], channel, retry_text
+                    )
+                    comms_log.record(
+                        db, owner_id=job.owner_id, repo=job.repo,
+                        pr_number=job.pr_number,
+                        loop="review", direction="sent", channel="slack",
+                        target=channel,
+                        participant=", ".join(settings.reviewers) or None,
+                        body=retry_text,
+                        outcome="retry_of_previous",
+                        ticket_key=primary_ticket,
+                        succeeded=sent,
+                    )
 
         # Linked and mentioned GitHub issues, with the text of each.
         if comms.get("issues"):
@@ -1328,10 +1445,21 @@ async def run_pr_job(job_id: int) -> None:
             )
 
         if resubmitted is not None:
+            stage_detail = f"round {resubmitted.round_number}, awaiting review"
+            if resubmit_reason == "approval_revoked":
+                stage_detail = (
+                    f"approval withdrawn — round {resubmitted.round_number}, "
+                    f"awaiting review"
+                )
+            elif resubmit_reason == "updated_during_review":
+                stage_detail = (
+                    f"updated mid-review — still round "
+                    f"{resubmitted.round_number}"
+                )
             result.stages.append(schemas.PipelineStage(
-                key="review_round", label="Open next review round", kind="write",
+                key="review_round", label="Return to reviewer", kind="write",
                 state=schemas.StageState.done,
-                detail=f"round {resubmitted.round_number}, awaiting review",
+                detail=stage_detail,
             ))
             channel = settings.review_slack_channel
             if channel and "slack" in integration_configs:
@@ -1368,6 +1496,7 @@ async def run_pr_job(job_id: int) -> None:
                     # This round's report, written moments ago by the run
                     # above -- not a stored one from an earlier round.
                     doc_url=result.doc_url,
+                    resubmit_reason=resubmit_reason,
                 )
                 sent = await review_flow.post_review_notification(
                     integration_configs["slack"], channel, resubmit_text
@@ -1379,7 +1508,7 @@ async def run_pr_job(job_id: int) -> None:
                     target=channel,
                     participant=", ".join(settings.reviewers) or None,
                     body=resubmit_text,
-                    outcome="resubmitted",
+                    outcome=resubmit_reason or "resubmitted",
                     succeeded=sent,
                 )
 

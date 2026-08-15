@@ -162,21 +162,30 @@ class TestRoundArithmetic:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_push_while_awaiting_review_does_not_count(self, db):
-        """A push before the reviewer has responded is not a new round."""
-        await review_flow.record_review_submitted(
-            db,
-            owner_id=OWNER,
-            repo=REPO,
-            pr_number=PR,
-            review_state="approved",
-            reviewer="senior-dev",
-            body="",
+    async def test_push_while_awaiting_review_does_not_open_a_round(self, db):
+        """
+        A push before the reviewer has responded goes back to them, but does
+        not open a new round: they have not finished this one, and counting
+        each push would turn the round number into a commit counter.
+
+        This test previously set up an *approved* review while describing the
+        awaiting-review case, and asserted nothing happened -- which is how a
+        push over an approval went unnoticed. Both cases are covered
+        separately now; see TestPushAfterApproval.
+        """
+        review_flow.record_review_requested(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR, reviewer="senior-dev"
         )
 
-        assert review_flow.record_resubmission(
-            db, owner_id=OWNER, repo=REPO, pr_number=PR
-        ) is None
+        review = review_flow.record_resubmission(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR, head_sha="abc1234"
+        )
+
+        # Reported, so the reviewer learns the diff moved under them...
+        assert review is not None
+        # ...but still round one.
+        assert review.round_number == 1
+        assert review.state == schemas.ReviewState.awaiting_review.value
 
     @pytest.mark.asyncio
     async def test_full_loop_accumulates_rounds(self, db):
@@ -209,6 +218,158 @@ class TestRoundArithmetic:
             "resubmitted",
             "approved",
         ]
+
+
+class TestPushAfterApproval:
+    """
+    An approval describes a diff. When the diff changes, the approval no
+    longer covers it.
+
+    This is the one path that writes to a default branch with nobody in the
+    loop: `automerge.sweep_once` re-evaluates the gate every minute, so a
+    pull request left `approved` after a push gets merged carrying commits no
+    human ever read. Nothing about that is visible afterwards -- the merge
+    looks exactly like an approved one.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_push_withdraws_the_approval(self, db):
+        await review_flow.record_review_submitted(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR,
+            review_state="approved", reviewer="senior-dev", body="",
+        )
+
+        review = review_flow.record_resubmission(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR, head_sha="newsha"
+        )
+
+        assert review is not None
+        assert review.state == schemas.ReviewState.awaiting_review.value
+
+    @pytest.mark.asyncio
+    async def test_the_merge_gate_closes_again(self, db):
+        """The property that actually matters: unreviewed code cannot merge."""
+        await review_flow.record_review_submitted(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR,
+            review_state="approved", reviewer="senior-dev", body="",
+        )
+
+        review = db.query(models.PRReview).one()
+        allowed, _ = review_flow.evaluate_merge_gate(
+            review, None, "success", [], True
+        )
+        assert allowed is True
+
+        review_flow.record_resubmission(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR, head_sha="newsha"
+        )
+
+        db.refresh(review)
+        allowed, blockers = review_flow.evaluate_merge_gate(
+            review, None, "success", [], True
+        )
+        assert allowed is False
+        assert any("not approved" in b for b in blockers)
+
+    @pytest.mark.asyncio
+    async def test_it_opens_a_new_round(self, db):
+        """A re-review after approval is a genuine extra trip."""
+        await review_flow.record_review_submitted(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR,
+            review_state="approved", reviewer="senior-dev", body="",
+        )
+
+        review = review_flow.record_resubmission(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR, head_sha="newsha"
+        )
+
+        assert review.round_number == 2
+
+    @pytest.mark.asyncio
+    async def test_re_approving_lets_it_merge_again(self, db):
+        """The withdrawal is not permanent; it just has to be earned again."""
+        await review_flow.record_review_submitted(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR,
+            review_state="approved", reviewer="senior-dev", body="",
+        )
+        review_flow.record_resubmission(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR, head_sha="newsha"
+        )
+        await review_flow.record_review_submitted(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR,
+            review_state="approved", reviewer="senior-dev", body="",
+        )
+
+        review = db.query(models.PRReview).one()
+        allowed, _ = review_flow.evaluate_merge_gate(
+            review, None, "success", [], True
+        )
+        assert allowed is True
+
+    @pytest.mark.asyncio
+    async def test_a_push_after_merge_changes_nothing(self, db):
+        """
+        A merged pull request is terminal. A push to its branch afterwards
+        belongs to whatever comes next, not to a review that is over.
+        """
+        await review_flow.record_review_submitted(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR,
+            review_state="approved", reviewer="senior-dev", body="",
+        )
+        review_flow.record_merged(db, owner_id=OWNER, repo=REPO, pr_number=PR)
+
+        assert review_flow.record_resubmission(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR, head_sha="newsha"
+        ) is None
+
+        review = db.query(models.PRReview).one()
+        assert review.state == schemas.ReviewState.merged.value
+
+
+class TestResubmissionMessaging:
+    """
+    A withdrawn approval reads very differently from "round 3 is ready".
+    Reporting both the same way buries the one that needs attention on a pull
+    request the reviewer thought was finished.
+    """
+
+    def test_a_revoked_approval_says_so(self, db):
+        review = models.PRReview(
+            repo=REPO, pr_number=PR, pr_title="Add retry logic",
+            state=schemas.ReviewState.awaiting_review.value,
+            round_number=2, owner_id=OWNER,
+        )
+        text = review_flow.format_review_notification(
+            review, schemas.ReviewOutcome.resubmitted, "senior-dev", [],
+            ["senior-dev"], resubmit_reason="approval_revoked",
+        )
+
+        assert "after approval" in text.lower()
+        assert "withdrawn" in text.lower()
+
+    def test_an_update_mid_review_says_so(self, db):
+        review = models.PRReview(
+            repo=REPO, pr_number=PR, state=schemas.ReviewState.awaiting_review.value,
+            round_number=1, owner_id=OWNER,
+        )
+        text = review_flow.format_review_notification(
+            review, schemas.ReviewOutcome.resubmitted, "senior-dev", [],
+            ["senior-dev"], resubmit_reason="updated_during_review",
+        )
+
+        assert "updated while you were reviewing" in text.lower()
+
+    def test_an_ordinary_round_is_unchanged(self, db):
+        review = models.PRReview(
+            repo=REPO, pr_number=PR, state=schemas.ReviewState.awaiting_review.value,
+            round_number=3, owner_id=OWNER,
+        )
+        text = review_flow.format_review_notification(
+            review, schemas.ReviewOutcome.resubmitted, "senior-dev", [],
+            ["senior-dev"],
+        )
+
+        assert "ready for round 3" in text.lower()
 
 
 class TestReviewRequested:
