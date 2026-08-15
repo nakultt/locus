@@ -156,9 +156,18 @@ class TestQAPollerRecordsHealth:
         monkeypatch.setattr(
             qa_email_poller, "SessionLocal", lambda: db
         )
+        # The poller resolves a token through google_auth now, so that the
+        # hourly expiry is refreshed rather than read raw.
         monkeypatch.setattr(
             crud, "get_integration_credentials",
             lambda *a, **kw: {"access_token": "tok"},
+        )
+
+        async def _token(*_a, **_kw):
+            return "tok"
+
+        monkeypatch.setattr(
+            qa_email_poller.google_auth, "valid_access_token", _token
         )
 
         async def boom(*_a, **_kw):
@@ -186,9 +195,18 @@ class TestQAPollerRecordsHealth:
         db.commit()
 
         monkeypatch.setattr(qa_email_poller, "SessionLocal", lambda: db)
+        # The poller resolves a token through google_auth now, so that the
+        # hourly expiry is refreshed rather than read raw.
         monkeypatch.setattr(
             crud, "get_integration_credentials",
             lambda *a, **kw: {"access_token": "tok"},
+        )
+
+        async def _token(*_a, **_kw):
+            return "tok"
+
+        monkeypatch.setattr(
+            qa_email_poller.google_auth, "valid_access_token", _token
         )
 
         async def none_waiting(*_a, **_kw):

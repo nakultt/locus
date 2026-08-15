@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 
 import httpx
 
+from app import models
 from app.schemas import (
     FindingDeltaSummary,
     FindingSource,
@@ -34,8 +35,11 @@ from app.schemas import (
     ToolInvocation,
 )
 from app.services import (
+    comms_log,
     finding_diff,
+    full_report,
     github_pr,
+    google_auth,
     google_docs_context,
     linking,
     search_terms,
@@ -377,20 +381,48 @@ async def search_slack_threads(
 async def export_to_google_doc(
     result: PRAnalysisResult,
     docs_config: dict,
+    *,
+    db=None,
+    user_id: int | None = None,
+    timeline_events: list | None = None,
+    review_row=None,
+    timezone_name: str | None = None,
 ) -> str | None:
     """
-    Write the analysis to a Google Doc.
+    Write the full report to a Google Doc.
 
     A PR comment disappears into a closed PR; a Doc is a durable record that
-    can be linked from a ticket or a postmortem.
+    can be linked from a ticket or a postmortem. It carries the whole run
+    rather than the comment's summary -- the senior dev and the testing team
+    are asked to trust a pipeline they did not watch, which is only reasonable
+    if they can read what it actually did.
+
+    Args:
+        timeline_events: The communication log for this PR. Absent, the
+            document still renders; the activity section says nothing was
+            recorded, which is true of the caller rather than of the run.
+        review_row: The review row, for the round history GitHub does not keep.
+
+    The token is refreshed rather than read straight from storage. A Google
+    access token lives an hour and this runs from a background loop, so the
+    stored one is expired for all but the first hour after the user connected
+    Docs -- reading it directly meant every export after that failed with a
+    401, reported as "no document returned".
 
     Returns:
         The document URL, or None if the export failed.
     """
-    credentials = docs_config.get("credentials", {}) or {}
-    access_token = credentials.get("access_token")
+    access_token = await google_auth.valid_access_token(
+        docs_config, db=db, user_id=user_id, service="docs"
+    )
     if not access_token:
-        return None
+        # Distinguished from a failed API call: there is nothing to call with.
+        # A refresh token that Google rejected lands here too, and the only
+        # fix is reconnecting, so say that rather than "no document returned".
+        raise RuntimeError(
+            "Google Docs access token could not be refreshed -- reconnect "
+            "Google Docs in Settings"
+        )
 
     ctx = result.context
     title = f"PR Review — {ctx.repo}#{ctx.pr_number}: {ctx.title}"[:200]
@@ -405,16 +437,33 @@ async def export_to_google_doc(
             json={"title": title},
         )
         if create.status_code != 200:
-            logger.warning("Google Docs create failed: %s", create.status_code)
-            return None
+            # Surfaced rather than swallowed: a 401 here reads identically to
+            # "no document returned", which says nothing about what to fix.
+            logger.warning(
+                "Google Docs create failed: %s %s",
+                create.status_code, create.text[:200],
+            )
+            raise RuntimeError(
+                f"Google Docs create returned {create.status_code}: "
+                f"{create.text[:200]}"
+            )
 
         document_id = create.json().get("documentId")
         if not document_id:
             return None
 
-        # Reuse the Markdown the PR comment uses; Docs stores it as plain text
-        # but the structure stays readable.
-        body = render_pr_comment(result)
+        # The full record, not the PR comment. The comment is short by design
+        # -- read in a diff view while deciding whether to approve -- while
+        # this is what someone reads when they were not there: the requirement,
+        # the discussion, both analysis passes, every review round, and every
+        # message sent or received. Rendered as plain text because Docs stores
+        # it as text; Markdown headings would appear as literal `##`.
+        body = full_report.render(
+            result,
+            events=timeline_events,
+            review=review_row,
+            timezone_name=timezone_name,
+        )
 
         await client.post(
             f"https://docs.googleapis.com/v1/documents/{document_id}:batchUpdate",
@@ -880,6 +929,8 @@ async def analyze_pull_request(
     slack_searched_at: datetime | None = None,
     previous_findings: dict | None = None,
     suppressed: set[tuple[str, str]] | None = None,
+    db=None,
+    owner_id: int | None = None,
 ) -> PRAnalysisResult:
     """
     Run the full PR analysis pipeline.
@@ -1391,7 +1442,42 @@ async def analyze_pull_request(
         docs_config = integration_configs.get("docs") or integration_configs.get("drive")
         if docs_config:
             try:
-                url = await export_to_google_doc(result, docs_config)
+                # The record as it stands when the document is written. The
+                # messages this run is about to send are not in it yet -- they
+                # have not happened -- which is why the review request and the
+                # QA brief carry the link rather than the document carrying
+                # them.
+                timeline_events = []
+                review_row = None
+                if db is not None and owner_id is not None:
+                    try:
+                        timeline_events = comms_log.timeline(
+                            db, owner_id=owner_id, repo=repo,
+                            pr_number=pr_number,
+                            ticket_key=(
+                                result.context.ticket_keys[0]
+                                if result.context.ticket_keys else None
+                            ),
+                        )
+                        review_row = (
+                            db.query(models.PRReview)
+                            .filter(
+                                models.PRReview.repo == repo,
+                                models.PRReview.pr_number == pr_number,
+                                models.PRReview.owner_id == owner_id,
+                            )
+                            .first()
+                        )
+                    except Exception as e:
+                        # The document is worth writing without the history;
+                        # the history is not worth failing the document for.
+                        logger.warning("Could not load history for report: %s", e)
+
+                url = await export_to_google_doc(
+                    result, docs_config, db=db, user_id=owner_id,
+                    timeline_events=timeline_events,
+                    review_row=review_row,
+                )
                 if url:
                     result.doc_url = url
                     _stage(stages, "docs_export", "Write report to Google Docs",
