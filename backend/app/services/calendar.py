@@ -192,7 +192,13 @@ def calendar_list_events(start: str = "today", end: str = "in 7 days") -> str:
             f" [id: {event.get('id')}]"
         )
 
-    return f"Events between {start} and {end}:\n" + "\n".join(lines)
+    # The zone is named once in the header rather than on every row. These
+    # times are already converted into it; without saying which zone, a model
+    # reading this list has no way to tell and neither does the user.
+    return (
+        f"Events between {start} and {end} (times in {tz_name}):\n"
+        + "\n".join(lines)
+    )
 
 
 @tool("calendar_move_event", args_schema=MoveEventInput)
@@ -308,7 +314,9 @@ def calendar_create_event(
         headers = _get_auth_headers()
         if not headers:
             return "Error: Google Calendar is not configured or token expired. Please reconnect your Google account."
-        
+
+        tz_name = _calendar_config.get("timezone") or DEFAULT_TIMEZONE
+
         # Parse start time
         start_dt = _parse_datetime(start_datetime)
         
@@ -318,19 +326,15 @@ def calendar_create_event(
         else:
             end_dt = start_dt + timedelta(hours=1)
         
-        # Build event payload
+        # Build event payload. The zone travels with the timestamp rather than
+        # being converted to UTC, so a recurring event stays correct across a
+        # DST shift.
         event = {
             "summary": title,
-            "start": {
-                "dateTime": start_dt.isoformat(),
-                "timeZone": _calendar_config.get("timezone") or DEFAULT_TIMEZONE
-            },
-            "end": {
-                "dateTime": end_dt.isoformat(),
-                "timeZone": _calendar_config.get("timezone") or DEFAULT_TIMEZONE
-            }
+            "start": to_google_datetime(start_dt, tz_name),
+            "end": to_google_datetime(end_dt, tz_name),
         }
-        
+
         # Add attendees if provided
         if attendees:
             event["attendees"] = [
@@ -352,7 +356,7 @@ def calendar_create_event(
                 result = response.json()
                 return f"""✅ Event created successfully!
 📅 {title}
-🕐 {start_dt.strftime('%B %d, %Y at %I:%M %p')} - {end_dt.strftime('%I:%M %p')}
+🕐 {start_dt.strftime('%B %d, %Y at %I:%M %p')} - {end_dt.strftime('%I:%M %p')} ({tz_name})
 🆔 Event ID: {result.get('id', 'N/A')}
 🔗 {result.get('htmlLink', 'Link not available')}"""
             else:
@@ -386,19 +390,17 @@ def calendar_update_event(
         if title:
             update_data["summary"] = title
         
+        tz_name = _calendar_config.get("timezone") or DEFAULT_TIMEZONE
+
         if start_datetime:
-            start_dt = _parse_datetime(start_datetime)
-            update_data["start"] = {
-                "dateTime": start_dt.isoformat(),
-                "timeZone": _calendar_config.get("timezone") or DEFAULT_TIMEZONE
-            }
-        
+            update_data["start"] = to_google_datetime(
+                _parse_datetime(start_datetime), tz_name
+            )
+
         if end_datetime:
-            end_dt = _parse_datetime(end_datetime)
-            update_data["end"] = {
-                "dateTime": end_dt.isoformat(),
-                "timeZone": _calendar_config.get("timezone") or DEFAULT_TIMEZONE
-            }
+            update_data["end"] = to_google_datetime(
+                _parse_datetime(end_datetime), tz_name
+            )
         
         if not update_data:
             return "❌ No update fields provided. Please specify at least one field to update (title, start_datetime, or end_datetime)."
