@@ -211,3 +211,82 @@ class TestCloseDeferredToSignoff:
 
         assert spies["jira"] == ["LOC-1"]
         assert spies["github"] == [8]
+
+
+class TestEmailDeliveryIsReportedHonestly:
+    """
+    A rejected QA email must not be recorded as delivered.
+
+    `qa_notified` is set by whichever channel succeeded first, so a working
+    Slack post made a Gmail 401 read as "sent" in the log and in the pipeline
+    timeline. The email's own evidence is its message id, exactly as the Slack
+    post's is its thread timestamp.
+    """
+
+    def test_a_rejected_send_returns_no_message_id(self):
+        """
+        The distinction the log needs. Gmail returns an id only when it
+        accepted the message, so its absence is the failure signal.
+        """
+        outcome = schemas.MergeActionResult(
+            qa_notified=True,          # set by the Slack post
+            qa_thread_ts="1786803322.391159",
+            qa_email_body="Ready to test ...",
+            qa_email_to=["qa@example.com"],
+            qa_email_message_id=None,  # Gmail rejected it
+        )
+
+        # What the comms row now records, rather than qa_notified.
+        assert bool(outcome.qa_email_message_id) is False
+        assert outcome.qa_notified is True
+
+    def test_a_delivered_send_carries_its_id(self):
+        outcome = schemas.MergeActionResult(
+            qa_notified=True,
+            qa_email_body="Ready to test ...",
+            qa_email_message_id="<qa-acme-widget-7-abc@locus.local>",
+        )
+
+        assert bool(outcome.qa_email_message_id) is True
+
+    @pytest.mark.asyncio
+    async def test_a_401_is_reported_as_a_failure(self, monkeypatch):
+        """Gmail rejecting the send must not return ok."""
+        class _Response:
+            status_code = 401
+            text = "invalid credentials"
+
+        class _Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def post(self, *a, **kw):
+                return _Response()
+
+        monkeypatch.setattr(
+            merge_actions.httpx, "AsyncClient", lambda **kw: _Client()
+        )
+
+        async def _token(*a, **kw):
+            return "tok"
+
+        monkeypatch.setattr(
+            merge_actions.google_auth, "valid_access_token", _token
+        )
+
+        ok, detail, message_id, _body = await merge_actions.email_test_team(
+            {"credentials": {"access_token": "tok"}},
+            ["qa@example.com"],
+            PRAnalysisResult(context=schemas.PRContext(
+                repo="acme/widget", pr_number=7, title="t",
+                author="d", url="u",
+            )),
+            "brief",
+        )
+
+        assert ok is False
+        assert message_id is None
+        assert "401" in detail

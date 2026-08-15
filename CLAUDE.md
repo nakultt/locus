@@ -175,6 +175,40 @@ than letting the repo value win: a repo that pins its own spec should still be r
 the org's standards, and overriding would silently drop them. This is the single exception to the
 "repo wins" rule below, and `tests/test_agent_defaults.py` pins it.
 
+**The Google Doc is the whole record; the PR comment is the summary.** They are different
+documents for different readers. The comment is read in a diff view by someone deciding whether
+to approve, so it is short. The report is read by the senior dev and the testing team, who are
+asked to trust a verdict produced by a pipeline they did not watch — reasonable only if they
+can read what it actually did. `app/services/full_report.render` therefore carries the
+requirement, the Slack discussion, both analysis passes, the findings diff, every review round
+with the reviewer's own words, every message sent and received in both loops, and every
+pipeline step including the skipped and failed ones. Three rules: searches that matched nothing
+are included, because a search that found nothing and one that never ran produce identical
+silence everywhere else and only one means the context is missing; a failed send is labelled
+`DELIVERY FAILED`, since a message nobody received looks exactly like one nobody answered; and
+nothing in the document is model-written, so it cannot be wrong the way a summary can. Output
+is plain text — Docs stores text rather than parsing Markdown, so `##` would render literally.
+The timeline is read at export time, which is before this run's own outward messages exist;
+that is why the review request and the QA brief carry the link rather than the document
+carrying them. `tests/test_full_report.py` pins it.
+
+**Google access tokens are refreshed, never read raw.** A Google access token lives an hour;
+the refresh token beside it lives until revoked. Every loop here runs indefinitely, so reading
+`credentials["access_token"]` directly worked for exactly one hour after the user connected the
+integration and returned 401 forever after — and that failure is indistinguishable from the
+integration being broken, which is how the Docs export came to report "no document returned"
+and QA emails silently stopped going out. `app/services/google_auth.valid_access_token` is the
+one async refresh path; the per-tool modules keep their own synchronous copies bound to their
+module singletons, and nothing outside a tool body should grow a fourth. Two rules: the
+refreshed token is written back to the database, since a refresh that lives only in memory is
+spent on one call and the next loop iteration starts expired again; and the refresh token is
+carried forward explicitly, because Google does not return it on a refresh and dropping it
+turns an hourly refresh into a one-time one. `get_integration_configs` attaches
+`GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` to every Google service config — they are
+environment configuration rather than per-user data, and without them there is nothing to
+refresh with. A failed export raises with the status and body rather than returning None: the
+silent None is what made this take a day to find. `tests/test_google_auth.py` pins it.
+
 **A work item can close on QA sign-off instead of at merge.** "Merged" and "done" are different
 claims, and the pipeline exists because a human still confirms the second. Closing at merge is
 right whenever QA passes and wrong in both cases that need attention — a rejected change, and a

@@ -20,7 +20,8 @@ import httpx
 
 from app import crud, models
 from app.database import SessionLocal
-from app.services import comms_log, integration_health
+from app.dependencies import get_integration_configs
+from app.services import comms_log, google_auth, integration_health
 from app.services.agent_settings import resolve_settings
 from app.services.qa_feedback import handle_qa_reply
 
@@ -164,8 +165,15 @@ async def poll_once() -> int:
             by_owner.setdefault(thread.owner_id, {})[thread.email_message_id] = thread
 
         for owner_id, threads in by_owner.items():
-            gmail_credentials = crud.get_integration_credentials(db, owner_id, "gmail")
-            access_token = (gmail_credentials or {}).get("access_token")
+            # Refreshed, not read raw. This loop runs indefinitely and a Google
+            # access token lives an hour, so reading the stored one meant every
+            # poll after the first hour failed -- which looks exactly like the
+            # testing team not replying.
+            configs = get_integration_configs(db, owner_id)
+            access_token = await google_auth.valid_access_token(
+                configs.get("gmail") or {},
+                db=db, user_id=owner_id, service="gmail",
+            )
             if not access_token:
                 continue
 

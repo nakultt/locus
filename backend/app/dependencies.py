@@ -6,12 +6,23 @@ derives its user from the verified JWT here rather than from a client-supplied
 `user_id`, which was previously spoofable by changing an integer.
 """
 
+import os
+
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from app import crud, models, security
 from app.database import get_db
+
+# Services authenticated through the shared Google OAuth app. Their stored
+# access tokens expire hourly and are refreshed with the client credentials.
+GOOGLE_SERVICES = {
+    "gmail", "calendar", "docs", "sheets", "slides", "drive", "forms", "meet",
+}
+
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 
 # auto_error=False so a missing header produces our 401 rather than FastAPI's
 # generic one, keeping the message consistent with an invalid token.
@@ -89,6 +100,22 @@ def get_integration_configs(
         )
         if credentials:
             config["credentials"] = credentials
+
+            # A Google access token lives an hour; a refresh token lives until
+            # revoked. Refreshing needs the OAuth client credentials, which are
+            # environment configuration rather than per-user data, so they are
+            # attached here -- the one place every caller builds a config.
+            # Without them a background loop running more than an hour after
+            # the user last connected fails with a 401 it cannot recover from,
+            # which is indistinguishable from the integration being broken.
+            if (
+                integration.service_name in GOOGLE_SERVICES
+                and credentials.get("refresh_token")
+                and GOOGLE_CLIENT_ID
+                and GOOGLE_CLIENT_SECRET
+            ):
+                config["client_id"] = GOOGLE_CLIENT_ID
+                config["client_secret"] = GOOGLE_CLIENT_SECRET
 
         if config:
             configs[integration.service_name] = config

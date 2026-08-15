@@ -16,6 +16,7 @@ from uuid import uuid4
 import httpx
 
 from app.schemas import MergeActionResult, PRAnalysisResult
+from app.services import google_auth
 from app.services.llm import get_llm
 
 logger = logging.getLogger(__name__)
@@ -287,6 +288,9 @@ async def email_test_team(
     recipients: list[str],
     result: PRAnalysisResult,
     brief: str,
+    *,
+    db=None,
+    user_id: int | None = None,
 ) -> tuple[bool, str, str | None, str]:
     """
     Send the QA notification via the Gmail API.
@@ -305,8 +309,12 @@ async def email_test_team(
     import base64
     from email.message import EmailMessage
 
-    credentials = gmail_config.get("credentials", {}) or {}
-    access_token = credentials.get("access_token")
+    # Refreshed rather than read straight from storage: a Google access token
+    # lives an hour and this runs from a merge that may land days after the
+    # user connected Gmail, so the stored one is usually dead.
+    access_token = await google_auth.valid_access_token(
+        gmail_config, db=db, user_id=user_id, service="gmail"
+    )
     body = _qa_email_text(result, brief)
 
     if not access_token:
@@ -413,6 +421,8 @@ async def run_merge_actions(
     qa_slack_channel: str | None = None,
     review_asks: list[str] | None = None,
     close_on_qa_signoff: bool = False,
+    db=None,
+    user_id: int | None = None,
 ) -> MergeActionResult:
     """
     Apply post-merge actions.
@@ -491,7 +501,8 @@ async def run_merge_actions(
             try:
                 brief = outcome.qa_brief or await draft_qa_brief(result, review_asks)
                 ok, detail, message_id, body = await email_test_team(
-                    gmail_config, qa_recipients, result, brief
+                    gmail_config, qa_recipients, result, brief,
+                    db=db, user_id=user_id,
                 )
                 # Recorded whether or not the send succeeded: a QA email that
                 # failed to go out is more important to surface than one that

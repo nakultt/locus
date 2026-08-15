@@ -1340,6 +1340,10 @@ async def run_pr_job(job_id: int) -> None:
             repo=job.repo,
             pr_number=job.pr_number,
             integration_configs=integration_configs,
+            # For refreshing the Google token the Docs export needs, and
+            # writing the refreshed one back so the next run starts valid.
+            db=db,
+            owner_id=job.owner_id,
             # A merged PR is closed; re-commenting on it adds noise. The merge
             # actions and the QA email carry the outcome instead.
             post_comment=not is_merge,
@@ -1543,6 +1547,8 @@ async def run_pr_job(job_id: int) -> None:
                 qa_slack_channel=settings.slack_channel,
                 review_asks=review_asks,
                 close_on_qa_signoff=settings.close_on_qa_signoff,
+                db=db,
+                user_id=job.owner_id,
             )
 
             # Surface merge outcomes in the same stage timeline as the reads.
@@ -1563,15 +1569,33 @@ async def run_pr_job(job_id: int) -> None:
                 ),
                 detail="; ".join(merge_result.issues_closed) or "no issues to close",
             ))
+            # Named per channel rather than "Slack and/or email". The vague
+            # wording let a rejected email hide behind a successful Slack post,
+            # which is the reading that matters: the testing team may include
+            # people who only ever see one of the two.
+            qa_delivered = []
+            if merge_result.qa_thread_ts:
+                qa_delivered.append("Slack thread posted")
+            if merge_result.qa_email_message_id:
+                qa_delivered.append(
+                    f"email sent to {', '.join(merge_result.qa_email_to)}"
+                )
+            qa_attempted_email = bool(merge_result.qa_email_body)
+            if qa_attempted_email and not merge_result.qa_email_message_id:
+                qa_delivered.append("email FAILED")
+
             result.stages.append(schemas.PipelineStage(
                 key="notify_qa", label="Notify test team", kind="write",
                 state=(
-                    schemas.StageState.done if merge_result.qa_notified
+                    schemas.StageState.done
+                    if merge_result.qa_thread_ts
+                    and (not qa_attempted_email or merge_result.qa_email_message_id)
+                    else schemas.StageState.failed if qa_delivered
                     else schemas.StageState.skipped
                 ),
                 detail=(
-                    "Slack thread and/or email sent" if merge_result.qa_notified
-                    else "no QA channel or recipients configured"
+                    "; ".join(qa_delivered)
+                    or "no QA channel or recipients configured"
                 ),
             ))
 
@@ -1597,7 +1621,12 @@ async def run_pr_job(job_id: int) -> None:
                     subject=merge_out.qa_email_subject,
                     body=merge_out.qa_email_body,
                     outcome="ready_to_test",
-                    succeeded=merge_out.qa_notified,
+                    # This row's own evidence, not `qa_notified` -- that flag
+                    # is shared with the Slack post, so a successful thread
+                    # made a rejected email read as delivered. The message id
+                    # exists only when Gmail accepted the send, exactly as
+                    # `qa_thread_ts` is the Slack post's own proof.
+                    succeeded=bool(merge_out.qa_email_message_id),
                 )
 
             # Record the thread so a tester's reply can be traced back to the
