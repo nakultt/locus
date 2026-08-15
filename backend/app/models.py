@@ -502,9 +502,13 @@ class RepoWebhook(Base):
     context_doc_ids = Column(Text, nullable=True)
     # Test team addresses emailed when a PR merges, newline-separated.
     qa_emails = Column(Text, nullable=True)
-    # Jira status to move tickets to on merge. Forward-only; see merge_actions.
+    # Jira status to move tickets to. Forward-only; see merge_actions.
     jira_done_status = Column(String(64), nullable=False, default="Done")
     close_issues_on_merge = Column(Integer, nullable=False, default=1)
+    # Hold the work item open until the testing team signs off, rather than
+    # closing it at merge. See qa_feedback for why this is the safer default
+    # for teams whose QA loop actually answers.
+    close_on_qa_signoff = Column(Integer, nullable=False, default=0)
     # GitHub logins of the senior devs who review this repo, newline-separated.
     # Used to address review notifications; reviews from anyone else are still
     # recorded, since GitHub does not restrict who may review.
@@ -555,6 +559,7 @@ class PRAgentDefaults(Base):
     qa_emails = Column(Text, nullable=True)  # newline-separated
     jira_done_status = Column(String(64), nullable=False, default="Done")
     close_issues_on_merge = Column(Integer, nullable=False, default=1)
+    close_on_qa_signoff = Column(Integer, nullable=False, default=0)
     reviewers = Column(Text, nullable=True)  # newline-separated GitHub logins
     reviewer_contacts = Column(Text, nullable=True)
     review_slack_channel = Column(String(255), nullable=True)

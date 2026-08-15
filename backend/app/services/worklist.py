@@ -25,7 +25,7 @@ is very hard to win back. The sources below are deliberately few.
 """
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.orm import Session
 
@@ -37,6 +37,12 @@ logger = logging.getLogger(__name__)
 # makes an item actionable; a second and third are usually the same request
 # restated.
 MAX_QUOTES = 3
+
+# How long a testing thread may go unanswered before it is something waiting on
+# you. Long enough that an ordinary weekend or a busy day does not raise it --
+# QA replying next morning is normal -- and short enough that a forgotten thread
+# surfaces while the change is still fresh.
+QA_SILENT_DAYS = 3
 
 
 def _age_hours(stamp: datetime | None) -> float:
@@ -61,6 +67,31 @@ def _task_key(review: models.PRReview) -> str:
         if line.strip()
     ]
     return keys[0] if keys else f"{review.repo}#{review.pr_number}"
+
+
+def _thread_key(db: Session, thread: models.QAThread) -> str:
+    """
+    The work item a QA thread belongs to.
+
+    A thread stores no ticket key of its own, so this reads the one the
+    analysis recorded on the review row. Grouping matters here: without it an
+    unanswered thread would open a second card for a ticket that already has
+    one, and the board would show one piece of work as two.
+    """
+    review = (
+        db.query(models.PRReview)
+        .filter(
+            models.PRReview.repo == thread.repo,
+            models.PRReview.pr_number == thread.pr_number,
+            models.PRReview.owner_id == thread.owner_id,
+        )
+        .first()
+    )
+
+    if review is not None:
+        return _task_key(review)
+
+    return f"{thread.repo}#{thread.pr_number}"
 
 
 def build(db: Session, *, owner_id: int) -> schemas.Worklist:
@@ -211,6 +242,54 @@ def build(db: Session, *, owner_id: int) -> schemas.Worklist:
             actor=event.participant,
             age_hours=_age_hours(event.created_at),
             from_human=True,
+        ))
+
+    # --- Unanswered testing threads --------------------------------------
+    #
+    # The safety net for closing on sign-off rather than at merge. A work item
+    # now stays open until a tester replies, so a thread nobody answers would
+    # otherwise leave it open forever with nothing chasing it -- trading a
+    # ticket that closed too early for one that never closes, which is no
+    # better for being quieter. Only unresolved threads count: a resolved one
+    # got its answer.
+    stale_cutoff = datetime.now(UTC) - timedelta(days=QA_SILENT_DAYS)
+    silent_threads = (
+        db.query(models.QAThread)
+        .filter(
+            models.QAThread.owner_id == owner_id,
+            models.QAThread.resolved == 0,
+            models.QAThread.created_at < stale_cutoff,
+        )
+        .all()
+    )
+
+    for thread in silent_threads:
+        # A thread that was answered "broken" is already reported above as a
+        # rejection; listing it again as unanswered would double-count one
+        # conversation.
+        if (thread.repo, thread.pr_number) in seen_rejections:
+            continue
+
+        key = _thread_key(db, thread)
+        task = task_for(key, thread.repo, None)
+        if thread.pr_number not in task.pull_requests:
+            task.pull_requests.append(thread.pr_number)
+
+        days = int(_age_hours(thread.created_at) / 24)
+        task.items.append(schemas.WorklistItem(
+            kind=schemas.WorklistKind.qa_unanswered,
+            blocked_on_you=True,
+            repo=thread.repo,
+            pr_number=thread.pr_number,
+            pr_url=thread.pr_url,
+            headline=(
+                f"No word from the testing team in {days} days"
+                if days else "The testing team has not replied"
+            ),
+            detail=["The work item stays open until someone signs off."],
+            age_hours=_age_hours(thread.created_at),
+            # Nobody said this; it is the absence of anyone saying anything.
+            from_human=False,
         ))
 
     # --- Delivery --------------------------------------------------------

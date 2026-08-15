@@ -140,3 +140,142 @@ class TestReplyRouting:
         assert outcome["verdict"] == "broken"
         assert outcome["reopened_tickets"] == ["LOC-1 reopened"]
         assert outcome["reopened_issues"] == ["Reopened #5"]
+
+
+class TestCloseOnSignoff:
+    """
+    A pass closes the work item, when the merge deferred closing to here.
+
+    Closing at merge asserts the change is done before anyone has checked. It
+    is right whenever QA passes and wrong in both cases that need attention --
+    a rejection, and a thread nobody answers -- and a ticket closed while a bug
+    is live drops off the board, which is where someone would look for it.
+    """
+
+    @pytest.fixture
+    def stub_classifier(self, monkeypatch):
+        def _stub(verdict: Verdict, reason: str = "test"):
+            async def fake(_text):
+                return verdict, reason
+            monkeypatch.setattr(
+                "app.services.qa_feedback.classify_reply", fake
+            )
+        return _stub
+
+    @pytest.fixture
+    def spy_closers(self, monkeypatch):
+        calls = {"jira": [], "github": []}
+
+        async def fake_jira(config, key, status):
+            calls["jira"].append((key, status))
+            return True, f"{key} -> {status}"
+
+        async def fake_gh(token, repo, number, pr_number):
+            calls["github"].append((repo, number, pr_number))
+            return True, f"Closed #{number}"
+
+        monkeypatch.setattr(
+            "app.services.qa_feedback.transition_jira_ticket", fake_jira
+        )
+        monkeypatch.setattr(
+            "app.services.qa_feedback.close_github_issue", fake_gh
+        )
+        return calls
+
+    @pytest.mark.asyncio
+    async def test_signoff_closes_ticket_and_issue(
+        self, stub_classifier, spy_closers
+    ):
+        stub_classifier(Verdict.WORKS)
+
+        outcome = await handle_qa_reply(
+            "everything worked, testing success",
+            {"jira": {"api_key": "k"}, "github": {"api_key": "t"}},
+            "acme/api", "url", ["LOC-1"], [5],
+            done_status="Done", pr_number=7, close_on_signoff=True,
+        )
+
+        assert spy_closers["jira"] == [("LOC-1", "Done")]
+        assert spy_closers["github"] == [("acme/api", 5, 7)]
+        assert outcome["closed_tickets"] == ["LOC-1 -> Done"]
+        assert outcome["closed_issues"] == ["Closed #5"]
+
+    @pytest.mark.asyncio
+    async def test_nothing_closes_when_the_merge_already_did(
+        self, stub_classifier, spy_closers
+    ):
+        """
+        The work item was closed at merge. Re-closing it would at best no-op
+        and at worst undo a reopen someone did deliberately.
+        """
+        stub_classifier(Verdict.WORKS)
+
+        outcome = await handle_qa_reply(
+            "works fine",
+            {"jira": {"api_key": "k"}, "github": {"api_key": "t"}},
+            "acme/api", "url", ["LOC-1"], [5],
+            close_on_signoff=False,
+        )
+
+        assert spy_closers["jira"] == []
+        assert spy_closers["github"] == []
+        assert outcome["closed_tickets"] == []
+
+    @pytest.mark.asyncio
+    async def test_a_failure_still_reopens_and_closes_nothing(
+        self, stub_classifier, spy_closers, monkeypatch
+    ):
+        reopened = []
+
+        async def fake_reopen_jira(config, key, reason, status):
+            reopened.append(key)
+            return True, f"{key} reopened"
+
+        monkeypatch.setattr(
+            "app.services.qa_feedback.reopen_jira_ticket", fake_reopen_jira
+        )
+        stub_classifier(Verdict.BROKEN)
+
+        outcome = await handle_qa_reply(
+            "the heading is gone",
+            {"jira": {"api_key": "k"}},
+            "acme/api", "url", ["LOC-1"], [],
+            close_on_signoff=True,
+        )
+
+        assert reopened == ["LOC-1"]
+        assert spy_closers["jira"] == []
+        assert outcome["closed_tickets"] == []
+
+    @pytest.mark.asyncio
+    async def test_chatter_closes_nothing(self, stub_classifier, spy_closers):
+        """"thanks!" is not a sign-off."""
+        stub_classifier(Verdict.NOT_FEEDBACK)
+
+        await handle_qa_reply(
+            "thanks!", {"jira": {"api_key": "k"}}, "acme/api", "url",
+            ["LOC-1"], [5], close_on_signoff=True,
+        )
+
+        assert spy_closers["jira"] == []
+        assert spy_closers["github"] == []
+
+    @pytest.mark.asyncio
+    async def test_a_failing_close_is_reported_not_raised(
+        self, stub_classifier, monkeypatch
+    ):
+        async def boom(config, key, status):
+            raise RuntimeError("Jira is down")
+
+        monkeypatch.setattr(
+            "app.services.qa_feedback.transition_jira_ticket", boom
+        )
+        stub_classifier(Verdict.WORKS)
+
+        outcome = await handle_qa_reply(
+            "works", {"jira": {"api_key": "k"}}, "acme/api", "url",
+            ["LOC-1"], [], close_on_signoff=True,
+        )
+
+        assert outcome["closed_tickets"] == []
+        assert any("Jira is down" in e for e in outcome["errors"])

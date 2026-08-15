@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from app import crud, models
 from app.database import get_db
 from app.services import comms_log
+from app.services.agent_settings import resolve_settings
 from app.services.qa_feedback import handle_qa_reply
 
 logger = logging.getLogger(__name__)
@@ -179,6 +180,19 @@ async def slack_events(
         if config:
             integration_configs[integration.service_name] = config
 
+    # A sign-off closes the work item, so this needs the same resolved settings
+    # the merge path used -- which status counts as done, and whether closing
+    # was deferred to here at all.
+    registration = (
+        db.query(models.RepoWebhook)
+        .filter(
+            models.RepoWebhook.repo == thread.repo,
+            models.RepoWebhook.owner_id == thread.owner_id,
+        )
+        .first()
+    )
+    settings = resolve_settings(db, thread.owner_id, registration)
+
     try:
         outcome = await handle_qa_reply(
             reply_text=event.get("text", ""),
@@ -189,6 +203,9 @@ async def slack_events(
             issue_numbers=json.loads(thread.issue_numbers_json or "[]"),
             slack_channel=channel,
             thread_ts=thread_ts,
+            done_status=settings.jira_done_status,
+            pr_number=thread.pr_number,
+            close_on_signoff=settings.close_on_qa_signoff,
         )
     except Exception as e:
         logger.exception("QA reply handling failed for %s", thread.repo)

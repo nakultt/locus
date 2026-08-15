@@ -612,6 +612,8 @@ export interface RepoRegistration {
   qa_emails?: string[];
   jira_done_status?: string;
   close_issues_on_merge?: boolean;
+  /** Hold the ticket and issues open until the testing team signs off. */
+  close_on_qa_signoff?: boolean;
   /** GitHub logins expected to review this repo. */
   reviewers?: string[];
   /** "login, @slack, email" per line. */
@@ -820,6 +822,7 @@ export interface PRActivity {
 export type WorklistKind =
   | "changes_requested"
   | "qa_rejected"
+  | "qa_unanswered"
   | "approved_not_merged"
   | "delivery_failed"
   | "awaiting_review";
@@ -906,7 +909,8 @@ export async function registerRepo(
   reviewSlackChannel?: string,
   reviewerContacts?: string,
   autoMergeOnApproval = false,
-  mergeMethod: MergeMethod = "squash"
+  mergeMethod: MergeMethod = "squash",
+  closeOnQaSignoff = false
 ): Promise<RepoRegistration> {
   return apiRequest<RepoRegistration>("/webhooks/repos", {
     method: "POST",
@@ -918,6 +922,7 @@ export async function registerRepo(
       qa_emails: qaEmails,
       jira_done_status: jiraDoneStatus,
       close_issues_on_merge: closeIssuesOnMerge,
+      close_on_qa_signoff: closeOnQaSignoff,
       reviewers,
       reviewer_contacts: reviewerContacts || null,
       review_slack_channel: reviewSlackChannel || null,
@@ -935,6 +940,7 @@ export interface PRAgentDefaults {
   qa_emails: string[];
   jira_done_status: string;
   close_issues_on_merge: boolean;
+  close_on_qa_signoff: boolean;
   reviewers: string[];
   reviewer_contacts?: string | null;
   review_slack_channel?: string | null;
@@ -988,6 +994,7 @@ export type TaskSource = "github" | "jira";
  */
 export type TaskStage =
   | "assigned"
+  | "branch_created"
   | "in_progress"
   | "analyzed"
   | "in_review"
@@ -1002,6 +1009,18 @@ export interface TaskStageStatus {
   label: string;
   state: StageState;
   detail?: string | null;
+}
+
+/**
+ * A branch linked to an issue through GitHub's Development panel.
+ *
+ * Only affirmative links appear -- the "create a branch" button or the
+ * `createLinkedBranch` mutation. A branch that merely names the issue is not
+ * one of these and is not shown as one.
+ */
+export interface LinkedBranch {
+  name: string;
+  repo?: string | null;
 }
 
 export interface TaskPullRequest {
@@ -1029,6 +1048,13 @@ export interface TaskCard {
   stage: TaskStage;
   stages: TaskStageStatus[];
   pull_requests: TaskPullRequest[];
+
+  /**
+   * Branches linked in GitHub's Development panel. The only evidence work has
+   * started before a pull request exists -- without it the card reads as
+   * untouched while someone is actively writing the code.
+   */
+  linked_branches: LinkedBranch[];
 
   items: WorklistItem[];
   needs_you: boolean;

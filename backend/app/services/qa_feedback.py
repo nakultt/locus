@@ -2,8 +2,18 @@
 QA feedback handling.
 
 After a PR merges Locus notifies the test team. When a tester replies, this
-decides whether the reply reports a failure -- and if so reopens the ticket and
-the linked issues.
+decides what the reply says about the change: a pass closes the ticket and the
+linked issues, a failure reopens them.
+
+Closing happens here rather than at merge. The two are different claims --
+"merged" says the code landed, "done" says it works -- and this pipeline exists
+because a human still has to confirm the second. Closing optimistically at
+merge is right whenever QA passes and wrong in both cases that need attention:
+a rejected change and an unanswered thread. A ticket closed while a bug is
+still live disappears from the board, which is the one place anyone would look
+for it. The cost of moving it here is that a thread nobody answers leaves the
+ticket open, so `worklist` surfaces a stale QA thread as something waiting on
+you.
 
 The classifier runs on a bare LLM with no tools bound. Reply text is written by
 whoever can post in the channel, and the outcome drives real state changes, so
@@ -23,6 +33,7 @@ from enum import Enum
 import httpx
 
 from app.services.llm import get_llm
+from app.services.merge_actions import close_github_issue, transition_jira_ticket
 
 logger = logging.getLogger(__name__)
 
@@ -242,9 +253,21 @@ async def handle_qa_reply(
     slack_channel: str | None = None,
     thread_ts: str | None = None,
     reopen_status: str = "In Progress",
+    done_status: str = "Done",
+    pr_number: int = 0,
+    close_on_signoff: bool = False,
 ) -> dict:
     """
     Act on a QA reply.
+
+    A pass closes the work item and a failure reopens it. Both directions live
+    here because the testing team's verdict is what the ticket state is meant
+    to reflect -- the merge only says the code landed.
+
+    Args:
+        done_status: Jira status a passing sign-off moves the ticket to.
+        pr_number: Named in the GitHub issue comment, so the close records
+            which change was verified.
 
     Returns:
         A summary of the verdict and anything that changed.
@@ -256,11 +279,52 @@ async def handle_qa_reply(
         "reason": reason,
         "reopened_tickets": [],
         "reopened_issues": [],
+        "closed_tickets": [],
+        "closed_issues": [],
         "author_notified": False,
         "errors": [],
     }
 
-    if verdict in (Verdict.WORKS, Verdict.NOT_FEEDBACK):
+    if verdict == Verdict.NOT_FEEDBACK:
+        return outcome
+
+    if verdict == Verdict.WORKS:
+        # Only when the merge deferred closing to here. Otherwise the work item
+        # was already closed at merge and re-closing it would either no-op or,
+        # on a ticket someone deliberately reopened, undo their decision.
+        if not close_on_signoff:
+            return outcome
+
+        # Sign-off is what closes the work item, not the merge. "Merged" and
+        # "done" are different claims, and this pipeline exists because they
+        # are: closing at merge asserts completion at the one moment the
+        # pipeline itself does not believe it, and a ticket closed while a bug
+        # is still live is invisible -- it drops off the board, which is where
+        # anyone would look for it.
+        jira_config = integration_configs.get("jira")
+        if jira_config:
+            for key in ticket_keys:
+                try:
+                    ok, detail = await transition_jira_ticket(
+                        jira_config, key, done_status
+                    )
+                    target = "closed_tickets" if ok else "errors"
+                    outcome[target].append(detail)
+                except Exception as e:
+                    outcome["errors"].append(f"{key}: {e}")
+
+        github_token = (integration_configs.get("github") or {}).get("api_key")
+        if github_token:
+            for number in issue_numbers:
+                try:
+                    ok, detail = await close_github_issue(
+                        github_token, repo, number, pr_number
+                    )
+                    target = "closed_issues" if ok else "errors"
+                    outcome[target].append(detail)
+                except Exception as e:
+                    outcome["errors"].append(f"#{number}: {e}")
+
         return outcome
 
     if verdict == Verdict.UNCLEAR:

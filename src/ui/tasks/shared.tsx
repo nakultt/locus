@@ -92,6 +92,11 @@ export const KIND_STYLE: Record<
     className: "text-red-600 dark:text-red-400",
     dot: "bg-red-500",
   },
+  qa_unanswered: {
+    label: "No word from testing",
+    className: "text-amber-600 dark:text-amber-400",
+    dot: "bg-amber-500",
+  },
   approved_not_merged: {
     label: "Approved, not merged",
     className: "text-green-600 dark:text-green-400",

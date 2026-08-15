@@ -646,6 +646,7 @@ class WorklistKind(str, Enum):
     """What kind of attention an item needs."""
     changes_requested = "changes_requested"
     qa_rejected = "qa_rejected"
+    qa_unanswered = "qa_unanswered"
     approved_not_merged = "approved_not_merged"
     delivery_failed = "delivery_failed"
     awaiting_review = "awaiting_review"
@@ -729,6 +730,41 @@ class AssignedItem(BaseModel):
     updated_at: datetime | None = None
 
 
+class LinkedBranch(BaseModel):
+    """
+    A branch linked to an issue through GitHub's Development panel.
+
+    Only branches linked affirmatively -- via the "create a branch" button or
+    the `createLinkedBranch` mutation -- appear here. A branch that merely
+    happens to name the issue is not one of these, and is not treated as one.
+    """
+    name: str
+    repo: str | None = None
+
+
+class LinkedPullRequest(BaseModel):
+    """
+    A pull request GitHub reports as closing an issue.
+
+    Distinct from `TaskPullRequest`, which describes a PR Locus has analyzed
+    and holds review state for. This is the raw edge as GitHub reports it, and
+    may name a pull request Locus has never seen.
+    """
+    repo: str
+    pr_number: int
+    title: str | None = None
+    url: str | None = None
+    state: str | None = None
+    is_draft: bool = False
+    merged: bool = False
+
+
+class IssueLinks(BaseModel):
+    """What GitHub's link graph says is being done about one issue."""
+    branches: list[LinkedBranch] = Field(default_factory=list)
+    pull_requests: list[LinkedPullRequest] = Field(default_factory=list)
+
+
 class TaskStage(str, Enum):
     """
     How far along the automated pipeline one task has travelled.
@@ -741,6 +777,7 @@ class TaskStage(str, Enum):
     and collapsing the two would lose where it stalled.
     """
     assigned = "assigned"
+    branch_created = "branch_created"
     in_progress = "in_progress"
     analyzed = "analyzed"
     in_review = "in_review"
@@ -755,6 +792,7 @@ class TaskStage(str, Enum):
 # "not there yet" rather than being absent from the picture entirely.
 TASK_STAGE_ORDER: list[TaskStage] = [
     TaskStage.assigned,
+    TaskStage.branch_created,
     TaskStage.in_progress,
     TaskStage.analyzed,
     TaskStage.in_review,
@@ -808,6 +846,11 @@ class TaskCard(BaseModel):
     stage: TaskStage = TaskStage.assigned
     stages: list[TaskStageStatus] = Field(default_factory=list)
     pull_requests: list[TaskPullRequest] = Field(default_factory=list)
+
+    # Branches linked through GitHub's Development panel. Carried on the card
+    # because a linked branch with no pull request yet is the only evidence
+    # that work has started, and without it the card reads as untouched.
+    linked_branches: list[LinkedBranch] = Field(default_factory=list)
 
     # Reused verbatim from `worklist.build` so the board and the worklist
     # cannot disagree about what needs attention.
@@ -903,6 +946,13 @@ class RepoRegister(BaseModel):
     close_issues_on_merge: bool = Field(
         True, description="Close linked GitHub issues when the PR merges"
     )
+    close_on_qa_signoff: bool = Field(
+        False,
+        description=(
+            "Hold the ticket and linked issues open until the testing team "
+            "signs off, instead of closing them at merge"
+        ),
+    )
     reviewers: list[str] = Field(
         default_factory=list,
         description="GitHub logins of the senior devs who review this repo",
@@ -956,6 +1006,13 @@ class PRAgentDefaultsUpdate(BaseModel):
     close_issues_on_merge: bool = Field(
         True, description="Close linked GitHub issues when a PR merges"
     )
+    close_on_qa_signoff: bool = Field(
+        False,
+        description=(
+            "Hold work items open until the testing team signs off, for every "
+            "repo"
+        ),
+    )
     reviewers: list[str] = Field(
         default_factory=list,
         description="Default senior-dev GitHub logins, for every repo",
@@ -1004,6 +1061,7 @@ class RepoRegistration(BaseModel):
     qa_emails: list[str] = []
     jira_done_status: str = "Done"
     close_issues_on_merge: bool = True
+    close_on_qa_signoff: bool = False
     reviewers: list[str] = []
     reviewer_contacts: str | None = None
     review_slack_channel: str | None = None

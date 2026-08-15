@@ -31,7 +31,7 @@ import logging
 from sqlalchemy.orm import Session
 
 from app import models, schemas
-from app.services import assigned, comms_log, review_flow, worklist
+from app.services import assigned, comms_log, issue_links, review_flow, worklist
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 # not as the action Locus took, because the card describes the work.
 STAGE_LABELS: dict[schemas.TaskStage, str] = {
     schemas.TaskStage.assigned: "Assigned",
+    schemas.TaskStage.branch_created: "Branch created",
     schemas.TaskStage.in_progress: "Pull request opened",
     schemas.TaskStage.analyzed: "Context gathered and scanned",
     schemas.TaskStage.in_review: "Senior dev review",
@@ -52,7 +53,16 @@ STAGE_LABELS: dict[schemas.TaskStage, str] = {
 # Stages that only appear once they have actually happened. A task that went
 # straight from review to approval never had changes requested, and rendering
 # that step greyed-out would imply a round trip that did not occur.
-CONDITIONAL_STAGES = {schemas.TaskStage.changes_requested}
+#
+# `branch_created` is conditional for the same reason and one more: it is
+# observable only for GitHub issues, whose Development panel records the link.
+# A Jira ticket has no such edge, so rendering the step on every card would
+# show most tasks permanently skipping a stage that was never available to
+# them.
+CONDITIONAL_STAGES = {
+    schemas.TaskStage.changes_requested,
+    schemas.TaskStage.branch_created,
+}
 
 
 def _ticket_keys(review: models.PRReview) -> list[str]:
@@ -69,6 +79,7 @@ def _derive_stage(
     qa: models.QAThread | None,
     analyzed: bool,
     has_pr: bool = False,
+    has_branch: bool = False,
 ) -> tuple[schemas.TaskStage, bool]:
     """
     How far this task has travelled, and whether changes were ever requested.
@@ -83,6 +94,11 @@ def _derive_stage(
     stages cannot be derived from it. An open pull request that has been
     analyzed but not yet sent for review is real progress, and reporting it as
     `assigned` would say no work had started at all.
+
+    A linked branch is the earliest evidence there is. It ranks below every
+    pull-request stage rather than replacing them: the branch stays linked
+    after its PR opens, and letting it win would walk a reviewed task
+    backwards to "branch created" on every refresh.
     """
     if qa is not None:
         return (
@@ -96,6 +112,8 @@ def _derive_stage(
             return schemas.TaskStage.analyzed, False
         if has_pr:
             return schemas.TaskStage.in_progress, False
+        if has_branch:
+            return schemas.TaskStage.branch_created, False
         return schemas.TaskStage.assigned, False
 
     # Ranked by how far along the loop each state is.
@@ -128,6 +146,7 @@ def _build_stages(
     current: schemas.TaskStage,
     had_changes: bool,
     reviews: list[models.PRReview],
+    branches: list[schemas.LinkedBranch] | None = None,
 ) -> list[schemas.TaskStageStatus]:
     """
     The stepper: every stage, marked done, current or not yet reached.
@@ -137,9 +156,19 @@ def _build_stages(
     someone should be able to see that testing is coming without having got
     there yet.
     """
+    branches = branches or []
+    shown: dict[schemas.TaskStage, bool] = {
+        schemas.TaskStage.changes_requested: had_changes,
+        # Rendered whenever a branch is linked, and also when the task is
+        # sitting on that stage -- the two coincide today, but deriving the
+        # step from the current stage as well means the stepper can never
+        # render a card whose current stage is missing from its own order.
+        schemas.TaskStage.branch_created: bool(branches)
+        or current is schemas.TaskStage.branch_created,
+    }
     order = [
         stage for stage in schemas.TASK_STAGE_ORDER
-        if stage not in CONDITIONAL_STAGES or had_changes
+        if stage not in CONDITIONAL_STAGES or shown.get(stage, False)
     ]
     current_index = order.index(current) if current in order else 0
 
@@ -158,7 +187,11 @@ def _build_stages(
             state = schemas.StageState.pending
 
         detail = None
-        if stage is schemas.TaskStage.in_review and reviews:
+        if stage is schemas.TaskStage.branch_created and branches:
+            detail = branches[0].name
+            if len(branches) > 1:
+                detail += f" +{len(branches) - 1}"
+        elif stage is schemas.TaskStage.in_review and reviews:
             rounds = max(r.round_number for r in reviews)
             if rounds > 1:
                 detail = f"round {rounds}"
@@ -176,7 +209,10 @@ def _build_stages(
 
 
 def _matching_reviews(
-    reviews: list[models.PRReview], key: str, item: schemas.AssignedItem
+    reviews: list[models.PRReview],
+    key: str,
+    item: schemas.AssignedItem,
+    links: schemas.IssueLinks | None = None,
 ) -> list[models.PRReview]:
     """
     The pull requests belonging to one assigned item.
@@ -185,19 +221,36 @@ def _matching_reviews(
     same way when the key was recorded, and otherwise by repo -- an issue and
     a pull request in the same repository with the issue's key in the branch
     is the common case, and the analysis records that key.
-    """
-    matched = [r for r in reviews if key in _ticket_keys(r)]
-    if matched:
-        return matched
 
-    # The `repo#N` fallback the worklist uses for a PR with no ticket.
-    if item.source is schemas.TaskSource.github and item.repo:
-        return [
-            r for r in reviews
+    GitHub's own link graph is consulted last and unions rather than replaces.
+    It catches the two cases the recorded key cannot: a pull request attached
+    through the Development panel, which carries no closing keyword for the
+    analysis to have read, and any pull request on an issue whose analysis has
+    not run yet. Union rather than fallback because the two disagree in a
+    normal way -- a task with three PRs may have one linked in the panel and
+    two recorded from keywords, and either alone is an incomplete list.
+    """
+    matched = {
+        (r.repo, r.pr_number): r for r in reviews if key in _ticket_keys(r)
+    }
+
+    if not matched and item.source is schemas.TaskSource.github and item.repo:
+        # The `repo#N` fallback the worklist uses for a PR with no ticket.
+        matched = {
+            (r.repo, r.pr_number): r
+            for r in reviews
             if not _ticket_keys(r) and r.repo == item.repo
             and f"{r.repo}#{r.pr_number}" == key
-        ]
-    return []
+        }
+
+    if links:
+        linked_idents = {(pr.repo, pr.pr_number) for pr in links.pull_requests}
+        for review in reviews:
+            ident = (review.repo, review.pr_number)
+            if ident in linked_idents:
+                matched.setdefault(ident, review)
+
+    return [matched[ident] for ident in sorted(matched, key=lambda i: i[1])]
 
 
 def _blocked_reason(items: list[schemas.WorklistItem]) -> str | None:
@@ -254,6 +307,57 @@ async def fetch_assigned(
     return items, unavailable
 
 
+def _persist_links(
+    db: Session,
+    *,
+    owner_id: int,
+    item: schemas.AssignedItem,
+    links: schemas.IssueLinks,
+    reviews: list[models.PRReview],
+) -> None:
+    """
+    Record a Development-panel link on the review rows it names.
+
+    The edge came from GitHub's link graph, so writing it as a ticket key is
+    recording what GitHub reports rather than inferring a work item -- the
+    distinction `work_item` draws. Once stored, the pull request is findable as
+    a sibling of the work item, which is what lets a reopened ticket's next PR
+    inherit the history, and the board no longer depends on the links call
+    having succeeded.
+
+    Only ever adds. A pull request routinely belongs to several work items, and
+    replacing the recorded keys would drop the Jira key an analysis found in
+    the branch name -- costing exactly the context this exists to preserve.
+
+    Never fails the board: the links are already rendered from the live query
+    by the time this runs, so a write that cannot happen costs persistence and
+    nothing the user sees. This follows `comms_log`'s rule that recording never
+    breaks the work it describes.
+    """
+    linked_idents = {(pr.repo, pr.pr_number) for pr in links.pull_requests}
+    if not linked_idents:
+        return
+
+    changed = False
+    for review in reviews:
+        if (review.repo, review.pr_number) not in linked_idents:
+            continue
+        keys = _ticket_keys(review)
+        if item.key in keys:
+            continue
+        review.ticket_keys = "\n".join([*keys, item.key])
+        changed = True
+
+    if not changed:
+        return
+
+    try:
+        db.commit()
+    except Exception as e:
+        logger.debug("Recording issue links failed for %s: %s", item.key, e)
+        db.rollback()
+
+
 async def build(
     db: Session,
     *,
@@ -268,6 +372,12 @@ async def build(
     disagree about what is most urgent.
     """
     items, unavailable = await fetch_assigned(integration_configs)
+
+    # What GitHub itself says is being done about each assigned issue. Costs
+    # one request for the whole board and degrades to an empty mapping, so a
+    # failure here loses the Development-panel links and nothing else.
+    github_token = (integration_configs.get("github") or {}).get("api_key") or ""
+    links_by_key = await issue_links.fetch(github_token, items)
 
     reviews = (
         db.query(models.PRReview)
@@ -320,13 +430,20 @@ async def build(
 
     cards: list[schemas.TaskCard] = []
     for item in items:
-        matched = _matching_reviews(reviews, item.key, item)
+        links = links_by_key.get(item.key)
+        matched = _matching_reviews(reviews, item.key, item, links)
         pr_idents = {(r.repo, r.pr_number) for r in matched}
 
         # Pull requests known only from the analysis log, before any review
         # was requested. Reviewed PRs already carry richer rows, so those win.
         logged_prs = prs_by_key.get(item.key, set())
         pr_idents |= logged_prs
+
+        # Pull requests GitHub links to this issue that Locus has never seen --
+        # opened moments ago, or attached in the panel before any webhook. They
+        # belong on the card: a PR the board omits reads as work not started.
+        linked_prs = {(pr.repo, pr.pr_number) for pr in (links.pull_requests if links else [])}
+        pr_idents |= linked_prs
 
         qa = next(
             (
@@ -338,8 +455,16 @@ async def build(
         )
         analyzed = bool(pr_idents & analyzed_prs)
 
+        if links is not None:
+            _persist_links(
+                db, owner_id=owner_id, item=item, links=links, reviews=matched
+            )
+
+        branches = links.branches if links else []
         stage, had_changes = _derive_stage(
-            matched, qa, analyzed, has_pr=bool(pr_idents)
+            matched, qa, analyzed,
+            has_pr=bool(pr_idents),
+            has_branch=bool(branches),
         )
         task = by_key.get(item.key)
 
@@ -359,14 +484,21 @@ async def build(
             )
             for r in sorted(matched, key=lambda r: r.pr_number)
         ]
-        pull_requests += [
-            schemas.TaskPullRequest(
+        # Titles and URLs for anything GitHub linked, so a PR Locus has not
+        # analyzed still renders as itself rather than as a bare number.
+        linked_meta = {
+            (pr.repo, pr.pr_number): pr
+            for pr in (links.pull_requests if links else [])
+        }
+        for repo, number in sorted((logged_prs | linked_prs) - reviewed_idents):
+            meta = linked_meta.get((repo, number))
+            pull_requests.append(schemas.TaskPullRequest(
                 repo=repo,
                 pr_number=number,
-                url=f"https://github.com/{repo}/pull/{number}",
-            )
-            for repo, number in sorted(logged_prs - reviewed_idents)
-        ]
+                url=(meta.url if meta and meta.url else
+                     f"https://github.com/{repo}/pull/{number}"),
+                title=meta.title if meta else None,
+            ))
 
         cards.append(schemas.TaskCard(
             key=item.key,
@@ -379,8 +511,9 @@ async def build(
             priority=item.priority,
             updated_at=item.updated_at,
             stage=stage,
-            stages=_build_stages(stage, had_changes, matched),
+            stages=_build_stages(stage, had_changes, matched, branches),
             pull_requests=pull_requests,
+            linked_branches=branches,
             items=task.items if task else [],
             needs_you=task.needs_you if task else False,
             blocked_reason=_blocked_reason(task.items) if task else None,

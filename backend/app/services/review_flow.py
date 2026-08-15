@@ -390,6 +390,56 @@ def record_merged(
     return review
 
 
+def asks_for_qa(
+    db: Session,
+    owner_id: int,
+    repo: str,
+    pr_number: int,
+) -> list[str]:
+    """
+    Everything the reviewer asked for on this PR, oldest first.
+
+    Read from `PRReviewRound` rather than `review.pending_asks`, for two
+    reasons. The rounds are append-only, so this returns what was asked across
+    the whole review and not only the last outstanding round -- a change
+    requested in round one and satisfied in round two is still something QA
+    should verify. And `record_merged` clears `pending_asks` on the way past,
+    which is exactly the moment this is needed.
+
+    Deduped, preserving order: a reviewer restating the same request across
+    rounds is one thing to test, not two.
+    """
+    review = (
+        db.query(models.PRReview)
+        .filter(
+            models.PRReview.repo == repo,
+            models.PRReview.pr_number == pr_number,
+            models.PRReview.owner_id == owner_id,
+        )
+        .first()
+    )
+
+    if review is None:
+        return []
+
+    asks: list[str] = []
+    seen: set[str] = set()
+
+    for round_ in sorted(review.rounds, key=lambda r: r.id):
+        if round_.outcome != schemas.ReviewOutcome.changes_requested.value:
+            continue
+        body = (round_.body or "").strip()
+        if not body:
+            continue
+        key = body.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        asks.append(body)
+
+    return asks
+
+
 def format_review_notification(
     review: models.PRReview,
     outcome: schemas.ReviewOutcome,
@@ -580,25 +630,21 @@ def evaluate_merge_gate(
     elif mergeable is None:
         blockers.append("GitHub has not computed mergeability yet")
 
-    if analysis is not None:
-        # Confirmed findings are deterministic rule matches, not model
-        # opinions. Auto-merging over one would contradict the reason the
-        # confirmed/unverified split exists at all.
-        if analysis.confirmed_findings:
-            blockers.append(
-                f"{len(analysis.confirmed_findings)} confirmed security "
-                f"finding(s)"
-            )
-
-        # p1 means "do not merge this" by definition. Unverified findings and
-        # p2/p3 do not block: they are advisory, and blocking on a model's
-        # opinion would make auto-merge unusable.
-        p1s = [
-            f for f in analysis.review_findings
-            if f.priority == schemas.ReviewPriority.p1
-        ]
-        if p1s:
-            blockers.append(f"{len(p1s)} P1 review finding(s)")
+    # Confirmed findings are deterministic rule matches, not model opinions.
+    # Auto-merging over one would contradict the reason the
+    # confirmed/unverified split exists at all.
+    #
+    # Review findings deliberately do not block at any priority, p1 included.
+    # Every priority is a model's judgement about the change, and the people
+    # who act on that judgement -- the reviewer and their manager -- already
+    # read it: findings are rendered in the PR comment and in the Slack
+    # notification whatever the gate decides. Gating on one as well made the
+    # approval advisory, since a p1 the reviewer had seen and accepted could
+    # not be merged without dismissing it by hand first.
+    if analysis is not None and analysis.confirmed_findings:
+        blockers.append(
+            f"{len(analysis.confirmed_findings)} confirmed security finding(s)"
+        )
 
     return (not blockers), blockers
 

@@ -185,16 +185,31 @@ Files changed: {files_changed}
 Linked issues and tickets:
 {work_items}
 
+Changes the reviewer asked for during review:
+{review_asks}
+
 Security findings the reviewer flagged:
 {findings}
 
 Write 3-6 bullet points naming concrete things to test, then one line on risk \
-areas. Be specific and brief. Plain text, no Markdown headings."""
+areas. Cover every change the reviewer asked for -- those were requested \
+explicitly and are the most concrete statement of what this change had to do. \
+Be specific and brief. Plain text, no Markdown headings."""
 
 
-async def draft_qa_brief(result: PRAnalysisResult) -> str:
+async def draft_qa_brief(
+    result: PRAnalysisResult,
+    review_asks: list[str] | None = None,
+) -> str:
     """
     Write the "what to test" section of the QA email.
+
+    Args:
+        review_asks: What the reviewer asked for across the review rounds, in
+            their own words. QA is precisely who needs these: "the reviewer
+            asked for X" is a testable claim, and a brief built only from the
+            diff and the ticket silently drops the requirement a human stated
+            most plainly. Untrusted text -- this model has no tools bound.
 
     Falls back to a factual summary if the model is unavailable -- the email
     should still go out.
@@ -211,6 +226,8 @@ async def draft_qa_brief(result: PRAnalysisResult) -> str:
         for f in result.confirmed_findings + result.unverified_findings
     ) or "(none)"
 
+    asks_text = "\n".join(f"- {a}" for a in (review_asks or [])) or "(none)"
+
     try:
         llm = get_llm(temperature=0.2)
         response = await llm.ainvoke(
@@ -219,6 +236,7 @@ async def draft_qa_brief(result: PRAnalysisResult) -> str:
                 repo=ctx.repo,
                 files_changed=ctx.files_changed,
                 work_items=work_items,
+                review_asks=asks_text,
                 findings=findings,
             )
         )
@@ -231,7 +249,9 @@ async def draft_qa_brief(result: PRAnalysisResult) -> str:
 
     return (
         f"Verify the changes in {ctx.repo}#{ctx.pr_number} ({ctx.title}).\n\n"
-        f"Related work:\n{work_items}\n\nReviewer findings:\n{findings}"
+        f"Related work:\n{work_items}\n\n"
+        f"The reviewer asked for:\n{asks_text}\n\n"
+        f"Reviewer findings:\n{findings}"
     )
 
 
@@ -391,19 +411,36 @@ async def run_merge_actions(
     qa_recipients: list[str] | None = None,
     close_issues: bool = True,
     qa_slack_channel: str | None = None,
+    review_asks: list[str] | None = None,
+    close_on_qa_signoff: bool = False,
 ) -> MergeActionResult:
     """
     Apply post-merge actions.
 
     Each step is independent: a Jira permission error must not stop the QA
     email, and vice versa.
+
+    Args:
+        review_asks: What the reviewer asked for across the review rounds,
+            passed to the QA brief so the testing team is told about the
+            changes a human requested and not only what the diff touched.
+        close_on_qa_signoff: When set, the merge neither transitions the ticket
+            nor closes linked issues -- `qa_feedback` does both once the
+            testing team confirms. The QA notification still goes out; it is
+            the whole point of leaving the work item open.
     """
     outcome = MergeActionResult()
     ctx = result.context
 
-    # Jira transitions
+    # Jira transitions.
+    #
+    # Skipped entirely when the work item closes on QA sign-off instead: the
+    # merge has nothing true to say about the ticket at this point. Moving it
+    # to a done status here would assert the change works before anyone has
+    # checked, and moving it to an intermediate status assumes a workflow
+    # stage that many boards do not have.
     jira_config = integration_configs.get("jira")
-    if jira_config:
+    if jira_config and not close_on_qa_signoff:
         for ticket in ctx.tickets:
             try:
                 ok, detail = await transition_jira_ticket(
@@ -415,7 +452,7 @@ async def run_merge_actions(
 
     # GitHub issues
     github_token = (integration_configs.get("github") or {}).get("api_key")
-    if close_issues and github_token:
+    if close_issues and not close_on_qa_signoff and github_token:
         for issue in ctx.linked_issues:
             # Only issues the PR formally closes; a mention is not a promise.
             if issue.relation != "closes":
@@ -431,7 +468,7 @@ async def run_merge_actions(
     # QA notification in Slack, as a thread so replies are attributable.
     if qa_slack_channel and "slack" in integration_configs:
         try:
-            brief = outcome.qa_brief or await draft_qa_brief(result)
+            brief = outcome.qa_brief or await draft_qa_brief(result, review_asks)
             outcome.qa_brief = brief
             (
                 outcome.qa_thread_ts,
@@ -452,7 +489,7 @@ async def run_merge_actions(
         gmail_config = integration_configs.get("gmail")
         if gmail_config:
             try:
-                brief = outcome.qa_brief or await draft_qa_brief(result)
+                brief = outcome.qa_brief or await draft_qa_brief(result, review_asks)
                 ok, detail, message_id, body = await email_test_team(
                     gmail_config, qa_recipients, result, brief
                 )

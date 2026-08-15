@@ -5,6 +5,11 @@ The transition guard is the safety-critical part: a misconfigured target status
 must never drag a team's whole board backwards.
 """
 
+import pytest
+
+from app import schemas
+from app.schemas import PRAnalysisResult
+from app.services import merge_actions
 from app.services.capabilities import build_readiness
 from app.services.merge_actions import is_forward_transition
 
@@ -78,3 +83,131 @@ class TestCapabilityReadiness:
         })}
         keys = {c.key for c in services["jira"].capabilities}
         assert "transition" in keys
+
+
+class TestQABriefCarriesReviewerAsks:
+    """
+    The reviewer's requested changes must reach the testing team.
+
+    A brief built only from the diff, the ticket and the security findings
+    omitted the one requirement a human stated in plain words -- QA was told to
+    verify the feature but not the change the reviewer explicitly asked for.
+    """
+
+    @staticmethod
+    def _result():
+        return PRAnalysisResult(
+            context=schemas.PRContext(
+                repo="acme/widget", pr_number=7, title="Restructure the page",
+                author="dev", url="https://github.com/acme/widget/pull/7",
+                files_changed=1,
+            )
+        )
+
+    @pytest.mark.asyncio
+    async def test_asks_are_given_to_the_model(self, monkeypatch):
+        captured = {}
+
+        class _LLM:
+            async def ainvoke(self, prompt):
+                captured["prompt"] = prompt
+                return type("R", (), {"content": "- check it"})()
+
+        monkeypatch.setattr(merge_actions, "get_llm", lambda **kw: _LLM())
+
+        await merge_actions.draft_qa_brief(
+            self._result(), ['add word "orange" too']
+        )
+
+        assert 'add word "orange" too' in captured["prompt"]
+
+    @pytest.mark.asyncio
+    async def test_asks_survive_an_unavailable_model(self, monkeypatch):
+        """
+        The fallback is where this matters most: no model to fold the asks
+        into prose, so the brief must state them itself.
+        """
+        def _boom(**kw):
+            raise RuntimeError("no model loaded")
+
+        monkeypatch.setattr(merge_actions, "get_llm", _boom)
+
+        brief = await merge_actions.draft_qa_brief(
+            self._result(), ['add word "orange" too']
+        )
+
+        assert 'add word "orange" too' in brief
+
+    @pytest.mark.asyncio
+    async def test_no_asks_is_not_an_error(self, monkeypatch):
+        def _boom(**kw):
+            raise RuntimeError("no model loaded")
+
+        monkeypatch.setattr(merge_actions, "get_llm", _boom)
+
+        brief = await merge_actions.draft_qa_brief(self._result(), [])
+
+        assert "(none)" in brief
+
+
+class TestCloseDeferredToSignoff:
+    """
+    With close_on_qa_signoff set, the merge leaves the work item alone.
+
+    The QA notification still goes out -- leaving the ticket open is the whole
+    point, and someone has to be asked to close it.
+    """
+
+    @staticmethod
+    def _result():
+        return PRAnalysisResult(
+            context=schemas.PRContext(
+                repo="acme/widget", pr_number=7, title="Restructure",
+                author="dev", url="https://github.com/acme/widget/pull/7",
+                tickets=[schemas.RelatedTicket(key="LOC-1", summary="do it")],
+                linked_issues=[schemas.LinkedIssue(
+                    number=8, title="change name", relation="closes",
+                    state="open",
+                    url="https://github.com/acme/widget/issues/8",
+                )],
+            )
+        )
+
+    @pytest.fixture
+    def spies(self, monkeypatch):
+        calls = {"jira": [], "github": []}
+
+        async def fake_jira(config, key, status):
+            calls["jira"].append(key)
+            return True, f"{key} moved"
+
+        async def fake_gh(token, repo, number, pr_number):
+            calls["github"].append(number)
+            return True, f"Closed #{number}"
+
+        monkeypatch.setattr(merge_actions, "transition_jira_ticket", fake_jira)
+        monkeypatch.setattr(merge_actions, "close_github_issue", fake_gh)
+        return calls
+
+    @pytest.mark.asyncio
+    async def test_merge_does_not_touch_the_work_item(self, spies):
+        await merge_actions.run_merge_actions(
+            self._result(),
+            {"jira": {"api_key": "k"}, "github": {"api_key": "t"}},
+            close_on_qa_signoff=True,
+        )
+
+        assert spies["jira"] == []
+        assert spies["github"] == []
+
+    @pytest.mark.asyncio
+    async def test_merge_still_closes_when_not_deferred(self, spies):
+        """The prior behaviour, unchanged for repos that have not opted in."""
+        await merge_actions.run_merge_actions(
+            self._result(),
+            {"jira": {"api_key": "k"}, "github": {"api_key": "t"}},
+            close_on_qa_signoff=False,
+        )
+
+        assert spies["jira"] == ["LOC-1"]
+        assert spies["github"] == [8]

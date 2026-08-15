@@ -491,3 +491,84 @@ class TestNotificationText:
         assert "@junior-dev" in text  # the ball is with the author
         assert "round 1" in text
         assert "Add a test" in text
+
+
+class TestAsksForQA:
+    """
+    What the reviewer asked for has to reach the testing team.
+
+    The QA brief used to be built from the diff, the ticket and the security
+    findings alone, so a change the reviewer asked for in plain English -- the
+    most concrete statement of what the PR had to do -- never reached QA.
+    """
+
+    @pytest.mark.asyncio
+    async def test_changes_requested_bodies_are_returned(self, db):
+        await _changes_requested(db, body='add word "orange" too')
+
+        asks = review_flow.asks_for_qa(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR
+        )
+
+        assert asks == ['add word "orange" too']
+
+    @pytest.mark.asyncio
+    async def test_asks_survive_the_merge(self, db):
+        """
+        record_merged clears pending_asks, and runs before the QA brief.
+
+        Reading the append-only rounds rather than that field is what makes
+        the asks still available at the moment QA is notified.
+        """
+        await _changes_requested(db, body='add word "orange" too')
+        review_flow.record_merged(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR
+        )
+
+        asks = review_flow.asks_for_qa(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR
+        )
+
+        assert asks == ['add word "orange" too']
+
+    @pytest.mark.asyncio
+    async def test_every_round_is_carried_not_only_the_last(self, db):
+        """
+        A request satisfied in round two is still something QA verifies.
+        """
+        await _changes_requested(db, body="add orange")
+        await _changes_requested(db, body="rename the heading")
+
+        asks = review_flow.asks_for_qa(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR
+        )
+
+        assert asks == ["add orange", "rename the heading"]
+
+    @pytest.mark.asyncio
+    async def test_a_restated_request_is_listed_once(self, db):
+        await _changes_requested(db, body="add orange")
+        await _changes_requested(db, body="Add Orange")
+
+        asks = review_flow.asks_for_qa(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR
+        )
+
+        assert asks == ["add orange"]
+
+    @pytest.mark.asyncio
+    async def test_an_approval_contributes_nothing(self, db):
+        """Only requested changes are asks; an approval requests nothing."""
+        await review_flow.record_review_submitted(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR,
+            review_state="approved", reviewer="senior-dev", body="LGTM",
+        )
+
+        assert review_flow.asks_for_qa(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR
+        ) == []
+
+    def test_an_unreviewed_pr_has_no_asks(self, db):
+        assert review_flow.asks_for_qa(
+            db, owner_id=OWNER, repo=REPO, pr_number=999
+        ) == []
