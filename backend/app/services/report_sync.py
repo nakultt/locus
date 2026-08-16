@@ -211,3 +211,176 @@ async def refresh(
     except Exception as e:
         logger.warning("Could not refresh the report document: %s", e)
         return stored_url
+
+
+def _ticket_brief(
+    *,
+    key: str,
+    title: str,
+    url: str | None,
+    status: str | None,
+    assignee: str | None,
+    priority: str | None,
+    description: str | None,
+    events: list,
+) -> str:
+    """
+    The document body for work that has no pull request yet.
+
+    Deliberately not `full_report.render`: that describes an analysis -- a
+    diff, two scan passes, review rounds -- and none of it exists yet. Rendering
+    it here would produce a document that is mostly empty headings, which reads
+    as a broken feature rather than as work not yet started.
+
+    What does exist is the part people most need and most often cannot find:
+    the requirement as the person who filed it stated it, and whatever has
+    already been said about it.
+    """
+    heading = f"{key} — {title}"
+    lines: list[str] = [
+        heading,
+        "=" * min(len(heading), 78),
+        "",
+    ]
+
+    meta = [d for d in (status, assignee, priority) if d]
+    if meta:
+        lines.append(" · ".join(meta))
+    if url:
+        lines.append(url)
+    lines.append("")
+
+    lines.append("DESCRIPTION")
+    lines.append("-" * 40)
+    if description and description.strip():
+        lines.append(description.strip())
+    else:
+        # Said plainly rather than left blank: an empty section reads as a
+        # failure to fetch, where this is a fact about the ticket.
+        lines.append("The ticket has no description.")
+    lines.append("")
+
+    discussion = [
+        e for e in events
+        if e.channel == "slack" and e.direction == "received" and e.body
+    ]
+    if discussion:
+        lines.append("DISCUSSION SO FAR")
+        lines.append("-" * 40)
+        for event in discussion:
+            who = event.participant or "someone"
+            where = f"#{event.target}" if event.target else "slack"
+            lines.append(f"{who} in {where}:")
+            for line in event.body.strip().splitlines():
+                lines.append(f"  {line}")
+            if event.permalink:
+                lines.append(f"  {event.permalink}")
+            lines.append("")
+
+    lines.append("")
+    lines.append(
+        "No pull request has been opened for this work yet. This document is "
+        "rewritten in place as the work moves -- the analysis, the review "
+        "rounds, and the testing outcome are added here as they happen."
+    )
+
+    return "\n".join(lines)
+
+
+async def ensure_for_ticket(
+    db: Session,
+    *,
+    owner_id: int,
+    key: str,
+    title: str,
+    integration_configs: dict[str, dict],
+    url: str | None = None,
+    status: str | None = None,
+    assignee: str | None = None,
+    priority: str | None = None,
+    description: str | None = None,
+    repo: str | None = None,
+    pr_number: int | None = None,
+) -> str | None:
+    """
+    Create this work item's document if it does not have one yet.
+
+    The document belongs to the work item, so it can exist before any pull
+    request does -- which is the whole window in which someone is deciding
+    what to build, and the window in which a written requirement is most
+    useful. An analysis later rewrites the same document in place; because
+    `find_report` resolves by ticket, it finds this one rather than starting
+    a second.
+
+    Idempotent. Returns the existing URL untouched when there already is one,
+    so this is safe to call whenever a task is opened.
+
+    Returns None when Docs is not connected or the document could not be
+    created -- the caller renders the task without a link rather than failing.
+
+    Takes the work item's fields rather than a schema object because the two
+    callers hold different shapes of the same thing: the board holds a
+    `TaskCard`, the assigned-work query an `AssignedItem`, and neither is
+    convertible to the other without inventing fields.
+
+    Args:
+        repo, pr_number: A pull request already on this work item, if there is
+            one. Only used to find and claim a document written before
+            documents were keyed by ticket, so a task that started life as a
+            pull request keeps the link that was already sent out.
+    """
+    existing = find_report(
+        db, owner_id=owner_id, repo=repo or "", pr_number=pr_number or 0,
+        ticket_key=key, adopt=True,
+    )
+    if existing is not None:
+        return f"https://docs.google.com/document/d/{existing.document_id}/edit"
+
+    docs_config = (
+        integration_configs.get("docs") or integration_configs.get("drive")
+    )
+    if not docs_config:
+        return None
+
+    events = comms_log.ticket_timeline(db, owner_id=owner_id, ticket_key=key)
+
+    try:
+        # Imported here rather than at module scope: pr_agent pulls in the
+        # whole agent stack, and this module is imported by the router at
+        # startup.
+        from app.services.pr_agent import create_google_doc
+
+        document_id = await create_google_doc(
+            docs_config,
+            title=f"{key} — {title}"[:200],
+            body=_ticket_brief(
+                key=key, title=title, url=url, status=status,
+                assignee=assignee, priority=priority, description=description,
+                events=events,
+            ),
+            db=db,
+            user_id=owner_id,
+        )
+    except Exception as e:
+        # A task is worth showing without its document; the document is not
+        # worth failing the task board for.
+        logger.warning("Could not create document for %s: %s", key, e)
+        return None
+
+    if not document_id:
+        return None
+
+    try:
+        db.add(models.PRReport(
+            repo=repo,
+            pr_number=pr_number,
+            ticket_key=key,
+            document_id=document_id,
+            owner_id=owner_id,
+        ))
+        db.commit()
+    except Exception as e:
+        logger.warning("Could not record document for %s: %s", key, e)
+        db.rollback()
+
+    return f"https://docs.google.com/document/d/{document_id}/edit"

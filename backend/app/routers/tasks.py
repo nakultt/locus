@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from app import models, schemas
 from app.database import get_db
 from app.dependencies import get_current_user, get_integration_configs
-from app.services import task_board
+from app.services import report_sync, task_board
 from app.services.agent_settings import resolve_settings
 
 router = APIRouter()
@@ -134,9 +134,31 @@ async def get_task_detail(
         ).first()
     settings = resolve_settings(db, current_user.id, registration)
 
-    return task_board.detail_for(
+    detail = task_board.detail_for(
         db, owner_id=current_user.id, card=card, settings=settings
     )
+
+    # The document is created here rather than on the board listing. Opening a
+    # task is one deliberate act by one person; a board refresh would create a
+    # document for every assigned item at once, which is the same shape of
+    # mistake as a refresh notifying a team twice. It is idempotent, so the
+    # second open returns the same link.
+    first_pr = card.pull_requests[0] if card.pull_requests else None
+    detail.doc_url = await report_sync.ensure_for_ticket(
+        db,
+        owner_id=current_user.id,
+        key=card.key,
+        title=card.title,
+        integration_configs=integration_configs,
+        url=card.url,
+        status=card.status,
+        assignee=card.assignee,
+        priority=card.priority,
+        description=card.description,
+        repo=first_pr.repo if first_pr else None,
+        pr_number=first_pr.pr_number if first_pr else None,
+    )
+    return detail
 
 
 @router.post(

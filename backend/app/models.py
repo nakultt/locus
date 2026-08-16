@@ -252,10 +252,14 @@ class PRReport(Base):
     __tablename__ = "pr_reports"
 
     id = Column(Integer, primary_key=True, index=True)
-    repo = Column(String(255), nullable=False, index=True)
-    pr_number = Column(Integer, nullable=False, index=True)
-    # The work item this document belongs to. Nullable: a pull request with no
-    # tracker reference still gets a document, keyed by the PR instead.
+    # Where the document started. Null when it was created from the ticket
+    # itself, before any pull request existed -- the document belongs to the
+    # work item, and a task can be written up while someone is still coding.
+    repo = Column(String(255), nullable=True, index=True)
+    pr_number = Column(Integer, nullable=True, index=True)
+    # The work item this document belongs to. Nullable the other way round: a
+    # pull request with no tracker reference still gets a document, keyed by
+    # the PR instead. One of the two is always set.
     ticket_key = Column(String(64), nullable=True, index=True)
 
     # Google's document id. The URL is derived from it rather than stored, so

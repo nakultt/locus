@@ -35,6 +35,7 @@ from app.schemas import (
     ToolInvocation,
 )
 from app.services import (
+    assigned,
     comms_log,
     finding_diff,
     full_report,
@@ -141,7 +142,7 @@ async def fetch_jira_tickets(
             try:
                 response = await client.get(
                     f"{base_url}/rest/api/3/issue/{key}",
-                    params={"fields": "summary,status,assignee"},
+                    params={"fields": "summary,status,assignee,description"},
                     headers={"Accept": "application/json"},
                 )
                 if response.status_code != 200:
@@ -158,6 +159,12 @@ async def fetch_jira_tickets(
                     assignee=assignee.get("displayName"),
                     url=f"{base_url}/browse/{key}",
                     source="jira",
+                    # Jira Cloud returns Atlassian Document Format here --
+                    # nested nodes rather than a string -- so it is flattened
+                    # to text. This is the fullest statement of what the work
+                    # is meant to do, and the thing a reviewer or tester most
+                    # needs when they were not in the conversation.
+                    description=assigned.jira_text(fields.get("description")),
                 ))
             except Exception:
                 # A single unresolvable ticket must not fail the pipeline.
@@ -377,6 +384,62 @@ async def search_slack_threads(
         queries_tried.extend(tried)
 
     return threads[:MAX_SLACK_THREADS]
+
+
+async def create_google_doc(
+    docs_config: dict,
+    *,
+    title: str,
+    body: str,
+    db=None,
+    user_id: int | None = None,
+) -> str | None:
+    """
+    Create one Google Doc with the given title and body.
+
+    The primitive `export_to_google_doc` builds on, exposed separately so a
+    document can be started from a work item before any pull request exists --
+    at which point there is no analysis to render and nothing for the fuller
+    export to describe.
+
+    Returns the document id, or None if Google returned none.
+    """
+    access_token = await google_auth.valid_access_token(
+        docs_config, db=db, user_id=user_id, service="docs"
+    )
+    if not access_token:
+        raise RuntimeError(
+            "Google Docs access token could not be refreshed -- reconnect "
+            "Google Docs in Settings"
+        )
+
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+    }
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        created = await client.post(
+            "https://docs.googleapis.com/v1/documents",
+            headers=headers,
+            json={"title": title},
+        )
+        created.raise_for_status()
+        document_id = created.json().get("documentId")
+        if not document_id:
+            return None
+
+        await client.post(
+            f"https://docs.googleapis.com/v1/documents/{document_id}:batchUpdate",
+            headers=headers,
+            json={
+                "requests": [
+                    {"insertText": {"location": {"index": 1}, "text": body}}
+                ]
+            },
+        )
+
+    return document_id
 
 
 async def export_to_google_doc(
