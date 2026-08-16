@@ -231,16 +231,22 @@ class SuppressedFinding(Base):
 
 class PRReport(Base):
     """
-    The Google Doc holding one pull request's written record.
+    The Google Doc holding one work item's written record.
 
-    One row per (owner, repo, pr_number), so the document is rewritten in place
-    on every event rather than created again. A new doc per push scatters the
-    history across a dozen files and, worse, makes every link anyone already
-    sent point at a stale one -- the review request and the QA brief carry that
-    link, and the whole reason it is worth reading is that it is current.
+    Keyed by `ticket_key` when the work has one, so a task spanning three pull
+    requests -- the feature, the fix after QA rejected it, the follow-up --
+    keeps one document rather than three. The argument is the same one that
+    made this a document per pull request instead of per push, applied a level
+    up: a new file per PR scatters the history and leaves every link already
+    sent pointing at a partial record.
 
-    The same reasoning as the PR comment's hidden marker: the record is a
-    living document, not an append-only stream of snapshots.
+    Work with no ticket falls back to `(repo, pr_number)`, because a pull
+    request without a tracker reference is ordinary and must still get a
+    document.
+
+    `repo` and `pr_number` record where the document started. They stay
+    populated for the fallback lookup and to show which pull request first
+    created it; they are not the identity once a ticket is known.
     """
 
     __tablename__ = "pr_reports"
@@ -248,6 +254,9 @@ class PRReport(Base):
     id = Column(Integer, primary_key=True, index=True)
     repo = Column(String(255), nullable=False, index=True)
     pr_number = Column(Integer, nullable=False, index=True)
+    # The work item this document belongs to. Nullable: a pull request with no
+    # tracker reference still gets a document, keyed by the PR instead.
+    ticket_key = Column(String(64), nullable=True, index=True)
 
     # Google's document id. The URL is derived from it rather than stored, so
     # there is one source of truth for which document this is.

@@ -285,6 +285,17 @@ the log — `merge_actions._qa_email_text` and `post_qa_thread`'s third return v
 that reason. A reconstruction drifts from what the channel actually saw, which makes the
 record worse than useless.
 
+**The report document belongs to the work item, not the pull request.** `PRReport` is keyed by
+`ticket_key` when the work has one, so a task spanning the feature, the fix after QA rejected
+it, and the follow-up keeps one document rather than three. This is the same argument that
+made it a document per PR rather than per push, one level up. `report_sync.find_report` is the
+only lookup: it resolves by ticket first and falls back to `(repo, pr_number)`, because rows
+written before this existed carry no ticket and finding them only by ticket would hand each
+one a second document — leaving the link already sent pointing at the older, frozen one. With
+`adopt=True` that fallback claims the row for the ticket, so the first PR's document becomes
+the task's rather than being orphaned. Read-only callers leave `adopt` off so a lookup never
+mutates.
+
 **Context caches by work item; findings never cache.** `context_brief.build()` renders the
 accumulated context on demand rather than storing it — a file has no transactions, and three
 loops already write per-PR state concurrently. The split it exists to protect: Slack

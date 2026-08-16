@@ -203,3 +203,121 @@ class TestRefresh:
 
         assert called is False
         assert url == "https://docs.google.com/document/d/doc-abc/edit"
+
+
+class TestTaskScopedDocument:
+    """
+    The document belongs to the work item, not the pull request.
+
+    A task routinely spans several pull requests -- the feature, the fix after
+    QA rejected it, the follow-up. A document per PR scatters the record across
+    those the same way a document per push scattered it across pushes, and
+    leaves every link already sent describing only part of the work.
+    """
+
+    def test_a_second_pr_on_the_ticket_finds_the_same_document(self, db):
+        db.add(models.PRReport(
+            repo=REPO, pr_number=42, ticket_key="LOC-42",
+            document_id="doc-abc", owner_id=OWNER,
+        ))
+        db.commit()
+
+        # PR #57 is the fix after QA rejected #42. Nothing was ever written
+        # against it directly.
+        found = report_sync.find_report(
+            db, owner_id=OWNER, repo=REPO, pr_number=57, ticket_key="LOC-42"
+        )
+
+        assert found is not None
+        assert found.document_id == "doc-abc"
+
+    def test_the_url_is_the_tasks_url_from_any_of_its_prs(self, db):
+        db.add(models.PRReport(
+            repo=REPO, pr_number=42, ticket_key="LOC-42",
+            document_id="doc-abc", owner_id=OWNER,
+        ))
+        db.commit()
+
+        url = report_sync.document_url(
+            db, owner_id=OWNER, repo=REPO, pr_number=57, ticket_key="LOC-42"
+        )
+
+        assert url == "https://docs.google.com/document/d/doc-abc/edit"
+
+    def test_a_pre_existing_pr_keyed_row_is_adopted_not_duplicated(self, db):
+        """
+        Rows written before this existed have no ticket.
+
+        Finding them only by ticket would hand every one a second document and
+        leave the link already sent pointing at the older, now-frozen one --
+        the exact failure the per-PR document was introduced to avoid.
+        """
+        db.add(models.PRReport(
+            repo=REPO, pr_number=42, ticket_key=None,
+            document_id="doc-legacy", owner_id=OWNER,
+        ))
+        db.commit()
+
+        found = report_sync.find_report(
+            db, owner_id=OWNER, repo=REPO, pr_number=42,
+            ticket_key="LOC-42", adopt=True,
+        )
+
+        assert found.document_id == "doc-legacy"
+        # Claimed for the task, so the next PR on it continues this document.
+        assert found.ticket_key == "LOC-42"
+        assert db.query(models.PRReport).count() == 1
+
+    def test_a_read_only_lookup_does_not_claim(self, db):
+        """A lookup that only reads must not mutate."""
+        db.add(models.PRReport(
+            repo=REPO, pr_number=42, ticket_key=None,
+            document_id="doc-legacy", owner_id=OWNER,
+        ))
+        db.commit()
+
+        report_sync.find_report(
+            db, owner_id=OWNER, repo=REPO, pr_number=42,
+            ticket_key="LOC-42", adopt=False,
+        )
+
+        assert db.query(models.PRReport).one().ticket_key is None
+
+    def test_work_without_a_ticket_still_gets_a_document(self, db):
+        """
+        A pull request with no tracker reference is ordinary and must keep
+        working, keyed by the PR.
+        """
+        db.add(models.PRReport(
+            repo=REPO, pr_number=99, ticket_key=None,
+            document_id="doc-untracked", owner_id=OWNER,
+        ))
+        db.commit()
+
+        found = report_sync.find_report(
+            db, owner_id=OWNER, repo=REPO, pr_number=99, ticket_key=None
+        )
+
+        assert found.document_id == "doc-untracked"
+
+    def test_a_different_ticket_does_not_share_the_document(self, db):
+        db.add(models.PRReport(
+            repo=REPO, pr_number=42, ticket_key="LOC-42",
+            document_id="doc-abc", owner_id=OWNER,
+        ))
+        db.commit()
+
+        assert report_sync.find_report(
+            db, owner_id=OWNER, repo=REPO, pr_number=58, ticket_key="LOC-99"
+        ) is None
+
+    def test_another_users_document_is_never_returned(self, db):
+        db.add(models.PRReport(
+            repo=REPO, pr_number=42, ticket_key="LOC-42",
+            document_id="doc-theirs", owner_id=OWNER + 1,
+        ))
+        db.commit()
+
+        assert report_sync.find_report(
+            db, owner_id=OWNER, repo=REPO, pr_number=42, ticket_key="LOC-42"
+        ) is None
