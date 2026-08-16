@@ -199,13 +199,26 @@ async def refresh(
             )
             .first()
         )
-        events = comms_log.timeline(
+        # The work item's whole history, not this pull request's. One document
+        # per work item rewritten in place means a render scoped to the current
+        # pull request would delete every earlier attempt from the file the
+        # first time a retry ran -- and on a retry the earlier attempt, and the
+        # QA rejection that caused it, is the most important thing in there.
+        events = comms_log.work_item_history(
             db, owner_id=owner_id, repo=repo, pr_number=pr_number,
             ticket_key=ticket_key,
+        )
+        prior_reviews = (
+            work_item.sibling_reviews(
+                db, owner_id=owner_id, ticket_key=ticket_key,
+                exclude_pr=pr_number,
+            )
+            if ticket_key else []
         )
         return await export_to_google_doc(
             result, docs_config, db=db, user_id=owner_id,
             timeline_events=events, review_row=review_row,
+            prior_reviews=prior_reviews,
             report_ticket_key=ticket_key,
         )
     except Exception as e:

@@ -506,3 +506,98 @@ class TestEnsureForTicket:
             integration_configs={"docs": {"access_token": "t"}},
         ) is None
         assert db.query(models.PRReport).count() == 0
+
+
+class TestTheRetryKeepsTheWholeHistory:
+    """
+    One document per work item, rewritten in place, means the retry's export
+    overwrites the first attempt's. If the render only knows about the current
+    pull request, that rewrite silently deletes the reason the retry exists --
+    and the link people already have keeps working, now pointing at a document
+    that has forgotten the QA rejection.
+    """
+
+    def _rejected_first_attempt(self, db):
+        """PR #7 merged and was rejected by QA; PR #8 is the fix."""
+        first = models.PRReview(
+            repo=REPO, pr_number=PR, pr_url="u7", pr_title="Add the export",
+            author="dev", state=schemas.ReviewState.merged.value,
+            round_number=2, ticket_keys="LOC-14", owner_id=OWNER,
+        )
+        first.rounds.append(models.PRReviewRound(
+            round_number=1,
+            outcome=schemas.ReviewOutcome.changes_requested.value,
+            reviewer="senior-dev", body="Cap the page size.",
+        ))
+        db.add(first)
+        db.add(models.PRReview(
+            repo=REPO, pr_number=8, pr_url="u8", pr_title="Fix the export",
+            author="dev", state=schemas.ReviewState.awaiting_review.value,
+            round_number=1, ticket_keys="LOC-14", owner_id=OWNER,
+        ))
+        # The tester's verdict, recorded against the first pull request.
+        db.add(models.CommunicationEvent(
+            repo=REPO, pr_number=PR, ticket_key="LOC-14",
+            loop="qa", direction="received", channel="gmail",
+            participant="tester@acme.com",
+            body="Still exports everything. Not fixed.",
+            succeeded=1, owner_id=OWNER,
+        ))
+        db.commit()
+
+    def test_the_first_attempts_messages_survive_the_retrys_render(self, db):
+        from app.services import comms_log
+
+        self._rejected_first_attempt(db)
+
+        events = comms_log.work_item_history(
+            db, owner_id=OWNER, repo=REPO, pr_number=8, ticket_key="LOC-14"
+        )
+
+        bodies = [e.body for e in events if e.body]
+        assert "Still exports everything. Not fixed." in bodies
+        # Marked, so the document does not present it as this PR's own.
+        rejection = next(e for e in events if e.body and "Not fixed" in e.body)
+        assert rejection.inherited is True
+
+    def test_the_first_attempt_is_named_in_the_document(self, db):
+        from app.services import full_report, work_item
+
+        self._rejected_first_attempt(db)
+
+        prior = work_item.sibling_reviews(
+            db, owner_id=OWNER, ticket_key="LOC-14", exclude_pr=8
+        )
+        current = db.query(models.PRReview).filter_by(pr_number=8).one()
+
+        text = full_report.render(
+            _result(), review=current, prior_reviews=prior
+        )
+
+        assert "EARLIER ATTEMPTS AT THIS WORK" in text
+        assert f"{REPO}#{PR}" in text
+        # The reviewer's own words from the first attempt, not a summary.
+        assert "Cap the page size." in text
+
+    def test_the_retry_writes_to_the_same_document(self, db):
+        """
+        The point of keying by work item. A second document would leave the
+        link already sent to the reviewer and the testing team pointing at the
+        first attempt forever.
+        """
+        _report(db, document_id="doc-shared")
+        db.query(models.PRReport).one().ticket_key = "LOC-14"
+        db.commit()
+
+        found = report_sync.find_report(
+            db, owner_id=OWNER, repo=REPO, pr_number=8, ticket_key="LOC-14"
+        )
+
+        assert found.document_id == "doc-shared"
+
+    def test_a_pull_request_with_no_siblings_renders_no_such_section(self, db):
+        from app.services import full_report
+
+        text = full_report.render(_result(), prior_reviews=[])
+
+        assert "EARLIER ATTEMPTS AT THIS WORK" not in text

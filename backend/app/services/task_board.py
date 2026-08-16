@@ -84,11 +84,22 @@ def _derive_stage(
     """
     How far this task has travelled, and whether changes were ever requested.
 
-    Takes the furthest position across every pull request on the task: a
-    ticket whose first PR merged and whose follow-up is still in review is
-    genuinely still in review, but a ticket with one merged PR and one
-    abandoned draft has merged. Ordering the states and taking the max
-    resolves both without special-casing either.
+    **Work still in flight decides the stage.** A task is a sequence of
+    attempts, not a set of them: when QA rejects a merged change the ticket
+    reopens, the fix arrives as a fresh pull request, and the task is back at
+    the start of the review loop. The first attempt is history. Reading the
+    task as "the furthest any of its pull requests ever got" reports that
+    reopened ticket as merged, or -- because the rejected QA thread stays
+    unresolved by design -- as still with the testing team, for the whole of
+    the second review round. Both readings say the work is further along than
+    it is, on exactly the round trip this pipeline exists to automate.
+
+    So an unmerged pull request wins over both the QA thread and any earlier
+    merged one. Among several in flight at once the furthest still wins, which
+    is what a task with two open pull requests actually means.
+
+    Once every pull request has merged there is nothing in flight and the
+    ordinary reading resumes: the QA thread decides, then the merge.
 
     A `PRReview` row only exists once someone requests a review, so the early
     stages cannot be derived from it. An open pull request that has been
@@ -100,14 +111,31 @@ def _derive_stage(
     after its PR opens, and letting it win would walk a reviewed task
     backwards to "branch created" on every refresh.
     """
-    if qa is not None:
-        return (
-            schemas.TaskStage.done if qa.resolved else schemas.TaskStage.testing
-        ), any(
-            r.state == schemas.ReviewState.changes_requested.value for r in reviews
+    # Computed across every attempt, in flight or not: a round trip on the
+    # first pull request is still something that happened to this task.
+    had_changes = any(
+        r.state == schemas.ReviewState.changes_requested.value
+        or any(
+            round_.outcome == schemas.ReviewOutcome.changes_requested.value
+            for round_ in r.rounds
         )
+        for r in reviews
+    )
 
-    if not reviews:
+    in_flight = [
+        r for r in reviews if r.state != schemas.ReviewState.merged.value
+    ]
+
+    if not in_flight:
+        if qa is not None:
+            return (
+                schemas.TaskStage.done if qa.resolved
+                else schemas.TaskStage.testing
+            ), had_changes
+
+        if reviews:
+            return schemas.TaskStage.merged, had_changes
+
         if analyzed:
             return schemas.TaskStage.analyzed, False
         if has_pr:
@@ -121,23 +149,13 @@ def _derive_stage(
         schemas.ReviewState.awaiting_review.value: 0,
         schemas.ReviewState.changes_requested.value: 1,
         schemas.ReviewState.approved.value: 2,
-        schemas.ReviewState.merged.value: 3,
     }
-    furthest = max(reviews, key=lambda r: rank.get(r.state, 0))
-    had_changes = any(
-        r.state == schemas.ReviewState.changes_requested.value
-        or any(
-            round_.outcome == schemas.ReviewOutcome.changes_requested.value
-            for round_ in r.rounds
-        )
-        for r in reviews
-    )
+    furthest = max(in_flight, key=lambda r: rank.get(r.state, 0))
 
     state_to_stage = {
         schemas.ReviewState.awaiting_review.value: schemas.TaskStage.in_review,
         schemas.ReviewState.changes_requested.value: schemas.TaskStage.changes_requested,
         schemas.ReviewState.approved.value: schemas.TaskStage.approved,
-        schemas.ReviewState.merged.value: schemas.TaskStage.merged,
     }
     return state_to_stage.get(furthest.state, schemas.TaskStage.in_progress), had_changes
 
