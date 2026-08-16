@@ -1045,6 +1045,9 @@ export interface TaskCard {
   priority?: string | null;
   updated_at?: string | null;
 
+  /** The requirement as whoever filed it stated it. */
+  description?: string | null;
+
   stage: TaskStage;
   stages: TaskStageStatus[];
   pull_requests: TaskPullRequest[];
@@ -1084,6 +1087,9 @@ export interface TaskDetail {
   qa_channel?: string | null;
   qa_recipients: string[];
   events: CommunicationEvent[];
+
+  /** The task's report document. Null when Google Docs is not connected. */
+  doc_url?: string | null;
 }
 
 /**

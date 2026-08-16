@@ -510,6 +510,7 @@ async def build(
             issue_type=item.issue_type,
             priority=item.priority,
             updated_at=item.updated_at,
+            description=item.body,
             stage=stage,
             stages=_build_stages(stage, had_changes, matched, branches),
             pull_requests=pull_requests,

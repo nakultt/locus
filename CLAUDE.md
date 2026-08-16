@@ -296,6 +296,22 @@ one a second document — leaving the link already sent pointing at the older, f
 the task's rather than being orphaned. Read-only callers leave `adopt` off so a lookup never
 mutates.
 
+**The document starts at the ticket, and carries the ticket's description.** Belonging to the
+work item means it can exist before any pull request does, which is the whole window in which
+someone is deciding what to build and the window in which a written requirement is most useful
+— `pr_reports.repo` and `pr_number` are therefore nullable, recording where a document
+*started* rather than what it is about. `report_sync.ensure_for_ticket` creates it and is
+idempotent, so opening a task twice returns one link. Four rules: it is called from
+`GET /tasks/detail` and never from the board listing, because a board refresh would create a
+document for every assigned item at once — the same shape of mistake as a refresh notifying a
+team twice; the body is `_ticket_brief`, deliberately not `full_report.render`, since that
+describes an analysis that has not happened and would render as mostly empty headings; a ticket
+with no description says so in words rather than leaving the section blank, because an empty
+section reads as a failed fetch where the absence is a fact about the ticket; and a failure to
+create returns None so the task renders without a link rather than the board failing.
+`assigned.jira_text` flattens Jira's ADF description — Jira Cloud returns nested nodes, not a
+string. `tests/test_report_sync.py` pins it.
+
 **Context caches by work item; findings never cache.** `context_brief.build()` renders the
 accumulated context on demand rather than storing it — a file has no transactions, and three
 loops already write per-PR state concurrently. The split it exists to protect: Slack

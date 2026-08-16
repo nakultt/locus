@@ -321,3 +321,188 @@ class TestTaskScopedDocument:
         assert report_sync.find_report(
             db, owner_id=OWNER, repo=REPO, pr_number=42, ticket_key="LOC-42"
         ) is None
+
+
+class TestTicketBrief:
+    """
+    The body of a document that exists before any code does.
+
+    What it must carry is the requirement as whoever filed it stated it --
+    that is the only thing there is to read at this point, and the reason for
+    writing the document this early at all.
+    """
+
+    def test_the_description_is_carried_in_full(self, db):
+        body = report_sync._ticket_brief(
+            key="LOC-14",
+            title="Rate-limit the export endpoint",
+            url="https://acme.atlassian.net/browse/LOC-14",
+            status="In Progress",
+            assignee="dev",
+            priority="High",
+            description="Exports are unbounded.\nCap them at 100 rows a minute.",
+            events=[],
+        )
+
+        assert "LOC-14 — Rate-limit the export endpoint" in body
+        assert "Exports are unbounded." in body
+        assert "Cap them at 100 rows a minute." in body
+        assert "In Progress · dev · High" in body
+        assert "https://acme.atlassian.net/browse/LOC-14" in body
+
+    def test_a_missing_description_is_stated_rather_than_left_blank(self, db):
+        """
+        An empty section reads as a failed fetch. "The ticket has no
+        description" is a fact about the ticket, which is different.
+        """
+        body = report_sync._ticket_brief(
+            key="LOC-14", title="Something", url=None, status=None,
+            assignee=None, priority=None, description="   ", events=[],
+        )
+
+        assert "The ticket has no description." in body
+
+    def test_the_discussion_so_far_is_included(self, db):
+        event = schemas.CommunicationEvent(
+            id=1, loop="context", channel="slack", direction="received",
+            participant="sara", target="dev", body="We agreed on 100/min.",
+            permalink="https://slack.example/p1",
+            created_at="2026-08-01T09:00:00Z",
+        )
+
+        body = report_sync._ticket_brief(
+            key="LOC-14", title="Something", url=None, status=None,
+            assignee=None, priority=None, description="Do the thing",
+            events=[event],
+        )
+
+        assert "DISCUSSION SO FAR" in body
+        assert "sara in #dev:" in body
+        assert "We agreed on 100/min." in body
+        assert "https://slack.example/p1" in body
+
+    def test_it_says_no_pull_request_exists_yet(self, db):
+        body = report_sync._ticket_brief(
+            key="LOC-14", title="Something", url=None, status=None,
+            assignee=None, priority=None, description=None, events=[],
+        )
+
+        assert "No pull request has been opened" in body
+
+
+class TestEnsureForTicket:
+    """
+    A work item owns its document from the moment someone opens the task.
+
+    Idempotent by construction: the second call must return the same link, or
+    a task opened twice ends up with two documents and the link already sent
+    points at the one nobody is updating.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_document_is_created_and_recorded(self, db, monkeypatch):
+        created = {}
+
+        async def fake_create(config, *, title, body, db=None, user_id=None):
+            created["title"] = title
+            created["body"] = body
+            return "doc-new"
+
+        monkeypatch.setattr(
+            "app.services.pr_agent.create_google_doc", fake_create
+        )
+
+        url = await report_sync.ensure_for_ticket(
+            db, owner_id=OWNER, key="LOC-14", title="Rate-limit exports",
+            integration_configs={"docs": {"access_token": "t"}},
+            description="Cap the export.",
+        )
+
+        assert url == "https://docs.google.com/document/d/doc-new/edit"
+        assert created["title"] == "LOC-14 — Rate-limit exports"
+        assert "Cap the export." in created["body"]
+
+        row = db.query(models.PRReport).filter_by(ticket_key="LOC-14").one()
+        assert row.document_id == "doc-new"
+        # The document started at the ticket, so there is no pull request to
+        # name -- which is what the nullable columns exist for.
+        assert row.repo is None
+        assert row.pr_number is None
+
+    @pytest.mark.asyncio
+    async def test_the_second_open_reuses_the_first_document(self, db, monkeypatch):
+        calls = []
+
+        async def fake_create(config, *, title, body, db=None, user_id=None):
+            calls.append(title)
+            return f"doc-{len(calls)}"
+
+        monkeypatch.setattr(
+            "app.services.pr_agent.create_google_doc", fake_create
+        )
+        configs = {"docs": {"access_token": "t"}}
+
+        first = await report_sync.ensure_for_ticket(
+            db, owner_id=OWNER, key="LOC-14", title="X", integration_configs=configs
+        )
+        second = await report_sync.ensure_for_ticket(
+            db, owner_id=OWNER, key="LOC-14", title="X", integration_configs=configs
+        )
+
+        assert first == second
+        assert len(calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_pull_request_keyed_document_is_claimed_not_duplicated(
+        self, db, monkeypatch
+    ):
+        """
+        Work that started as a pull request keeps the link already sent out.
+        Creating a second document here is the exact failure the per-task
+        keying exists to prevent, one level up.
+        """
+        _report(db, document_id="doc-existing")
+
+        async def fake_create(config, *, title, body, db=None, user_id=None):
+            raise AssertionError("should not create a second document")
+
+        monkeypatch.setattr(
+            "app.services.pr_agent.create_google_doc", fake_create
+        )
+
+        url = await report_sync.ensure_for_ticket(
+            db, owner_id=OWNER, key="LOC-14", title="X",
+            integration_configs={"docs": {"access_token": "t"}},
+            repo=REPO, pr_number=PR,
+        )
+
+        assert url == "https://docs.google.com/document/d/doc-existing/edit"
+        assert db.query(models.PRReport).one().ticket_key == "LOC-14"
+
+    @pytest.mark.asyncio
+    async def test_without_docs_connected_the_task_still_renders(self, db):
+        assert await report_sync.ensure_for_ticket(
+            db, owner_id=OWNER, key="LOC-14", title="X", integration_configs={}
+        ) is None
+        assert db.query(models.PRReport).count() == 0
+
+    @pytest.mark.asyncio
+    async def test_a_failed_creation_costs_the_link_and_nothing_else(
+        self, db, monkeypatch
+    ):
+        """
+        A task is worth showing without its document. The document is not
+        worth failing the board for.
+        """
+        async def fake_create(config, *, title, body, db=None, user_id=None):
+            raise RuntimeError("Google Docs token could not be refreshed")
+
+        monkeypatch.setattr(
+            "app.services.pr_agent.create_google_doc", fake_create
+        )
+
+        assert await report_sync.ensure_for_ticket(
+            db, owner_id=OWNER, key="LOC-14", title="X",
+            integration_configs={"docs": {"access_token": "t"}},
+        ) is None
+        assert db.query(models.PRReport).count() == 0
