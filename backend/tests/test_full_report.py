@@ -155,18 +155,25 @@ class TestFindingsAreSeparated:
 
 
 class TestRendering:
-    def test_inherited_discussion_is_marked(self):
+    def test_inherited_discussion_is_marked_with_where_it_came_from(self):
         """
         Context the analysis was given by a sibling PR on the same ticket.
         Omitting it understates what the run used; showing it unmarked reads
         as discussion about this PR.
+
+        The earlier pull request is named rather than the row being marked
+        generically, because on a retry that is the point of showing it: this
+        is what happened last time.
         """
-        event = _event(direction="received", body="we agreed on orange")
+        event = _event(
+            pr_number=3, direction="received", body="we agreed on orange"
+        )
         event.inherited = True
 
         text = full_report.render(_result(), events=[event])
 
-        assert "inherited" in text
+        assert "earlier on #3" in text
+        assert "we agreed on orange" in text
 
     def test_a_long_body_is_trimmed_and_says_so(self):
         text = full_report.render(

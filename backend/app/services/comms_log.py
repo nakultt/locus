@@ -271,6 +271,91 @@ def ticket_timeline(
     )
 
 
+def _ordering(event: models.CommunicationEvent) -> tuple[datetime, int]:
+    """
+    Sort key for a timeline: oldest first, ties broken by insertion order.
+
+    Stored timestamps are naive on some backends and aware on others, and
+    comparing the two raises, so the key normalizes before sorting.
+    """
+    stamp = event.created_at or datetime.min
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=UTC)
+    return (stamp, event.id or 0)
+
+
+def work_item_history(
+    db: Session,
+    *,
+    owner_id: int,
+    repo: str,
+    pr_number: int,
+    ticket_key: str | None = None,
+) -> list[models.CommunicationEvent]:
+    """
+    Everything recorded for this work item, for the written record.
+
+    Deliberately wider than `timeline`, which inherits only Slack discussion
+    from sibling pull requests because that is the context the analysis
+    genuinely reused and marking anything else as inherited would imply it was
+    found on this PR. The document has the opposite requirement: it is one file
+    per work item, rewritten in place, so it must carry every attempt.
+
+    Without this the retry case silently lost history. QA rejects a merged
+    change, the fix opens as a fresh pull request, its analysis rewrites the
+    same document -- and the first attempt's QA brief, the tester's rejection
+    and every message in both loops were gone, because they were recorded
+    against a pull request number the render no longer asked about. The link
+    people already had then pointed at a document that had quietly forgotten
+    why the work came back.
+
+    Rows carrying this pull request's number are included whether or not they
+    were stamped with the work item: a run that recorded events before it
+    resolved the ticket key still recorded them about this change.
+    """
+    own = (
+        db.query(models.CommunicationEvent)
+        .filter(
+            models.CommunicationEvent.repo == repo,
+            models.CommunicationEvent.pr_number == pr_number,
+            models.CommunicationEvent.owner_id == owner_id,
+        )
+        .all()
+    )
+    for event in own:
+        event.inherited = False
+
+    events = list(own)
+
+    if ticket_key:
+        seen_ids = {event.id for event in own}
+        # Deduplicated by permalink as well as by id: the same Slack message is
+        # recorded under each pull request on the ticket, and repeating it
+        # would read as several people having said it.
+        seen_links = {e.permalink for e in own if e.permalink}
+
+        for event in (
+            db.query(models.CommunicationEvent)
+            .filter(
+                models.CommunicationEvent.owner_id == owner_id,
+                models.CommunicationEvent.ticket_key == ticket_key,
+            )
+            .all()
+        ):
+            if event.id in seen_ids:
+                continue
+            if event.permalink and event.permalink in seen_links:
+                continue
+            if event.permalink:
+                seen_links.add(event.permalink)
+            # Marked so the document can say which attempt each row came from
+            # rather than presenting the first PR's history as this one's.
+            event.inherited = True
+            events.append(event)
+
+    return sorted(events, key=_ordering)
+
+
 def timeline(
     db: Session,
     *,
@@ -328,14 +413,6 @@ def timeline(
                 seen.add(event.permalink)
             event.inherited = True
             events.append(event)
-
-    # Stored timestamps are naive on some backends and aware on others;
-    # comparing the two raises, so the key normalizes before sorting.
-    def _ordering(event: models.CommunicationEvent) -> tuple[datetime, int]:
-        stamp = event.created_at or datetime.min
-        if stamp.tzinfo is None:
-            stamp = stamp.replace(tzinfo=UTC)
-        return (stamp, event.id or 0)
 
     events.sort(key=_ordering)
     return events

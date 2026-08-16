@@ -312,6 +312,20 @@ create returns None so the task renders without a link rather than the board fai
 `assigned.jira_text` flattens Jira's ADF description — Jira Cloud returns nested nodes, not a
 string. `tests/test_report_sync.py` pins it.
 
+**The document carries every attempt, because it is rewritten in place.** One file per work item
+plus a render scoped to one pull request is a silent delete: when the retry after a QA rejection
+exported, it overwrote the shared document with only its own history, taking the first attempt's
+review rounds, its QA brief and the tester's rejection with it — and the link everyone already
+had kept working, now pointing at a document that had forgotten why the work came back. So the
+report reads the work item, not the pull request. `comms_log.work_item_history` returns every
+event under the ticket across every PR, and is deliberately wider than `timeline`, which inherits
+only Slack discussion because that is what the analysis genuinely reused and marking anything else
+as inherited would imply it was found on this PR. `full_report.render` takes `prior_reviews` from
+`work_item.sibling_reviews` and renders an "earlier attempts" section *before* the current
+history, since "this merged once and came back" is what makes the current round make sense.
+Inherited rows name the pull request they came from rather than being marked generically — on a
+retry that is the point of showing them.
+
 **Context caches by work item; findings never cache.** `context_brief.build()` renders the
 accumulated context on demand rather than storing it — a file has no transactions, and three
 loops already write per-PR state concurrently. The split it exists to protect: Slack
@@ -391,6 +405,17 @@ to recompute from the review state, the QA thread and the job status. Two rules 
 so the card shows what happens next and not only what happened; and `changes_requested` is
 omitted entirely when it never occurred, because a greyed-out step implies a round trip that did
 not happen.
+
+**Work still in flight decides the stage; earlier attempts are history.** A task is a sequence of
+attempts, not a set of them — QA rejects a merged change, the ticket reopens, and the fix arrives
+as a fresh pull request that starts the review loop again. `_derive_stage` therefore reads the
+furthest state among the *unmerged* pull requests, and only consults the QA thread and the merge
+when nothing is in flight. Reading the task as "the furthest any of its PRs ever got" reported
+that reopened ticket as `merged`, and — because a rejected QA thread stays unresolved by design,
+and was consulted before the reviews — as `testing` for the whole of the second review round.
+Both say the work is further along than it is, on exactly the round trip the pipeline exists to
+automate. `had_changes` is still computed across every attempt, so a round trip on the first pull
+request keeps `changes_requested` in the stepper. `tests/test_task_board.py` pins the sequence.
 
 **Assigned-work identity comes from the token, not from configuration.** GitHub's
 `filter=assigned` and Jira's `currentUser()` both resolve against whoever the stored credential
