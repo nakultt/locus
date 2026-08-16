@@ -46,6 +46,7 @@ from app.services import (
     report_sync,
     search_terms,
     suppression,
+    work_item,
 )
 from app.services.security_scan import (
     FIX_WORTHY_PRIORITIES,
@@ -450,6 +451,7 @@ async def export_to_google_doc(
     user_id: int | None = None,
     timeline_events: list | None = None,
     review_row=None,
+    prior_reviews: list | None = None,
     timezone_name: str | None = None,
     report_ticket_key: str | None = None,
 ) -> str | None:
@@ -467,6 +469,10 @@ async def export_to_google_doc(
             document still renders; the activity section says nothing was
             recorded, which is true of the caller rather than of the run.
         review_row: The review row, for the round history GitHub does not keep.
+        prior_reviews: Earlier pull requests on the same work item. The
+            document is the work item's and is rewritten in place, so without
+            these a retry's first export would erase the attempt that explains
+            why the retry exists.
         report_ticket_key: The work item this pull request belongs to. When
             given, the document is the *task's* rather than this PR's, so a
             ticket spanning several pull requests keeps one record. Absent,
@@ -513,6 +519,7 @@ async def export_to_google_doc(
         result,
         events=timeline_events,
         review=review_row,
+        prior_reviews=prior_reviews,
         timezone_name=timezone_name,
     )
 
@@ -1636,9 +1643,16 @@ async def analyze_pull_request(
 
                 timeline_events = []
                 review_row = None
+                prior_reviews = []
                 if db is not None and owner_id is not None:
                     try:
-                        timeline_events = comms_log.timeline(
+                        # The work item's history, not this pull request's.
+                        # The document is rewritten in place and belongs to
+                        # the task, so a render scoped to this PR would erase
+                        # the earlier attempt the first time a retry ran --
+                        # taking the QA rejection that caused the retry with
+                        # it, which is the one thing a reader needs.
+                        timeline_events = comms_log.work_item_history(
                             db, owner_id=owner_id, repo=repo,
                             pr_number=pr_number,
                             ticket_key=report_ticket_key,
@@ -1652,6 +1666,12 @@ async def analyze_pull_request(
                             )
                             .first()
                         )
+                        if report_ticket_key:
+                            prior_reviews = work_item.sibling_reviews(
+                                db, owner_id=owner_id,
+                                ticket_key=report_ticket_key,
+                                exclude_pr=pr_number,
+                            )
                     except Exception as e:
                         # The document is worth writing without the history;
                         # the history is not worth failing the document for.
@@ -1661,6 +1681,7 @@ async def analyze_pull_request(
                     result, docs_config, db=db, user_id=owner_id,
                     timeline_events=timeline_events,
                     review_row=review_row,
+                    prior_reviews=prior_reviews,
                     report_ticket_key=report_ticket_key,
                 )
                 if url:

@@ -92,10 +92,15 @@ def _event_lines(
     header = f"{_local(event.created_at, timezone_name)} — {direction} · {event.channel}"
 
     if getattr(event, "inherited", False):
-        # Discussion cached under the work item by a sibling PR. The analysis
-        # was given it, so omitting it would understate the context used --
-        # but showing it unmarked would read as discussion about this PR.
-        header += "  [inherited from the work item]"
+        # Recorded against a sibling pull request on the same work item. The
+        # analysis was given this context, so omitting it would understate
+        # what the run used -- but showing it unmarked would read as having
+        # happened on this pull request. The earlier PR is named because on a
+        # retry that is the whole point: this is what happened last time.
+        origin = (
+            f"#{event.pr_number}" if event.pr_number else "the work item"
+        )
+        header += f"  [earlier on {origin}]"
 
     lines = [header]
 
@@ -136,6 +141,7 @@ def render(
     *,
     events: list[models.CommunicationEvent] | None = None,
     review: models.PRReview | None = None,
+    prior_reviews: list[models.PRReview] | None = None,
     timezone_name: str | None = None,
     generated_at: datetime | None = None,
 ) -> str:
@@ -148,6 +154,12 @@ def render(
         events: The communication timeline, oldest first.
         review: The review row, for the round-by-round history GitHub does not
             keep.
+        prior_reviews: Earlier pull requests on the same work item. The
+            document belongs to the work item and is rewritten in place, so a
+            render that knew only about the current pull request would erase
+            every earlier attempt the first time a retry ran -- and the retry
+            case is the one where the earlier attempt is the most important
+            thing in the file.
 
     Returns:
         Plain text. Google Docs stores it as text rather than parsing Markdown,
@@ -330,6 +342,52 @@ def render(
             "seeing, not what anyone did about it."
         )
         out.append("")
+
+    # --- Earlier attempts -----------------------------------------------
+    #
+    # Rendered before this round's own history, because it is what explains
+    # why this round exists. A reader arriving from the ticket needs "this
+    # merged once and came back" before anything about the current diff makes
+    # sense.
+    prior = [
+        r for r in (prior_reviews or [])
+        if review is None or (r.repo, r.pr_number) != (review.repo, review.pr_number)
+    ]
+    if prior:
+        rule("Earlier attempts at this work")
+        out.append(
+            "Other pull requests on the same work item. A change that merged "
+            "and came back is the reason this one exists, so its history is "
+            "kept here rather than left behind on a pull request nobody is "
+            "looking at any more."
+        )
+        out.append("")
+
+        for earlier in sorted(prior, key=lambda r: (r.repo, r.pr_number)):
+            out.append(
+                f"{earlier.repo}#{earlier.pr_number} — "
+                f"{earlier.pr_title or 'untitled'}"
+            )
+            out.append(
+                f"  state: {earlier.state} · rounds: {earlier.round_number}"
+            )
+            if earlier.author:
+                out.append(f"  author: {earlier.author}")
+            if earlier.pr_url:
+                out.append(f"  {earlier.pr_url}")
+            out.append("")
+
+            for round_ in sorted(earlier.rounds, key=lambda r: r.id):
+                out.append(
+                    f"  Round {round_.round_number} — {round_.outcome} "
+                    f"({round_.reviewer or 'no reviewer recorded'}) "
+                    f"· {_local(round_.created_at, timezone_name)}"
+                )
+                body = _clip(round_.body)
+                if body:
+                    out.append("")
+                    out.append(_quote(body))
+                out.append("")
 
     # --- Review history -------------------------------------------------
     rule("Review history")

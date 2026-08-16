@@ -212,6 +212,98 @@ class TestStageDerivation:
         assert card.stage is schemas.TaskStage.done
 
 
+class TestTheRetryAfterQARejectedIt:
+    """
+    The round trip this pipeline exists to automate: a change merges, the
+    testing team says it is broken, the ticket reopens, and the fix arrives as
+    a fresh pull request that has to go back through the senior dev.
+
+    The board used to read that whole second review round as "with the testing
+    team" -- the rejected QA thread stays unresolved by design, and it was
+    consulted before the reviews -- or as "merged", because the first attempt
+    outranked the live one. Both say the work is further along than it is, at
+    the exact moment someone is looking to find out what to do next.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_fix_awaiting_review_is_not_still_in_testing(
+        self, db, monkeypatch
+    ):
+        _review(db, pr=1, state="merged", tickets="LOC-1")
+        # Rejected by QA: the thread stays unresolved, deliberately and
+        # permanently -- nothing ever sets it back.
+        db.add(models.QAThread(
+            repo=REPO, pr_number=1, pr_url="u", resolved=0,
+            ticket_keys_json=json.dumps(["LOC-1"]), owner_id=OWNER,
+        ))
+        db.commit()
+        _review(db, pr=2, state="awaiting_review", tickets="LOC-1")
+
+        board = await _build(db, [_item("LOC-1")], monkeypatch=monkeypatch)
+        card = (board.needs_you + board.in_flight)[0]
+
+        assert card.stage is schemas.TaskStage.in_review
+
+    @pytest.mark.asyncio
+    async def test_the_fix_is_not_reported_as_merged(self, db, monkeypatch):
+        """
+        Without a QA thread the first attempt still outranked the second: the
+        stage was the furthest state any pull request had ever reached, so a
+        merged first attempt beat a live second one.
+        """
+        _review(db, pr=1, state="merged", tickets="LOC-1")
+        _review(db, pr=2, state="changes_requested", tickets="LOC-1")
+
+        board = await _build(db, [_item("LOC-1")], monkeypatch=monkeypatch)
+        card = (board.needs_you + board.in_flight)[0]
+
+        assert card.stage is schemas.TaskStage.changes_requested
+
+    @pytest.mark.asyncio
+    async def test_the_round_trip_on_the_first_attempt_is_still_shown(
+        self, db, monkeypatch
+    ):
+        """
+        `changes_requested` is a conditional stage -- rendered only when it
+        actually happened. It happened on the first attempt, so the stepper
+        must still show it even though the current attempt has not been
+        through a round yet.
+        """
+        first = _review(db, pr=1, state="merged", tickets="LOC-1")
+        first.rounds.append(models.PRReviewRound(
+            round_number=1,
+            outcome=schemas.ReviewOutcome.changes_requested.value,
+        ))
+        db.commit()
+        _review(db, pr=2, state="awaiting_review", tickets="LOC-1")
+
+        board = await _build(db, [_item("LOC-1")], monkeypatch=monkeypatch)
+        card = (board.needs_you + board.in_flight)[0]
+
+        assert schemas.TaskStage.changes_requested in {s.stage for s in card.stages}
+
+    @pytest.mark.asyncio
+    async def test_once_the_fix_merges_it_goes_back_to_testing(
+        self, db, monkeypatch
+    ):
+        """
+        The other direction has to keep working: with nothing in flight, the
+        QA thread decides again.
+        """
+        _review(db, pr=1, state="merged", tickets="LOC-1")
+        _review(db, pr=2, state="merged", tickets="LOC-1")
+        db.add(models.QAThread(
+            repo=REPO, pr_number=2, pr_url="u", resolved=0,
+            ticket_keys_json=json.dumps(["LOC-1"]), owner_id=OWNER,
+        ))
+        db.commit()
+
+        board = await _build(db, [_item("LOC-1")], monkeypatch=monkeypatch)
+        card = (board.needs_you + board.in_flight)[0]
+
+        assert card.stage is schemas.TaskStage.testing
+
+
 class TestPullRequestsBeforeReview:
     """
     A `PRReview` row appears only when someone requests a review. Everything
