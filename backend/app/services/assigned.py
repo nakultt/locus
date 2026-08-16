@@ -146,7 +146,7 @@ def _jira_credentials(jira_config: dict) -> tuple[str, str, str] | None:
     return api_token, email, base_url
 
 
-def _jira_text(field: object) -> str | None:
+def jira_text(field: object) -> str | None:
     """
     Flatten a Jira description into plain text.
 
@@ -237,7 +237,7 @@ async def jira_assigned(jira_config: dict) -> list[schemas.AssignedItem]:
                 assignee=assignee.get("displayName"),
                 issue_type=issue_type.get("name"),
                 priority=priority.get("name"),
-                body=_jira_text(fields.get("description")),
+                body=jira_text(fields.get("description")),
                 updated_at=_parse_stamp(fields.get("updated")),
             ))
         except Exception:

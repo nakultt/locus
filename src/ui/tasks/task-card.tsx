@@ -4,6 +4,7 @@ import {
   ChevronDown,
   ChevronRight,
   ExternalLink,
+  FileText,
   GitBranch,
   Loader2,
   Play,
@@ -266,6 +267,20 @@ export const TaskCard = ({
                 </a>
               ) : null
             )}
+            {/* The task's written record. It belongs to the work item, so it
+                exists from the moment the ticket is opened here -- before any
+                pull request, which is the window in which the requirement is
+                the only thing there is to read. */}
+            {detail?.doc_url && (
+              <a
+                href={detail.doc_url}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+              >
+                <FileText size={11} /> Report doc
+              </a>
+            )}
 
             <div className="ml-auto flex gap-2">
               <button
@@ -319,6 +334,20 @@ export const TaskCard = ({
                       <WorklistItemRow key={i} item={item} />
                     ))}
                   </div>
+                </section>
+              )}
+
+              {/* The requirement, in the words of whoever filed it. Shown
+                  above the pipeline because a task with no pull request yet
+                  has nothing else describing what it actually is. */}
+              {detail.card.description && (
+                <section className="rounded-lg border border-border bg-muted/30 p-3">
+                  <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    Description
+                  </p>
+                  <p className="whitespace-pre-wrap text-xs leading-relaxed text-foreground">
+                    {detail.card.description.trim()}
+                  </p>
                 </section>
               )}
 

@@ -186,6 +186,15 @@ def render(
     if ctx.tickets:
         for ticket in ctx.tickets:
             out.append(f"{ticket.key} — {ticket.summary or 'no summary'}")
+            # The ticket's own body, in full. This is the requirement as the
+            # person who filed it stated it -- the senior dev and the testing
+            # team are being asked to judge the change against it, and a
+            # summary line is not enough to do that.
+            if ticket.description:
+                out.append("")
+                for line in _clip(ticket.description).splitlines():
+                    out.append(f"  {line}")
+                out.append("")
             meta = [d for d in (ticket.status, ticket.assignee) if d]
             if meta:
                 out.append(f"  {' · '.join(meta)}")

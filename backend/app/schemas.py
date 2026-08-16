@@ -312,6 +312,14 @@ class RelatedTicket(BaseModel):
     assignee: str | None = None
     url: str | None = None
     source: str = Field("jira", description="jira or linear")
+    description: str | None = Field(
+        None,
+        description=(
+            "The ticket's own body -- the fullest statement of what the work "
+            "is supposed to do, and the thing a reviewer or tester most needs "
+            "when they were not in the conversation."
+        ),
+    )
 
 
 class RelatedSlackThread(BaseModel):
@@ -843,6 +851,11 @@ class TaskCard(BaseModel):
     priority: str | None = None
     updated_at: datetime | None = None
 
+    # The requirement in the words of whoever filed it. Carried on the card
+    # because it is what the report document is written from, and because a
+    # task with no pull request yet has nothing else describing what it is.
+    description: str | None = None
+
     stage: TaskStage = TaskStage.assigned
     stages: list[TaskStageStatus] = Field(default_factory=list)
     pull_requests: list[TaskPullRequest] = Field(default_factory=list)
@@ -901,6 +914,10 @@ class TaskDetail(BaseModel):
     # Every message searched, sent and received for this work item, across
     # every pull request that touched it.
     events: list[CommunicationEvent] = []
+
+    # The task's report document. Null when Docs is not connected -- the task
+    # renders without a link rather than the view failing.
+    doc_url: str | None = None
 
 
 class MergeMethod(str, Enum):
