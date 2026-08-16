@@ -31,6 +31,10 @@ Events are classified by how movable they are — flexible solo time, soft-fixed
 
 ## Architecture
 
+See [docs/WORKFLOW.md](docs/WORKFLOW.md) for the full lifecycle as diagrams:
+context gathering, the senior-dev loop, the merge gate, the testing loop, and
+what caches versus what is re-derived every round.
+
 ```
 ┌─────────────┐     ┌──────────────────────┐     ┌────────────────────┐
 │  React SPA  │────▶│   FastAPI backend    │────▶│  MoE Model Manager │
