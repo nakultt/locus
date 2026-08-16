@@ -42,6 +42,7 @@ from app.services import (
     google_auth,
     google_docs_context,
     linking,
+    report_sync,
     search_terms,
     suppression,
 )
@@ -387,6 +388,7 @@ async def export_to_google_doc(
     timeline_events: list | None = None,
     review_row=None,
     timezone_name: str | None = None,
+    report_ticket_key: str | None = None,
 ) -> str | None:
     """
     Write the full report to a Google Doc.
@@ -402,6 +404,11 @@ async def export_to_google_doc(
             document still renders; the activity section says nothing was
             recorded, which is true of the caller rather than of the run.
         review_row: The review row, for the round history GitHub does not keep.
+        report_ticket_key: The work item this pull request belongs to. When
+            given, the document is the *task's* rather than this PR's, so a
+            ticket spanning several pull requests keeps one record. Absent,
+            the document is keyed by the pull request, which is right for work
+            with no tracker reference.
 
     The token is refreshed rather than read straight from storage. A Google
     access token lives an hour and this runs from a background loop, so the
@@ -425,7 +432,13 @@ async def export_to_google_doc(
         )
 
     ctx = result.context
-    title = f"PR Review — {ctx.repo}#{ctx.pr_number}: {ctx.title}"[:200]
+    # Titled by work item when there is one: the document outlives any single
+    # pull request on the task, so naming it after the PR that happened to
+    # create it would misdescribe it by the second one.
+    if report_ticket_key:
+        title = f"{report_ticket_key} — {ctx.title}"[:200]
+    else:
+        title = f"PR Review — {ctx.repo}#{ctx.pr_number}: {ctx.title}"[:200]
 
     # The full record, not the PR comment. The comment is short by design --
     # read in a diff view while deciding whether to approve -- while this is
@@ -440,20 +453,23 @@ async def export_to_google_doc(
         timezone_name=timezone_name,
     )
 
-    # The document this PR already has, if any. Rewritten in place rather than
-    # replaced: every link already sent -- in the review request, in the QA
-    # brief -- points at this id, and a new document per push would leave all
-    # of them pointing at a stale snapshot.
+    # The document this work item already has, if any. Rewritten in place
+    # rather than replaced: every link already sent -- in the review request,
+    # in the QA brief -- points at this id, and a new document would leave all
+    # of them pointing at a partial record.
+    #
+    # Keyed by ticket, so the second pull request on a task continues the same
+    # document instead of starting a second one. `adopt` lets the first PR's
+    # existing document become the task's rather than being orphaned.
     existing = None
     if db is not None and user_id is not None:
-        existing = (
-            db.query(models.PRReport)
-            .filter(
-                models.PRReport.repo == ctx.repo,
-                models.PRReport.pr_number == ctx.pr_number,
-                models.PRReport.owner_id == user_id,
-            )
-            .first()
+        existing = report_sync.find_report(
+            db,
+            owner_id=user_id,
+            repo=ctx.repo,
+            pr_number=ctx.pr_number,
+            ticket_key=report_ticket_key,
+            adopt=True,
         )
 
     headers = {
@@ -554,6 +570,7 @@ async def export_to_google_doc(
             else:
                 db.add(models.PRReport(
                     repo=ctx.repo, pr_number=ctx.pr_number,
+                    ticket_key=report_ticket_key,
                     document_id=document_id, owner_id=user_id,
                 ))
             db.commit()
@@ -1546,6 +1563,14 @@ async def analyze_pull_request(
                 # have not happened -- which is why the review request and the
                 # QA brief carry the link rather than the document carrying
                 # them.
+                # The work item, if this pull request has one. It decides both
+                # which history the document carries and which document this
+                # is -- a task spanning three PRs keeps one record.
+                report_ticket_key = (
+                    result.context.ticket_keys[0]
+                    if result.context.ticket_keys else None
+                )
+
                 timeline_events = []
                 review_row = None
                 if db is not None and owner_id is not None:
@@ -1553,10 +1578,7 @@ async def analyze_pull_request(
                         timeline_events = comms_log.timeline(
                             db, owner_id=owner_id, repo=repo,
                             pr_number=pr_number,
-                            ticket_key=(
-                                result.context.ticket_keys[0]
-                                if result.context.ticket_keys else None
-                            ),
+                            ticket_key=report_ticket_key,
                         )
                         review_row = (
                             db.query(models.PRReview)
@@ -1576,6 +1598,7 @@ async def analyze_pull_request(
                     result, docs_config, db=db, user_id=owner_id,
                     timeline_events=timeline_events,
                     review_row=review_row,
+                    report_ticket_key=report_ticket_key,
                 )
                 if url:
                     result.doc_url = url

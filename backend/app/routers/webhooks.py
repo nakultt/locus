@@ -923,14 +923,16 @@ def _latest_doc_url(db: SessionLocal, job: models.PRJob) -> str | None:
     predates that row. Returns None when no run wrote a document, the common
     case with Docs export off.
     """
-    report = (
-        db.query(models.PRReport)
-        .filter(
-            models.PRReport.owner_id == job.owner_id,
-            models.PRReport.repo == job.repo,
-            models.PRReport.pr_number == job.pr_number,
-        )
-        .first()
+    # By work item first: a later pull request on the same task shares the
+    # task's document, and looking only by PR would report it as having none.
+    report = report_sync.find_report(
+        db,
+        owner_id=job.owner_id,
+        repo=job.repo,
+        pr_number=job.pr_number,
+        ticket_key=work_item.resolve_key(
+            db, owner_id=job.owner_id, repo=job.repo, pr_number=job.pr_number
+        ),
     )
     if report is not None:
         return f"https://docs.google.com/document/d/{report.document_id}/edit"
