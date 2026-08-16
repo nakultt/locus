@@ -24,21 +24,51 @@ import logging
 from sqlalchemy.orm import Session
 
 from app import models, schemas
-from app.services import comms_log
+from app.services import comms_log, work_item
 
 logger = logging.getLogger(__name__)
 
 
-def document_url(
-    db: Session, *, owner_id: int, repo: str, pr_number: int
-) -> str | None:
+def find_report(
+    db: Session,
+    *,
+    owner_id: int,
+    repo: str,
+    pr_number: int,
+    ticket_key: str | None = None,
+    adopt: bool = False,
+) -> models.PRReport | None:
     """
-    This pull request's report URL, without touching Google.
+    The document row for this work, by ticket first and pull request second.
 
-    Read from the report row: the document is rewritten in place, so its id is
-    stable and one row is the truth about which document this is.
+    The two-step lookup is what makes the change from per-PR to per-task safe
+    on an existing install. Rows written before this existed are keyed by pull
+    request with no ticket; finding them only by ticket would hand every one of
+    those a second document and leave the link already sent pointing at the
+    older, now-frozen one -- the exact failure this design exists to avoid.
+
+    Args:
+        adopt: When true and a pull-request-keyed row is found for work that
+            does have a ticket, claim it for the ticket. The first pull request
+            on a task keeps its document and that document becomes the task's,
+            so the second pull request finds it rather than starting over.
+            Callers that only read (rather than write the document) leave this
+            off so a lookup never mutates.
     """
-    report = (
+    if ticket_key:
+        by_ticket = (
+            db.query(models.PRReport)
+            .filter(
+                models.PRReport.owner_id == owner_id,
+                models.PRReport.ticket_key == ticket_key,
+            )
+            .order_by(models.PRReport.created_at)
+            .first()
+        )
+        if by_ticket is not None:
+            return by_ticket
+
+    by_pr = (
         db.query(models.PRReport)
         .filter(
             models.PRReport.owner_id == owner_id,
@@ -46,6 +76,38 @@ def document_url(
             models.PRReport.pr_number == pr_number,
         )
         .first()
+    )
+
+    if by_pr is not None and ticket_key and adopt and not by_pr.ticket_key:
+        by_pr.ticket_key = ticket_key
+        try:
+            db.commit()
+        except Exception as e:
+            # The document is fine either way; failing here would discard a
+            # working lookup over bookkeeping.
+            logger.warning("Could not claim report for %s: %s", ticket_key, e)
+            db.rollback()
+
+    return by_pr
+
+
+def document_url(
+    db: Session,
+    *,
+    owner_id: int,
+    repo: str,
+    pr_number: int,
+    ticket_key: str | None = None,
+) -> str | None:
+    """
+    This work item's report URL, without touching Google.
+
+    Read from the report row: the document is rewritten in place, so its id is
+    stable and one row is the truth about which document this is.
+    """
+    report = find_report(
+        db, owner_id=owner_id, repo=repo, pr_number=pr_number,
+        ticket_key=ticket_key,
     )
     if report is None:
         return None
@@ -101,8 +163,15 @@ async def refresh(
         is swallowed and the stored URL returned: the notification this
         decorates is worth sending whether or not the document is current.
     """
-    stored_url = document_url(
+    # Resolved before the lookup so a later pull request on the same task finds
+    # the task's document rather than concluding it has none.
+    ticket_key = work_item.resolve_key(
         db, owner_id=owner_id, repo=repo, pr_number=pr_number
+    )
+
+    stored_url = document_url(
+        db, owner_id=owner_id, repo=repo, pr_number=pr_number,
+        ticket_key=ticket_key,
     )
     docs_config = (
         integration_configs.get("docs") or integration_configs.get("drive")
@@ -132,14 +201,12 @@ async def refresh(
         )
         events = comms_log.timeline(
             db, owner_id=owner_id, repo=repo, pr_number=pr_number,
-            ticket_key=(
-                result.context.ticket_keys[0]
-                if result.context.ticket_keys else None
-            ),
+            ticket_key=ticket_key,
         )
         return await export_to_google_doc(
             result, docs_config, db=db, user_id=owner_id,
             timeline_events=events, review_row=review_row,
+            report_ticket_key=ticket_key,
         )
     except Exception as e:
         logger.warning("Could not refresh the report document: %s", e)
