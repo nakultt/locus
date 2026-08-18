@@ -16,7 +16,7 @@ from uuid import uuid4
 import httpx
 
 from app.schemas import MergeActionResult, PRAnalysisResult
-from app.services import google_auth
+from app.services import google_auth, project_board
 from app.services.llm import get_llm
 
 logger = logging.getLogger(__name__)
@@ -421,6 +421,8 @@ async def run_merge_actions(
     qa_slack_channel: str | None = None,
     review_asks: list[str] | None = None,
     close_on_qa_signoff: bool = False,
+    project_board_sync: bool = True,
+    project_column_map: dict[str, str] | None = None,
     db=None,
     user_id: int | None = None,
 ) -> MergeActionResult:
@@ -438,6 +440,11 @@ async def run_merge_actions(
             nor closes linked issues -- `qa_feedback` does both once the
             testing team confirms. The QA notification still goes out; it is
             the whole point of leaving the work item open.
+        project_board_sync: Move each linked issue's Projects card to the
+            column its stage maps to. Follows `close_on_qa_signoff` exactly as
+            the Jira transition does: a merge that defers the close moves the
+            card to `testing`, not to a done column, because the board must not
+            claim the work is finished before a tester has said so.
     """
     outcome = MergeActionResult()
     ctx = result.context
@@ -474,6 +481,30 @@ async def run_merge_actions(
                 (outcome.issues_closed if ok else outcome.errors).append(detail)
             except Exception as e:
                 outcome.errors.append(f"#{issue.number}: {e}")
+
+    # Project board.
+    #
+    # The stage is the one the work is genuinely at, which is why this reads
+    # `close_on_qa_signoff` rather than always moving to a done column: a merge
+    # that deferred the close has handed the work to the testing team, and a
+    # card in Done would say the opposite of what the ticket being open says.
+    # Every issue linked to the PR is moved, not only the ones it closes --
+    # a card tracks the work, and a mention is enough to put it on the board.
+    if project_board_sync and github_token:
+        stage = "testing" if close_on_qa_signoff else "done"
+        try:
+            outcome.board_moves = await project_board.sync_issues(
+                github_token,
+                ctx.repo,
+                [issue.number for issue in ctx.linked_issues],
+                stage,
+                column_map=project_column_map,
+            )
+        except Exception as e:
+            # sync_issues swallows per-issue failures already; this guards the
+            # call itself, on the same rule -- a completed merge must never be
+            # reported as failed because a board could not be updated.
+            outcome.errors.append(f"Project board sync failed: {e}")
 
     # QA notification in Slack, as a thread so replies are attributable.
     if qa_slack_channel and "slack" in integration_configs:

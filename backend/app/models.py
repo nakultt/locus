@@ -575,6 +575,14 @@ class RepoWebhook(Base):
     # human in the loop, and it must be turned on deliberately.
     auto_merge_on_approval = Column(Integer, nullable=False, default=0)
     merge_method = Column(String(16), nullable=False, default="squash")
+    # Move the issue's GitHub Projects card as the pipeline advances. On by
+    # default: unlike auto-merge this writes nothing to any branch, and a board
+    # that silently disagrees with the pipeline is the problem it solves.
+    project_board_sync = Column(Integer, nullable=False, default=1)
+    # Stage -> column name, one "stage: column" per line. Blank means the
+    # default map in project_board. A stage left out moves no card, which is
+    # what makes a partial map safe to write.
+    project_column_map = Column(Text, nullable=True)
     enabled = Column(Integer, nullable=False, default=1)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -613,6 +621,8 @@ class PRAgentDefaults(Base):
     review_slack_channel = Column(String(255), nullable=True)
     auto_merge_on_approval = Column(Integer, nullable=False, default=0)
     merge_method = Column(String(16), nullable=False, default="squash")
+    project_board_sync = Column(Integer, nullable=False, default=1)
+    project_column_map = Column(Text, nullable=True)
     # Newline-separated Google Doc ids read as context on every run. Per-repo
     # docs describe one codebase; these are the standards that apply to all of
     # them, and without them an unregistered repo reviews against nothing.

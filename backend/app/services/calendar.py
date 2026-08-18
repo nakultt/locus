@@ -35,8 +35,11 @@ TOKEN_REFRESH_URL = "https://oauth2.googleapis.com/token"
 class CreateEventInput(BaseModel):
     """Input schema for creating a calendar event."""
     title: str = Field(description="Event title/name")
-    start_datetime: str = Field(description="Start datetime in ISO format (e.g., '2025-12-18T14:00:00') or natural language like 'tomorrow at 2pm'")
-    end_datetime: str = Field(default="", description="End datetime in ISO format. If not provided, defaults to 1 hour after start.")
+    # The user's own words are preferred over ISO: this is parsed against the
+    # real clock in the user's zone, whereas a model converting to ISO itself
+    # has repeatedly resolved "tomorrow" to today or to its training cutoff.
+    start_datetime: str = Field(description="Start time, preferably in the user's own words: 'tomorrow at 11pm', 'next Friday 2pm', 'in 2 hours'. Pass the phrasing through verbatim -- do NOT convert it to an absolute date yourself. ISO format ('2026-08-18T14:00:00') is accepted only when the user gave an explicit calendar date.")
+    end_datetime: str = Field(default="", description="End time, same format as start. Leave empty to default to 1 hour after start.")
     attendees: str = Field(default="", description="Comma-separated email addresses of attendees (optional)")
 
 

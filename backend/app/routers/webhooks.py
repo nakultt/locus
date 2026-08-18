@@ -29,6 +29,7 @@ from app.services import (
     context_brief,
     finding_diff,
     github_pr,
+    project_board,
     report_sync,
     review_flow,
     suppression,
@@ -304,6 +305,8 @@ async def register_repo(
         existing.review_slack_channel = request.review_slack_channel
         existing.auto_merge_on_approval = 1 if request.auto_merge_on_approval else 0
         existing.merge_method = request.merge_method.value
+        existing.project_board_sync = 1 if request.project_board_sync else 0
+        existing.project_column_map = request.project_column_map
         existing.enabled = 1
         registration = existing
     else:
@@ -322,6 +325,8 @@ async def register_repo(
             review_slack_channel=request.review_slack_channel,
             auto_merge_on_approval=1 if request.auto_merge_on_approval else 0,
             merge_method=request.merge_method.value,
+            project_board_sync=1 if request.project_board_sync else 0,
+            project_column_map=request.project_column_map,
             enabled=1,
             owner_id=current_user.id,
         )
@@ -345,6 +350,8 @@ async def register_repo(
         review_slack_channel=registration.review_slack_channel,
         auto_merge_on_approval=bool(registration.auto_merge_on_approval),
         merge_method=registration.merge_method or "squash",
+        project_board_sync=bool(registration.project_board_sync),
+        project_column_map=registration.project_column_map,
         enabled=True,
         webhook_url=f"{PUBLIC_BASE_URL.rstrip('/')}/webhooks/github",
         webhook_secret=secret,
@@ -382,6 +389,8 @@ async def list_repos(
                 review_slack_channel=r.review_slack_channel,
                 auto_merge_on_approval=bool(r.auto_merge_on_approval),
                 merge_method=r.merge_method or "squash",
+                project_board_sync=bool(r.project_board_sync),
+                project_column_map=r.project_column_map,
                 enabled=bool(r.enabled),
             )
             for r in rows
@@ -450,6 +459,8 @@ async def get_defaults(
         review_slack_channel=row.review_slack_channel,
         auto_merge_on_approval=bool(row.auto_merge_on_approval),
         merge_method=row.merge_method or "squash",
+        project_board_sync=bool(row.project_board_sync),
+        project_column_map=row.project_column_map,
         context_docs=[
             d for d in (row.context_doc_ids or "").splitlines() if d.strip()
         ],
@@ -498,6 +509,8 @@ async def save_defaults(
     row.review_slack_channel = (request.review_slack_channel or "").strip() or None
     row.auto_merge_on_approval = 1 if request.auto_merge_on_approval else 0
     row.merge_method = request.merge_method.value
+    row.project_board_sync = 1 if request.project_board_sync else 0
+    row.project_column_map = (request.project_column_map or "").strip() or None
     row.context_doc_ids = "\n".join(doc_ids) if doc_ids else None
 
     db.commit()
@@ -515,6 +528,8 @@ async def save_defaults(
         review_slack_channel=row.review_slack_channel,
         auto_merge_on_approval=bool(row.auto_merge_on_approval),
         merge_method=row.merge_method or "squash",
+        project_board_sync=bool(row.project_board_sync),
+        project_column_map=row.project_column_map,
         context_docs=doc_ids,
     )
 
@@ -960,6 +975,35 @@ def _latest_doc_url(db: SessionLocal, job: models.PRJob) -> str | None:
         return None
 
 
+async def _review_issue_numbers(
+    db: SessionLocal,
+    job: models.PRJob,
+    integration_configs: dict[str, dict],
+) -> list[int]:
+    """
+    The issues a review event should move on the board.
+
+    A review runs no analysis, so there is no `PRAnalysisResult` holding the
+    linked issues -- they are read from GitHub's link graph directly. Failure
+    returns empty rather than raising: the board is a decoration on the review
+    notification, and losing it must not cost the notification.
+    """
+    token = (integration_configs.get("github") or {}).get("api_key")
+    if not token:
+        return []
+
+    try:
+        issues = await github_pr.get_linked_issues(token, job.repo, job.pr_number)
+    except Exception as e:
+        logger.debug("Linked issue lookup failed for %s: %s", job.repo, e)
+        return []
+
+    return [
+        issue["number"] for issue in issues
+        if isinstance(issue, dict) and issue.get("number") is not None
+    ]
+
+
 async def _run_review_job(
     db: SessionLocal,
     job: models.PRJob,
@@ -1042,6 +1086,32 @@ async def _run_review_job(
         and settings.auto_merge_on_approval
     ):
         gate = await _try_auto_merge(db, job, review, settings, integration_configs)
+
+    # Move the board card to match the verdict.
+    #
+    # This is the half of the pipeline GitHub's own project workflows cannot
+    # express at all: "item closed" is the only signal they have, so a card
+    # sits untouched through every review round. Placed before the Slack
+    # early-return below, because a repo with no review channel configured
+    # still has a board worth keeping honest.
+    #
+    # `review_requested` deliberately moves nothing: asking for a second
+    # opinion is not a stage change, the same reason it never un-approves.
+    if settings.project_board_sync and outcome is not schemas.ReviewOutcome.review_requested:
+        board_stage = (
+            "changes_requested"
+            if outcome is schemas.ReviewOutcome.changes_requested
+            else "approved"
+        )
+        github_token = (integration_configs.get("github") or {}).get("api_key")
+        if github_token:
+            await project_board.sync_issues(
+                github_token,
+                job.repo,
+                await _review_issue_numbers(db, job, integration_configs),
+                board_stage,
+                column_map=settings.project_column_map,
+            )
 
     channel = settings.review_slack_channel
     if not channel or "slack" not in integration_configs:
@@ -1373,6 +1443,29 @@ async def run_pr_job(job_id: int) -> None:
             context_doc_ids=settings.context_doc_ids,
         )
 
+        # Move the board card to match the pull request existing.
+        #
+        # This is the transition a team notices first: a ticket sits in Todo
+        # while somebody writes the code, and the pull request opening is the
+        # visible moment the work started. GitHub's own project workflows have
+        # an "item added" trigger but nothing for "a PR now exists for this
+        # issue", so without this the card stays in Todo until it closes.
+        #
+        # Skipped on the merge job, which runs its own move through
+        # `run_merge_actions` with the stage the merge actually reached --
+        # moving to `in_progress` here first would be a backwards step from
+        # the merge's own update on the very same event.
+        if settings.project_board_sync and not is_merge:
+            github_token = (integration_configs.get("github") or {}).get("api_key")
+            if github_token:
+                await project_board.sync_issues(
+                    github_token,
+                    job.repo,
+                    [i.number for i in result.context.linked_issues],
+                    "in_progress",
+                    column_map=settings.project_column_map,
+                )
+
         # The work item this PR belongs to. Keys everything recorded below,
         # and lets the worklist group several PRs into one task.
         ticket_keys = comms.get("ticket_keys") or []
@@ -1568,6 +1661,8 @@ async def run_pr_job(job_id: int) -> None:
                 qa_slack_channel=settings.slack_channel,
                 review_asks=review_asks,
                 close_on_qa_signoff=settings.close_on_qa_signoff,
+                project_board_sync=settings.project_board_sync,
+                project_column_map=settings.project_column_map,
                 db=db,
                 user_id=job.owner_id,
             )

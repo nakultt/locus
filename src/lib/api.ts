@@ -623,6 +623,15 @@ export interface RepoRegistration {
   /** Merge automatically once approved and the gate passes. Off by default. */
   auto_merge_on_approval?: boolean;
   merge_method?: MergeMethod;
+  /**
+   * Move each linked issue's GitHub Projects card as the pipeline advances.
+   *
+   * On by default, unlike auto-merge: this writes a status field on a card
+   * rather than to a branch, and never moves a card backwards.
+   */
+  project_board_sync?: boolean;
+  /** "stage: column" per line. Blank uses the default map. */
+  project_column_map?: string | null;
   enabled: boolean;
   /** Returned only when registering. */
   webhook_url?: string;
@@ -685,6 +694,14 @@ export interface MergeActionResult {
   issues_closed: string[];
   qa_notified: boolean;
   qa_brief?: string;
+  /**
+   * Project board cards moved, one line per issue.
+   *
+   * Empty when the issue is on no board or the card was already in place —
+   * a line on every push saying "already in In progress" would train people
+   * to skip the section.
+   */
+  board_moves?: string[];
   errors: string[];
 }
 
@@ -910,7 +927,9 @@ export async function registerRepo(
   reviewerContacts?: string,
   autoMergeOnApproval = false,
   mergeMethod: MergeMethod = "squash",
-  closeOnQaSignoff = false
+  closeOnQaSignoff = false,
+  projectBoardSync = true,
+  projectColumnMap?: string
 ): Promise<RepoRegistration> {
   return apiRequest<RepoRegistration>("/webhooks/repos", {
     method: "POST",
@@ -928,6 +947,8 @@ export async function registerRepo(
       review_slack_channel: reviewSlackChannel || null,
       auto_merge_on_approval: autoMergeOnApproval,
       merge_method: mergeMethod,
+      project_board_sync: projectBoardSync,
+      project_column_map: projectColumnMap || null,
     }),
   });
 }
@@ -946,6 +967,10 @@ export interface PRAgentDefaults {
   review_slack_channel?: string | null;
   auto_merge_on_approval: boolean;
   merge_method: MergeMethod;
+  /** Keep GitHub Projects cards in step with the pipeline, for every repo. */
+  project_board_sync: boolean;
+  /** Default stage-to-column map, one "stage: column" per line. */
+  project_column_map?: string | null;
   /**
    * Google Docs read on every run, for every repo.
    *

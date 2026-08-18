@@ -446,6 +446,13 @@ class MergeActionResult(BaseModel):
     qa_email_message_id: str | None = Field(
         None, description="RFC Message-ID; matched against In-Reply-To on replies"
     )
+    board_moves: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Project board cards moved, one line per issue. Empty when the "
+            "issue is on no board or the card was already in place."
+        ),
+    )
     errors: list[str] = []
 
 
@@ -998,6 +1005,21 @@ class RepoRegister(BaseModel):
     merge_method: MergeMethod = Field(
         MergeMethod.squash, description="How an auto-merge lands the commits"
     )
+    project_board_sync: bool = Field(
+        True,
+        description=(
+            "Move each linked issue's GitHub Projects card as the pipeline "
+            "advances. Needs the 'project' OAuth scope, which 'repo' does not "
+            "imply."
+        ),
+    )
+    project_column_map: str | None = Field(
+        None,
+        description=(
+            "Stage to column, one 'stage: column' per line. Blank uses the "
+            "default map; a stage left out of a non-empty map moves no card."
+        ),
+    )
 
 
 class PRAgentDefaultsUpdate(BaseModel):
@@ -1046,6 +1068,12 @@ class PRAgentDefaultsUpdate(BaseModel):
     merge_method: MergeMethod = Field(
         MergeMethod.squash, description="Default auto-merge method"
     )
+    project_board_sync: bool = Field(
+        True, description="Keep GitHub Projects cards in step, for every repo"
+    )
+    project_column_map: str | None = Field(
+        None, description="Default stage-to-column map, one entry per line"
+    )
     context_docs: list[str] = Field(
         default_factory=list,
         description=(
@@ -1084,6 +1112,8 @@ class RepoRegistration(BaseModel):
     review_slack_channel: str | None = None
     auto_merge_on_approval: bool = False
     merge_method: MergeMethod = MergeMethod.squash
+    project_board_sync: bool = True
+    project_column_map: str | None = None
     enabled: bool = True
     webhook_url: str | None = Field(
         None, description="Payload URL to paste into GitHub"

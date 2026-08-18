@@ -243,6 +243,35 @@ already answered "broken" is reported as a rejection and not also as silence. Of
 holding work open is only safe for a team whose QA loop replies. `tests/test_qa_feedback.py`,
 `tests/test_merge_actions.py` and `tests/test_worklist.py` pin it.
 
+**The Projects card follows the pipeline, and only ever forward.** GitHub's own project
+workflows have exactly one useful trigger — an item closing — so a ticket sat in `Todo`
+through the branch, the review round trip and the QA thread, and then jumped to `Done`. The
+half the board could never show is the half this pipeline automates.
+`app/services/project_board.py` writes the card. A board's columns are not columns: they are
+the options of a single-select field named `Status`, so the project, the field and its options
+are all discovered from the issue at call time rather than configured — renaming a column
+cannot break a stored id, because none is stored. Note `options` takes no `first:` argument
+and GitHub rejects the query outright if given one; the first version shipped that way and
+every card reported "no Status field" until it was found against a real board, which is why
+`tests/test_project_board.py` pins the query shape as a string. The moves fire from four
+places: the analysis path on a PR opening (`in_progress`), the review path on a verdict, the
+merge, and the QA reply. Five rules. A card only advances, ordered by the board's own columns,
+because the derived stage legitimately regresses — a push after approval revokes it — and a
+card a human dragged forward must survive a refresh; the sole exception is a QA rejection,
+which passes `allow_backwards` because the tester has said the change does not work and the
+ticket is reopening with it. `merged` maps to the in-progress column, never a done one: the
+same "merged and done are different claims" that `close_on_qa_signoff` exists for, one surface
+along. A stage absent from a configured map moves nothing, which is what makes a partial map
+safe, and a configured map replaces the default outright rather than merging — a team that
+dropped a stage meant to drop it. The analysis move is skipped on the merge job, which shares
+that code path and does its own move afterwards, since otherwise one event would move the card
+to `in_progress` and then forward again. And a failure is swallowed and reported in the return
+value, never raised: a completed merge must not read as failed because a board could not be
+updated. On by default, unlike auto-merge — this writes a status field on a card, not to a
+branch. It needs the `project` OAuth scope, which `repo` does not imply; a token without it
+reports a skipped board rather than an error, because the likely cause is a user who has not
+reconnected.
+
 **What the reviewer asked for reaches the testing team.** The QA brief is built from the diff,
 the ticket and the security findings — none of which contain the requirement a human stated in
 plain words. A reviewer asking for "add the word orange too" is the most concrete statement of
@@ -565,8 +594,8 @@ and idempotent, so running the whole set is safe:
 for m in migrations/0*.py; do uv run python "$m"; done
 ```
 
-Note that `migrations/README.md`'s table is stale — it lists two scripts under old names while
-ten exist on disk. Trust the directory.
+Note that `migrations/README.md`'s table is stale — it lists two scripts under old names, and
+many more exist on disk. Trust the directory, not either document's count.
 
 ## Conventions
 
