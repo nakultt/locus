@@ -255,6 +255,8 @@ async def poll_once() -> int:
                         done_status=settings.jira_done_status,
                         pr_number=thread.pr_number,
                         close_on_signoff=settings.close_on_qa_signoff,
+                        project_board_sync=settings.project_board_sync,
+                        project_column_map=settings.project_column_map,
                     )
                 except Exception:
                     logger.exception("QA email reply handling failed for %s", thread.repo)

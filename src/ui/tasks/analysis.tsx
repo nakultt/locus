@@ -286,6 +286,14 @@ export const AnalysisView = ({ result }: { result: PRAnalysisResult }) => {
                 <Check size={11} /> {line}
               </div>
             ))}
+            {(result.merge_actions.board_moves ?? []).map((line, i) => (
+              <div
+                key={`b${i}`}
+                className="flex items-center gap-1.5 text-green-600 dark:text-green-400"
+              >
+                <Check size={11} /> {line}
+              </div>
+            ))}
             {result.merge_actions.qa_notified && (
               <div className="flex items-center gap-1.5 text-green-600 dark:text-green-400">
                 <Mail size={11} /> Test team notified

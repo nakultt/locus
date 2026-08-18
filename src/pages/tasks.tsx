@@ -170,6 +170,8 @@ export default function TasksPage() {
   const [reviewerContactsInput, setReviewerContactsInput] = useState("");
   const [autoMerge, setAutoMerge] = useState(false);
   const [mergeMethod, setMergeMethod] = useState<MergeMethod>("squash");
+  const [boardSync, setBoardSync] = useState(true);
+  const [columnMapInput, setColumnMapInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [justRegistered, setJustRegistered] = useState<RepoRegistration | null>(null);
@@ -197,7 +199,9 @@ export default function TasksPage() {
             .join(",") ||
         (savedForInput.slack_channel ?? "") !== channelInput.trim() ||
         (savedForInput.close_issues_on_merge ?? true) !== closeIssues ||
-        (savedForInput.close_on_qa_signoff ?? false) !== closeOnSignoff)
+        (savedForInput.close_on_qa_signoff ?? false) !== closeOnSignoff ||
+        (savedForInput.project_board_sync ?? true) !== boardSync ||
+        (savedForInput.project_column_map ?? "") !== columnMapInput.trim())
   );
 
   /** Load a registered repo's real settings into the form. */
@@ -215,6 +219,8 @@ export default function TasksPage() {
     setReviewerContactsInput(reg.reviewer_contacts ?? "");
     setAutoMerge(reg.auto_merge_on_approval ?? false);
     setMergeMethod(reg.merge_method ?? "squash");
+    setBoardSync(reg.project_board_sync ?? true);
+    setColumnMapInput(reg.project_column_map ?? "");
   }, []);
 
   const refresh = useCallback(
@@ -292,7 +298,9 @@ export default function TasksPage() {
         reviewerContactsInput.trim() || undefined,
         autoMerge,
         mergeMethod,
-        closeOnSignoff
+        closeOnSignoff,
+        boardSync,
+        columnMapInput.trim() || undefined
       );
       setJustRegistered(reg);
       setRepoInput("");
@@ -612,6 +620,47 @@ export default function TasksPage() {
                 <p className="mt-1 text-xs text-muted-foreground">
                   Transitions are forward-only — a ticket already past this status is left
                   alone. Only issues the PR formally closes are touched.
+                </p>
+              </div>
+
+              <div className="mt-3 border-t border-border pt-3">
+                <p className="mb-2 text-xs font-medium text-foreground">
+                  Project board
+                  <span className="ml-1 font-normal text-muted-foreground">
+                    — the GitHub Projects card for each linked issue
+                  </span>
+                </p>
+                <label className="flex items-center gap-2 text-xs text-foreground">
+                  <input
+                    type="checkbox"
+                    checked={boardSync}
+                    onChange={(e) => setBoardSync(e.target.checked)}
+                    className="rounded border-border"
+                  />
+                  Move the card as the work moves
+                </label>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  GitHub's own project workflows can only react to an issue closing, so a
+                  card sits in Todo through the whole review and QA round trip. Cards only
+                  ever move forward — the one exception is a QA rejection, which pulls the
+                  card back because the ticket reopens with it. Needs the{" "}
+                  <span className="font-mono">project</span> scope, which{" "}
+                  <span className="font-mono">repo</span> does not include; reconnect
+                  GitHub if the card never moves.
+                </p>
+                <textarea
+                  value={columnMapInput}
+                  onChange={(e) => setColumnMapInput(e.target.value)}
+                  placeholder={"in_review: In review\ntesting: QA\ndone: Done"}
+                  rows={2}
+                  disabled={!boardSync}
+                  className="mt-2 w-full rounded-lg border border-border bg-background px-3 py-2 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-primary/50 disabled:opacity-50"
+                />
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Optional, one <span className="font-mono">stage: column</span> per line.
+                  Blank maps everything from the branch through testing to "In progress"
+                  and only a QA sign-off to "Done" — merged is not done. Writing your own
+                  replaces that entirely, and any stage you leave out moves no card.
                 </p>
               </div>
 

@@ -374,6 +374,40 @@ export const GlobalDefaults = ({ docsConnected }: { docsConnected: boolean }) =>
           Still gated on green CI, no conflict, no confirmed security finding, and no P1
           review finding. Held merges are reported in Slack with the reason.
         </p>
+        <label className="flex items-center gap-2 text-xs text-foreground">
+          <input
+            type="checkbox"
+            checked={values.project_board_sync}
+            onChange={(e) =>
+              setValues({ ...values, project_board_sync: e.target.checked })
+            }
+            className="rounded border-border"
+          />
+          Move GitHub Projects cards as the work moves
+        </label>
+        <p className="-mt-1 pl-5 text-xs text-muted-foreground">
+          GitHub's own project workflows only react to an issue closing, so a card
+          otherwise sits in Todo through the entire review and QA round trip. Cards
+          move forward only, except a QA rejection, which pulls the card back with the
+          reopened ticket. Needs the <span className="font-mono">project</span> OAuth
+          scope — <span className="font-mono">repo</span> does not include it.
+        </p>
+        <textarea
+          value={values.project_column_map ?? ""}
+          onChange={(e) =>
+            setValues({ ...values, project_column_map: e.target.value || null })
+          }
+          placeholder={"in_review: In review\ntesting: QA\ndone: Done"}
+          rows={2}
+          disabled={!values.project_board_sync}
+          className="w-full rounded-lg border border-border bg-background px-3 py-2 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-primary/50 disabled:opacity-50"
+        />
+        <p className="-mt-1 text-xs text-muted-foreground">
+          Optional, one <span className="font-mono">stage: column</span> per line. Blank
+          maps the branch through testing to "In progress" and only a QA sign-off to
+          "Done" — merged is not done. Your own map replaces that entirely, and a stage
+          you leave out moves no card.
+        </p>
       </div>
 
       {error && <p className="mt-2 text-xs text-red-500">{error}</p>}

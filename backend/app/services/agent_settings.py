@@ -41,6 +41,11 @@ class EffectiveSettings:
     review_slack_channel: str | None = None
     auto_merge_on_approval: bool = False
     merge_method: str = "squash"
+    # Move the issue's GitHub Projects card as the pipeline advances.
+    project_board_sync: bool = True
+    # Stage -> column name. Empty means project_board's default map; a stage
+    # absent from a non-empty map deliberately moves no card.
+    project_column_map: dict[str, str] = field(default_factory=dict)
 
     # Per key: "repo", "defaults", or "unset". The dashboard shows this so a
     # skipped stage can be traced to the setting responsible.
@@ -81,6 +86,33 @@ def parse_contacts(value: str | None) -> dict[str, dict[str, str]]:
         contacts[login] = entry
 
     return contacts
+
+
+def parse_column_map(value: str | None) -> dict[str, str]:
+    """
+    Parse a stage-to-column map, one entry per line:
+
+        in_review: In review
+        done: Done
+
+    A column name may contain anything a person can type into GitHub, so the
+    split is on the first colon only. Unknown stage names are kept rather than
+    rejected: `project_board.resolve_column` looks up by stage, so a typo
+    simply never matches, and silently dropping it here would hide the typo
+    from anyone reading the setting back.
+    """
+    mapping: dict[str, str] = {}
+
+    for line in _lines(value):
+        stage, separator, column = line.partition(":")
+        if not separator:
+            continue
+        stage = stage.strip()
+        column = column.strip()
+        if stage and column:
+            mapping[stage] = column
+
+    return mapping
 
 
 def resolve_settings(
@@ -233,6 +265,31 @@ def resolve_settings(
         (registration.merge_method or "") if registration else "",
         (defaults.merge_method or "") if defaults else "",
         "squash",
+    )
+
+    # Same "a present row is a deliberate choice" shape as close_issues_on_merge:
+    # False is a real answer here, so truthiness cannot distinguish it from
+    # unset. Unlike auto_merge_on_approval the final fallback is *on* -- this
+    # writes to a board rather than to a branch, and the failure it prevents is
+    # a card that sits in Todo through an entire review and QA round trip.
+    if registration is not None:
+        resolved.project_board_sync = bool(registration.project_board_sync)
+        resolved.sources["project_board_sync"] = "repo"
+    elif defaults is not None:
+        resolved.project_board_sync = bool(defaults.project_board_sync)
+        resolved.sources["project_board_sync"] = "defaults"
+    else:
+        resolved.project_board_sync = True
+        resolved.sources["project_board_sync"] = "unset"
+
+    # Overrides rather than accumulating, unlike context_doc_ids: a board's
+    # columns belong to that board, so merging one repo's map into another's
+    # would map stages onto columns that do not exist there.
+    resolved.project_column_map = pick(
+        "project_column_map",
+        parse_column_map(registration.project_column_map) if registration else {},
+        parse_column_map(defaults.project_column_map) if defaults else {},
+        {},
     )
 
     return resolved

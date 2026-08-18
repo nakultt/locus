@@ -4,6 +4,7 @@ Main agent that processes natural language and routes to appropriate tools
 """
 
 from collections.abc import AsyncGenerator
+from datetime import timedelta
 
 from dotenv import load_dotenv
 from langchain.agents import create_agent
@@ -14,6 +15,7 @@ from langchain_core.tools import BaseTool
 from app.schemas import ActionResult, ChatResponse
 from app.services.bugasura import get_bugasura_tools
 from app.services.calendar import get_calendar_tools
+from app.services.datetimes import now_in, resolve_timezone
 from app.services.github import get_github_tools
 from app.services.gmail import get_gmail_tools
 from app.services.google_docs import get_docs_tools
@@ -136,6 +138,35 @@ EXAMPLE: If user says "send a Slack message to #general, create a Jira ticket, a
 - Then respond with summary of all three actions
 
 NEVER stop after just 1-2 actions if the user requested more. ALWAYS complete ALL requested tasks."""
+
+
+def _current_date_note(timezone: str | None) -> str:
+    """
+    State today's date for the model.
+
+    Without it a model resolves "tomorrow" against its training cutoff, which
+    is how a meeting asked for tomorrow was booked into a date over a year
+    past. The tools parse relative phrasing correctly against the real clock
+    (`datetimes.parse_datetime`), so the failure only happens when the model
+    resolves the date itself and passes an absolute one down.
+
+    The date is stated in the user's zone, since that is the day they mean.
+    """
+    now = now_in(timezone)
+    tomorrow = now + timedelta(days=1)
+    return (
+        "\n\n## Current date and time\n"
+        f"Right now it is {now:%A, %d %B %Y at %H:%M} "
+        f"({now.tzname()}, {resolve_timezone(timezone).key}). "
+        f"\"Tomorrow\" therefore means {tomorrow:%A, %d %B %Y}.\n"
+        "\n"
+        "Do NOT do date arithmetic yourself. The scheduling tools parse "
+        "natural language against this same clock, so pass the user's own "
+        "words through verbatim -- send \"tomorrow at 11pm\", not a date you "
+        "worked out. Converting it yourself is how a meeting asked for "
+        "tomorrow gets booked for today. Only pass an absolute date when the "
+        "user stated one."
+    )
 
 
 def build_tools(
@@ -314,7 +345,11 @@ class ToolErrorMiddleware(AgentMiddleware):
             )
 
 
-def create_agent_executor(tools: list[BaseTool], smart_mode: bool = False):
+def create_agent_executor(
+    tools: list[BaseTool],
+    smart_mode: bool = False,
+    timezone: str | None = None,
+):
     """
     Build an agent graph over the given tools.
 
@@ -322,14 +357,19 @@ def create_agent_executor(tools: list[BaseTool], smart_mode: bool = False):
     compiled LangGraph. The invoke contract changed with it: messages in and
     messages out, rather than {"input": ...} -> {"output", "intermediate_steps"}.
 
+    The system prompt is built per call rather than being the module constant,
+    because it carries today's date -- a constant evaluated at import time
+    would go stale in a process that runs for days.
+
     Args:
         tools: Tools the agent may call
         smart_mode: Use the higher-capability model when True
+        timezone: The user's IANA timezone, the zone today's date is stated in
     """
     return create_agent(
         model=get_llm(smart_mode=smart_mode),
         tools=tools,
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=SYSTEM_PROMPT + _current_date_note(timezone),
         middleware=[ToolErrorMiddleware()],
     )
 
@@ -448,7 +488,7 @@ async def process_chat_message(
             raw_response=None
         )
 
-    agent = create_agent_executor(tools, smart_mode=smart_mode)
+    agent = create_agent_executor(tools, smart_mode=smart_mode, timezone=timezone)
 
     try:
         result = await agent.ainvoke(
@@ -589,7 +629,7 @@ async def process_chat_message_streaming(
     }
     
     # Step 3: Create agent for execution
-    agent = create_agent_executor(tools)
+    agent = create_agent_executor(tools, timezone=timezone)
     
     # Step 4: Execute using the agent with enhanced prompt
     # Build a prompt that explicitly lists all tasks

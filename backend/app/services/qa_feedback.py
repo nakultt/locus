@@ -32,6 +32,7 @@ from enum import Enum
 
 import httpx
 
+from app.services import project_board
 from app.services.llm import get_llm
 from app.services.merge_actions import close_github_issue, transition_jira_ticket
 
@@ -256,6 +257,8 @@ async def handle_qa_reply(
     done_status: str = "Done",
     pr_number: int = 0,
     close_on_signoff: bool = False,
+    project_board_sync: bool = True,
+    project_column_map: dict[str, str] | None = None,
 ) -> dict:
     """
     Act on a QA reply.
@@ -281,6 +284,7 @@ async def handle_qa_reply(
         "reopened_issues": [],
         "closed_tickets": [],
         "closed_issues": [],
+        "board_moves": [],
         "author_notified": False,
         "errors": [],
     }
@@ -289,6 +293,18 @@ async def handle_qa_reply(
         return outcome
 
     if verdict == Verdict.WORKS:
+        # The board is moved on any sign-off, including when the merge already
+        # closed the work item. Closing is guarded because re-closing could undo
+        # a deliberate reopen; moving a card to the done column cannot -- the
+        # tester just said the change works, which is the most authoritative
+        # statement anything in this pipeline produces about that.
+        github_token = (integration_configs.get("github") or {}).get("api_key")
+        if project_board_sync and github_token:
+            outcome["board_moves"] = await project_board.sync_issues(
+                github_token, repo, issue_numbers, "done",
+                column_map=project_column_map,
+            )
+
         # Only when the merge deferred closing to here. Otherwise the work item
         # was already closed at merge and re-closing it would either no-op or,
         # on a ticket someone deliberately reopened, undo their decision.
@@ -313,7 +329,6 @@ async def handle_qa_reply(
                 except Exception as e:
                     outcome["errors"].append(f"{key}: {e}")
 
-        github_token = (integration_configs.get("github") or {}).get("api_key")
         if github_token:
             for number in issue_numbers:
                 try:
@@ -349,6 +364,29 @@ async def handle_qa_reply(
                 outcome["errors"].append(f"{key}: {e}")
 
     github_token = (integration_configs.get("github") or {}).get("api_key")
+
+    # The one legitimate backwards move on the board. Everywhere else a
+    # regression is refused, because the stage is derived from live state that
+    # can wobble and a card a human dragged forward must not be walked back by
+    # a refresh. A rejection is different: a tester has explicitly said the
+    # change does not work, the ticket is being reopened on the strength of it,
+    # and leaving the card in a done column would contradict the ticket.
+    if project_board_sync and github_token:
+        for number in issue_numbers:
+            try:
+                move = await project_board.move_card(
+                    github_token, repo, number, "in_progress",
+                    column_map=project_column_map,
+                    allow_backwards=True,
+                )
+            except Exception as e:
+                outcome["errors"].append(f"#{number}: board update failed: {e}")
+                continue
+            if move.error:
+                outcome["errors"].append(f"#{number}: {move.error}")
+            elif move.moved:
+                outcome["board_moves"].append(f"#{number}: {move.detail}")
+
     if github_token:
         for number in issue_numbers:
             try:

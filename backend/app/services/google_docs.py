@@ -198,8 +198,11 @@ def docs_append_content(document_id: str, content: str) -> str:
             doc = get_response.json()
             # An empty document can report a null body or content list, and
             # the `.get` defaults only cover a missing key, not a null value.
-            content = (doc.get("body") or {}).get("content") or [{}]
-            end_index = (content[-1] or {}).get("endIndex", 1) - 1
+            # Named apart from `content`, the text being appended: rebinding the
+            # parameter here is what once inserted the document's own structure
+            # into it instead of the caller's text.
+            body_content = (doc.get("body") or {}).get("content") or [{}]
+            end_index = (body_content[-1] or {}).get("endIndex", 1) - 1
             
             # Append content
             update_response = client.post(
