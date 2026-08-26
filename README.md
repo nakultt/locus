@@ -505,14 +505,33 @@ Natural language is handled by `dateparser`: "next Tuesday 10:30", "Friday morni
 
 ## Known limitations
 
-These are tracked in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) and are worth reading before deploying anywhere real.
+Worth reading before deploying anywhere real.
 
-- **Repo registration is API-only.** There is no UI for it yet; use `POST /webhooks/repos` as described above.
 - **The scheduler reads only the primary calendar.** Secondary and shared calendars are ignored, so a conflict on one of those will not be seen.
 - The PR agent has not been run end to end against a live GitHub webhook. Component logic is unit-tested; the Jira and Slack response-shape handling is written against the documented APIs but unverified with real credentials.
 - The worker is single-instance; multi-instance needs row locking or a real queue.
 - Gitleaks is optional and not bundled. Install with `go install github.com/zricethezav/gitleaks/v8@latest`; without it, committed-secret detection is skipped.
 - The Gmail poller runs in-process on a single instance. Multi-instance deployment would double-process replies without a lock.
+
+---
+
+## Roadmap
+
+**[docs/AGENTS_PLAN.md](docs/AGENTS_PLAN.md) is the single plan for this project.** Anything not
+yet built is specced there, and nowhere else — it replaced the earlier `IMPLEMENTATION_PLAN.md`
+and `MODES_PLAN.md`, which have been deleted.
+
+It covers three agents and two modes:
+
+- **Assisted** — you write the code, Locus runs the pipeline around you. This is what ships today.
+- **Autonomous** — you hand Locus the ticket and an OpenCode-driven agent opens the pull request;
+  the review, the QA sign-off and the record are unchanged.
+- **The calendar agent** — answers on your behalf when you are booked, and proposes a reschedule
+  when what reached you actually matters.
+
+Nine phases, with a stated ordering and the failure behind each rule. Read the *Inherited
+decisions* section first: it records what was deliberately not built earlier and why, so those
+choices are not silently re-made.
 
 ---
 
