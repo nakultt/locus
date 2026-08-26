@@ -4,8 +4,7 @@ How a change moves through Locus, from a pull request opening to a tester
 signing it off.
 
 These diagrams render natively on GitHub. They describe what is built, not what
-is planned — see [IMPLEMENTATION_PLAN.md](../IMPLEMENTATION_PLAN.md) for the
-latter.
+is planned — see [AGENTS_PLAN.md](AGENTS_PLAN.md) for the latter.
 
 ---
 

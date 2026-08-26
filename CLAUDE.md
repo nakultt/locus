@@ -2,6 +2,15 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## The plan
+
+**`docs/AGENTS_PLAN.md` is the only plan for this project.** Anything unbuilt is specced there.
+It replaced `IMPLEMENTATION_PLAN.md` and `docs/MODES_PLAN.md`, which were deleted — if either is
+referenced anywhere, that reference is stale.
+
+Nothing in it is built yet. Do not describe its features as shipped, and check the code before
+repeating anything from it as fact.
+
 ## Branch convention
 
 **`main` is the trunk.** Branch from it and target it with pull requests.
