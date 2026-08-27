@@ -87,7 +87,10 @@ const BoardTab = ({
         </div>
       )}
 
-      {board.total === 0 ? (
+      {/* `total` counts open work only, so a fully cleared board reads as
+          empty. Keep rendering when there is completed work to show, or
+          finishing everything would hide the record of finishing it. */}
+      {board.total === 0 && !board.recently_done?.length ? (
         <div className="rounded-xl border border-dashed border-border p-10 text-center">
           <ClipboardList size={24} className="mx-auto mb-2 text-muted-foreground" />
           <p className="text-sm text-muted-foreground">Nothing is assigned to you.</p>
@@ -134,6 +137,25 @@ const BoardTab = ({
               </h2>
               <div className="space-y-2">
                 {board.in_flight.map((card) => (
+                  <TaskCard key={card.key} card={card} onChanged={onChanged} />
+                ))}
+              </div>
+            </section>
+          )}
+
+          {/* Completed work closes its ticket, which is what removes it from
+              both queries above -- so without this section the run that
+              finished successfully is the one you can no longer look at. */}
+          {board.recently_done?.length > 0 && (
+            <section>
+              <h2 className="mb-2 text-sm font-semibold text-foreground">
+                Completed
+                <span className="ml-1.5 font-normal text-xs text-muted-foreground">
+                  — signed off in the last 7 days
+                </span>
+              </h2>
+              <div className="space-y-2">
+                {board.recently_done.map((card) => (
                   <TaskCard key={card.key} card={card} onChanged={onChanged} />
                 ))}
               </div>

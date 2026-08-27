@@ -309,6 +309,8 @@ def _blocked_reason(items: list[schemas.WorklistItem]) -> str | None:
 
 async def fetch_assigned(
     integration_configs: dict[str, dict],
+    *,
+    done: bool = False,
 ) -> tuple[list[schemas.AssignedItem], list[str]]:
     """
     Everything assigned to this user, from every connected source.
@@ -316,6 +318,12 @@ async def fetch_assigned(
     Both sources are queried concurrently and each swallows its own failure,
     so one dead integration costs its own half of the board and nothing else.
     Returns the items alongside the names of any source that did not answer.
+
+    Args:
+        done: Fetch recently-completed work instead of open work. The two are
+            separate queries rather than one widened one, because the open
+            board is what someone opens this page for and it must not be made
+            slower, or failable, by the completed section beside it.
     """
     github_config = integration_configs.get("github") or {}
     jira_config = integration_configs.get("jira") or {}
@@ -323,10 +331,16 @@ async def fetch_assigned(
     tasks = []
     sources: list[str] = []
     if github_config.get("api_key"):
-        tasks.append(assigned.github_assigned(github_config["api_key"]))
+        tasks.append(
+            assigned.github_recently_done(github_config["api_key"]) if done
+            else assigned.github_assigned(github_config["api_key"])
+        )
         sources.append("github")
     if jira_config:
-        tasks.append(assigned.jira_assigned(jira_config))
+        tasks.append(
+            assigned.jira_recently_done(jira_config) if done
+            else assigned.jira_assigned(jira_config)
+        )
         sources.append("jira")
 
     if not tasks:
@@ -413,6 +427,24 @@ async def build(
     disagree about what is most urgent.
     """
     items, unavailable = await fetch_assigned(integration_configs)
+
+    # Work that finished recently, rendered in its own section.
+    #
+    # Both source queries above ask only for unfinished work, so a ticket
+    # vanished from the board the moment QA sign-off closed it -- and with it
+    # the only surface that assembles the pipeline record. The successful run
+    # became the one you could no longer look at.
+    #
+    # `unavailable` is deliberately not extended by this: a source that
+    # answered the open query and failed this one has not left the board
+    # degraded in the way that flag means, and reporting it would put a
+    # warning on a board that is showing everything it is being asked for.
+    done_items, _ = await fetch_assigned(integration_configs, done=True)
+    done_keys = {item.key for item in done_items}
+
+    # Built through the same path, so a finished card carries the same stages,
+    # pull requests and history as a live one. A separate renderer would drift.
+    items = [*items, *done_items]
 
     # What GitHub itself says is being done about each assigned issue. Costs
     # one request for the whole board and degrades to an empty mapping, so a
@@ -598,10 +630,18 @@ async def build(
     # findings. Severity ranks findings; this is a list of conversations.
     cards.sort(key=lambda c: (not c.needs_you, -c.age_hours, -c.round_number))
 
+    # A finished card is never "needs you" and never in flight, whatever the
+    # attention rules computed: the work is done, and leaving it in the queue
+    # would ask somebody to act on a closed ticket.
     return schemas.TaskBoard(
-        needs_you=[c for c in cards if c.needs_you],
-        in_flight=[c for c in cards if not c.needs_you],
-        total=len(cards),
+        needs_you=[c for c in cards if c.needs_you and c.key not in done_keys],
+        in_flight=[
+            c for c in cards if not c.needs_you and c.key not in done_keys
+        ],
+        recently_done=[c for c in cards if c.key in done_keys],
+        # Counts open work only, so the badge still answers "how much is on my
+        # plate" rather than growing every time something ships.
+        total=len([c for c in cards if c.key not in done_keys]),
         github_available="github" not in unavailable,
         jira_available="jira" not in unavailable,
         unavailable=unavailable,

@@ -33,7 +33,7 @@ s.addText("Two modes. One pipeline. Every model that reads your code runs locall
 });
 
 // headline proof strip
-const proof = [["9", "steps automated\nper work item"], ["706", "tests\npassing"],
+const proof = [["9", "steps automated\nper work item"], ["859", "tests\npassing"],
                 ["8", "tools\nconnected"], ["0", "cloud calls to\nanalyse your code"]];
 proof.forEach(([v, k], i) => {
   L.stat(s, 0.78 + i * 1.72, 5.35, 1.6, v, k, { dark: true, size: 30, color: C.coral });
@@ -367,17 +367,17 @@ s.addNotes("A React front end over a FastAPI backend. One settings resolver deci
 // ===========================================================================
 s = S();
 s.background = { color: C.cream };
-L.title(s, "706 tests, and every one pins a behaviour we broke at least once.");
+L.title(s, "859 tests, and every one pins a behaviour we broke at least once.");
 L.sub(s, "Test coverage by subsystem — the loops that reach other people carry the most.");
 
 s.addChart(
   pres.ChartType.bar,
   [{
     name: "Tests",
-    labels: ["Context & records", "Review & merge loop", "Task board & worklist",
-             "Security & code review", "Integrations & auth", "Authoring & modes",
-             "Scheduler & availability", "Worker & platform", "QA sign-off loop"],
-    values: [114, 102, 100, 93, 90, 70, 56, 48, 33],
+    labels: ["Authoring & modes", "Task board & worklist", "Context & records",
+             "Scheduler & availability", "Review & merge loop", "Integrations & auth",
+             "Security & code review", "QA sign-off loop", "Worker & platform"],
+    values: [156, 120, 116, 108, 94, 94, 90, 33, 21],
   }],
   L.chartBase({
     x: 0.75, y: 2.32, w: 7.7, h: 3.55,
@@ -386,17 +386,17 @@ s.addChart(
     dataLabelPosition: "outEnd",
     dataLabelColor: C.muted,
     catAxisLabelFontSize: 10,
-    valAxisMinVal: 0, valAxisMaxVal: 130, valAxisMajorUnit: 25,
+    valAxisMinVal: 0, valAxisMaxVal: 175, valAxisMajorUnit: 25,
     barGapWidthPct: 42,
   })
 );
 
 const kpis = [
-  ["44,685", "lines of\nproduction code"],
-  ["49", "backend service\nmodules"],
+  ["53,691", "lines of\nproduction code"],
+  ["57", "backend service\nmodules"],
   ["25", "schema\nmigrations"],
-  ["20", "database\ntables"],
-  ["52", "API\nendpoints"],
+  ["21", "database\ntables"],
+  ["59", "API\nendpoints"],
   ["4", "concurrent\nbackground loops"],
 ];
 kpis.forEach(([v, k], i) => {
@@ -406,7 +406,7 @@ kpis.forEach(([v, k], i) => {
 });
 
 L.takeaway(s, "Nothing here was scaffolded. Every subsystem was debugged into existence.", 6.35);
-s.addNotes("706 tests across nine subsystems. The heaviest coverage sits on the loops that send messages to real people, because those are the ones where a bug is visible to somebody else's team.");
+s.addNotes("859 tests across nine subsystems. The heaviest coverage sits on the loops that send messages to real people, because those are the ones where a bug is visible to somebody else's team.");
 
 // ===========================================================================
 // 10 · ENGINEERING RIGOUR
@@ -421,7 +421,7 @@ s.addChart(
   [{
     name: "Lines of code",
     labels: ["Services", "Tests", "Frontend", "Routers", "Models & schemas"],
-    values: [18497, 11058, 9216, 3955, 1959],
+    values: [22082, 14249, 9983, 4872, 2505],
   }],
   L.chartBase({
     x: 0.75, y: 2.32, w: 5.2, h: 3.6,
@@ -459,7 +459,92 @@ L.takeaway(s, "Almost none of these bugs announced themselves — they all looke
 s.addNotes("A quarter of the codebase is tests. Every invariant is written down next to the failure that produced it, because the hardest bugs here all looked like success: a clean scan, a merged PR, a working link.");
 
 // ===========================================================================
-// 11 · TIME AGENT
+// 11 · IT HAS NOW RUN FOR REAL
+// ===========================================================================
+s = S();
+s.background = { color: C.dark };
+L.title(s, "The pipeline has now carried a ticket to sign-off on live services.", { dark: true });
+L.sub(s, "One work item, start to finish, against real GitHub, Slack, Gmail and Google Docs — not a fixture.", { dark: true });
+
+const run = [
+  ["Ticket assigned", "GitHub issue #1, one repository", ""],
+  ["Agent wrote the code", "worktree cut from the local clone", "106s"],
+  ["Pull request opened", "3 files, +161 lines, machine-authored banner", ""],
+  ["Analysed on local models", "security scan and code review, no cloud call", ""],
+  ["Reviewed and merged", "human approval — the agent cannot approve itself", ""],
+  ["Testing team signed off", "brief sent, tester replied, ticket closed", ""],
+];
+run.forEach(([head, detail, ms], i) => {
+  const y = 2.34 + i * 0.73;
+  L.chip(s, pres, 0.78, y + 0.06, 0.42, String(i + 1), C.coral, C.dark, 12);
+  s.addText(head, {
+    x: 1.38, y, w: 3.55, h: 0.32, fontFace: F.body, fontSize: 13, bold: true,
+    color: C.inkOnDk, margin: 0, valign: "middle",
+  });
+  s.addText(detail, {
+    x: 1.38, y: y + 0.29, w: 5.6, h: 0.3, fontFace: F.body, fontSize: 10.5,
+    color: C.mutedDk, margin: 0, valign: "middle",
+  });
+  if (ms) {
+    s.addText(ms, {
+      x: 5.05, y, w: 0.9, h: 0.32, fontFace: F.display, fontSize: 13, bold: true,
+      color: C.kraft, margin: 0, valign: "middle",
+    });
+  }
+});
+
+L.darkCard(s, pres, 7.55, 2.28, 5.03, 3.62, C.coral);
+L.eyebrow(s, "THE STEP THAT PROVES THE DESIGN", 7.9, 2.56, 4.4, C.coral);
+s.addText(
+  [
+    { text: "Merged", options: { bold: true, color: C.inkOnDk, breakLine: true } },
+    { text: "GitHub closed the ticket automatically.\n", options: { color: C.mutedDk, breakLine: true } },
+    { text: "Reopened, 2 minutes later", options: { bold: true, color: C.coral, breakLine: true } },
+    { text: "This repository closes on QA sign-off, not at merge — so Locus put it back.\n", options: { color: C.mutedDk, breakLine: true } },
+    { text: "Signed off", options: { bold: true, color: C.inkOnDk, breakLine: true } },
+    { text: "The tester replied. Only then did it close.", options: { color: C.mutedDk } },
+  ],
+  { x: 7.92, y: 3.02, w: 4.35, h: 2.7, fontFace: F.body, fontSize: 11.5,
+    margin: 0, lineSpacingMultiple: 1.18 }
+);
+
+L.takeaway(s, "Merged is not done, and the pipeline now demonstrates the difference rather than claiming it.", 6.42, { dark: true });
+s.addNotes("This is the slide that changed most recently. Until this run, every integration call was written against the documented API and unproven. A ticket was assigned, the agent wrote the code, a human approved it, it merged, the testing team was briefed, a tester replied, and the ticket closed on that reply. The step worth watching is the middle one: GitHub closes a ticket the moment a linked pull request merges, and this repository is configured to close on QA sign-off instead, so Locus reopened it and left it open until a person confirmed.");
+
+// ===========================================================================
+// 12 · WHAT RUNNING IT LIVE FOUND
+// ===========================================================================
+s = S();
+s.background = { color: C.cream };
+L.title(s, "Running it live surfaced six defects that 859 tests could not.");
+L.sub(s, "Every one sat in the gap between the code and the world it runs in — none could fail a unit test.");
+
+const bugs = [
+  ["Subprocess", "The documented dev command put the app on an event loop that cannot spawn processes. Authoring returned 500 every time; the same code passed from a script."],
+  ["Credentials", "The driver read the GitHub token under a key nothing writes — and reported it as an authoring failure, spending an attempt on a key name."],
+  ["Workspace", "A removed worktree left a registration behind, so the next attempt at that path failed permanently."],
+  ["False assurance", "The pull request said the test gate passed on repositories that have no test command."],
+  ["Attribution", "A model-written commit carried a human's name — and made the guard against overwriting human work fire on the agent's own commits."],
+  ["Deferred close", "The closing keyword let GitHub close the ticket at merge, defeating the QA sign-off setting on exactly the pull requests this pipeline authors."],
+];
+bugs.forEach(([head, body], i) => {
+  const x = 0.75 + (i % 3) * 4.08, y = 2.34 + Math.floor(i / 3) * 1.92;
+  L.card(s, pres, x, y, 3.85, 1.78);
+  s.addText(head, {
+    x: x + 0.26, y: y + 0.14, w: 3.3, h: 0.3, fontFace: F.body, fontSize: 12,
+    bold: true, color: C.coral, margin: 0, valign: "middle",
+  });
+  s.addText(body, {
+    x: x + 0.26, y: y + 0.46, w: 3.35, h: 1.2, fontFace: F.body, fontSize: 10,
+    color: C.ink, margin: 0, lineSpacingMultiple: 1.16,
+  });
+});
+
+L.takeaway(s, "All six were fixed, and the run above is the same pipeline afterwards.", 6.42);
+s.addNotes("Six defects, found by running the thing rather than by testing it. The first is the one worth naming: the command this project documents for running the backend puts the application on an event loop that cannot start a subprocess, and the entire authoring feature is a subprocess. It failed in exactly one environment and passed every test. The attribution one matters for a different reason: a commit written by a model carried a human name, which is both dishonest in the record and broke the guard that stops an agent overwriting someone's work.");
+
+// ===========================================================================
+// 13 · TIME AGENT
 // ===========================================================================
 s = S();
 s.background = { color: C.cream };
@@ -510,7 +595,7 @@ guards.forEach(([h, d], i) => {
 s.addNotes("The time agent answers on your behalf when you are booked. Importance is decided deterministically first — a reviewer mid-round, or a ticket already blocked on you — and only unstructured messages reach a classifier, which has no tools bound.");
 
 // ===========================================================================
-// 12 · WHY THIS WINS
+// 14 · WHY THIS WINS
 // ===========================================================================
 s = S();
 s.background = { color: C.cream };
@@ -563,7 +648,7 @@ L.takeaway(s, "Build the 80%. The author becomes a plug.", 6.4, { w: 5.6 });
 s.addNotes("Every AI coding tool solves the same twenty percent: writing the diff. Locus builds the eighty percent around it — which is exactly what makes the author swappable, and why adding autonomous mode changed one setting instead of forking the product.");
 
 // ===========================================================================
-// 13 · CLOSING
+// 15 · CLOSING
 // ===========================================================================
 s = S();
 s.background = { color: C.dark };
@@ -577,7 +662,7 @@ s.addText("You choose, per ticket, whether you write the code or Locus does. The
   margin: 0, lineSpacingMultiple: 1.3,
 });
 
-const close = [["706", "tests passing"], ["9", "steps automated"], ["12", "min saved per\nreview round*"], ["0", "cloud calls to\nreview your code"]];
+const close = [["859", "tests passing"], ["9", "steps automated"], ["12", "min saved per\nreview round*"], ["0", "cloud calls to\nreview your code"]];
 close.forEach(([v, k], i) => {
   L.stat(s, 0.78 + i * 1.85, 5.3, 1.7, v, k, { dark: true, size: 30 });
 });

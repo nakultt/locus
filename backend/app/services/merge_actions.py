@@ -174,6 +174,73 @@ async def close_github_issue(
     return True, f"Closed #{issue_number}"
 
 
+async def reopen_for_qa(
+    token: str, repo: str, issue_number: int, pr_number: int
+) -> tuple[bool, str]:
+    """
+    Reopen an issue GitHub auto-closed at merge, when QA still has to sign off.
+
+    `close_on_qa_signoff` stops *Locus* from closing the work item, but nothing
+    stopped GitHub: a pull request body carrying `Closes #N` -- which the
+    authoring driver writes, and which is what populates
+    `closingIssuesReferences` for `get_linked_issues` -- closes the issue the
+    moment it merges, and the close is attributed to whoever merged.
+
+    So the setting was silently defeated on exactly the pull requests this
+    pipeline authors: the ticket closed before any tester saw it, which is the
+    outcome the setting exists to prevent -- a ticket closed while a bug is
+    live drops off the board, the one place anyone would look for it.
+
+    Reopening rather than dropping the keyword is deliberate. The keyword is
+    load-bearing: `get_linked_issues` reads `closingIssuesReferences` to learn
+    which issues this pull request resolves, and that is how the QA thread
+    knows what to close on sign-off. Writing `Refs` instead would leave the
+    thread with no issue to close and break the feature further along.
+
+    Only reopens what is closed, so this is a no-op when the keyword was absent
+    or a person deliberately closed the issue first. The comment says why, or
+    the reopen reads as the bot fighting the merge.
+    """
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        current = await client.get(
+            f"https://api.github.com/repos/{repo}/issues/{issue_number}",
+            headers=headers,
+        )
+        if current.status_code != 200:
+            return False, f"Issue #{issue_number} not found"
+        if current.json().get("state") != "closed":
+            return True, f"#{issue_number} already open"
+
+        reopened = await client.patch(
+            f"https://api.github.com/repos/{repo}/issues/{issue_number}",
+            headers=headers,
+            json={"state": "open"},
+        )
+        if reopened.status_code != 200:
+            return False, f"Could not reopen #{issue_number}"
+
+        await client.post(
+            f"https://api.github.com/repos/{repo}/issues/{issue_number}/comments",
+            headers=headers,
+            json={
+                "body": (
+                    f"#{pr_number} merged and GitHub closed this automatically. "
+                    "Reopening: this repository closes work items on QA "
+                    "sign-off, not at merge. The testing team has been "
+                    "notified, and this closes when they confirm."
+                )
+            },
+        )
+
+    return True, f"Reopened #{issue_number} pending QA sign-off"
+
+
 QA_BRIEF_PROMPT = """You are writing a short test brief for a QA engineer.
 
 A pull request just merged. Describe what to verify, based only on the facts \
@@ -476,6 +543,23 @@ async def run_merge_actions(
                 continue
             try:
                 ok, detail = await close_github_issue(
+                    github_token, ctx.repo, issue.number, ctx.pr_number
+                )
+                (outcome.issues_closed if ok else outcome.errors).append(detail)
+            except Exception as e:
+                outcome.errors.append(f"#{issue.number}: {e}")
+
+    # The other half of deferring the close: undo GitHub's own.
+    #
+    # Not raised past the merge -- a completed merge must not read as failed
+    # because an issue could not be reopened, the same rule the board move
+    # follows.
+    elif close_issues and close_on_qa_signoff and github_token:
+        for issue in ctx.linked_issues:
+            if issue.relation != "closes":
+                continue
+            try:
+                ok, detail = await reopen_for_qa(
                     github_token, ctx.repo, issue.number, ctx.pr_number
                 )
                 (outcome.issues_closed if ok else outcome.errors).append(detail)

@@ -164,6 +164,17 @@ def prepare_workspace(
     # fetch is what makes a rework build on what the reviewer already read
     # rather than on a stale local base.
     run_git(["fetch", "origin", "--prune"], source, check=False)
+
+    # Clear registrations whose directory is gone, before adding one back.
+    # Removing a worktree directory with `shutil.rmtree` -- which the block
+    # above does on a re-run, and which `prune_old_workspaces` does on every
+    # TTL sweep -- deletes the files but leaves git's registration behind. The
+    # next `worktree add` at that path then fails permanently with "is a
+    # missing but already registered worktree", and because the path is keyed
+    # by attempt number the failure is invisible until a retry lands on it.
+    # Prune is safe: it only drops registrations whose directory no longer
+    # exists, so a live worktree is untouched.
+    run_git(["worktree", "prune"], source, check=False)
     base = base_branch or _default_branch(source)
     branch = existing_branch or f"locus/{_slug(ticket_key)}-{attempt}"
 
@@ -244,6 +255,102 @@ def branch_commit_authors(
 # because a team may want the agent's commits attributed to a real bot account.
 AGENT_EMAIL = os.getenv("LOCUS_AGENT_EMAIL") or "locus-agent@users.noreply.github.com"
 AGENT_NAME = os.getenv("LOCUS_AGENT_NAME") or "Locus"
+
+
+def attribution_trailer(driver: str, model: str | None, attempt: int) -> str:
+    """
+    The line that says a machine wrote this commit.
+
+    The pull request body already carries the machine-authored banner, but a
+    pull request is a view and the commit is the record: it outlives the PR, it
+    is what `git log` and `git blame` show, and it is what someone reads two
+    years later when they are working out why a line exists. Disclosure that
+    lives only in the pull request is disclosure that expires.
+
+    Written as git trailers so it is greppable (`git log --grep`) and survives
+    a squash merge, which folds the messages of every commit into one body.
+    """
+    ran = f"{driver} running {model}" if model else driver
+    return (
+        f"Machine-authored: written by {ran}, attempt {attempt}.\n"
+        f"Co-authored-by: {AGENT_NAME} <{AGENT_EMAIL}>"
+    )
+
+
+def stamp_attribution(
+    workspace: Workspace,
+    base_branch: str,
+    driver: str,
+    model: str | None,
+    attempt: int,
+) -> None:
+    """
+    Append the attribution trailer to every commit the agent made.
+
+    Every one, not just the tip: the agent is free to split its work, and a
+    trailer on the last commit only would leave the rest of them looking
+    hand-written -- which is the claim this exists to prevent.
+
+    Rewriting is safe here and nowhere else: these commits exist only in a
+    throwaway worktree and have never been pushed, so nothing else can be
+    holding the old hashes. Commits that already carry the trailer are left
+    alone, so a rework does not stamp the previous attempt's commits twice.
+
+    Best-effort. A commit whose message could not be rewritten is worth far
+    less than the diff it carries, so a failure here must not fail the run --
+    the pull request body still carries the banner.
+    """
+    ref = (
+        f"origin/{base_branch}"
+        if _branch_exists(workspace.path, f"origin/{base_branch}")
+        else base_branch
+    )
+    listed = run_git(
+        ["log", "--format=%H", f"{ref}..HEAD"], workspace.path, check=False
+    )
+    if listed.returncode != 0:
+        return
+
+    shas = [line.strip() for line in listed.stdout.splitlines() if line.strip()]
+    if not shas:
+        return
+
+    trailer = attribution_trailer(driver, model, attempt)
+    marker = "Machine-authored: written by"
+
+    # A filter-branch over a handful of commits is heavier than needed, and
+    # rewording mid-history needs a rebase. The common case by far is a single
+    # commit, so handle that directly and fall back to stamping the tip.
+    if len(shas) == 1:
+        existing = run_git(["log", "-1", "--format=%B"], workspace.path, check=False)
+        if existing.returncode == 0 and marker not in existing.stdout:
+            run_git(
+                [
+                    "-c", f"user.email={AGENT_EMAIL}",
+                    "-c", f"user.name={AGENT_NAME}",
+                    "commit", "--amend", "--no-edit",
+                    "-m", existing.stdout.strip(),
+                    "-m", trailer,
+                ],
+                workspace.path,
+                check=False,
+            )
+        return
+
+    # Several commits: add one empty commit carrying the attribution rather
+    # than rewriting history. Less tidy, but it cannot lose a message, and an
+    # empty commit is visible in `git log` where a silent skip would not be.
+    run_git(
+        [
+            "-c", f"user.email={AGENT_EMAIL}",
+            "-c", f"user.name={AGENT_NAME}",
+            "commit", "--allow-empty",
+            "-m", f"Attribution for the {len(shas)} commits above",
+            "-m", trailer,
+        ],
+        workspace.path,
+        check=False,
+    )
 
 
 def human_commits_on(workspace: Workspace, base_branch: str, branch: str) -> bool:
@@ -368,12 +475,34 @@ async def run_agent(
     which consumes an attempt like every other failure, or a ticket that
     reliably hangs retries forever and the bound protects nothing.
     """
-    process = await asyncio.create_subprocess_exec(
-        *command,
-        cwd=str(workspace),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            cwd=str(workspace),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+    except NotImplementedError:
+        # The running event loop cannot spawn a subprocess, so run it on a
+        # thread instead.
+        #
+        # This is not hypothetical and it is not rare: on Windows, uvicorn
+        # picks the loop with
+        #
+        #     if sys.platform == "win32" and not use_subprocess:
+        #         return asyncio.ProactorEventLoop
+        #     return asyncio.SelectorEventLoop
+        #
+        # and `--reload` sets use_subprocess. So the command this project
+        # documents for running the backend puts the app on a SelectorEventLoop,
+        # where `create_subprocess_exec` raises NotImplementedError -- and the
+        # whole authoring feature is a subprocess. Autonomous mode returned a
+        # bare 500 on every attempt, while the same code called from a script
+        # worked, because `asyncio.run` gets the Proactor loop.
+        #
+        # A driver whose availability depends on how its host was launched is
+        # a driver that fails in exactly one environment and passes every test.
+        return await asyncio.to_thread(_run_agent_blocking, command, workspace, timeout)
 
     try:
         stdout, _ = await asyncio.wait_for(process.communicate(), timeout=timeout)
@@ -383,6 +512,31 @@ async def run_agent(
         return 124, f"Timed out after {timeout}s"
 
     return process.returncode or 0, (stdout or b"").decode("utf-8", "replace")
+
+
+def _run_agent_blocking(
+    command: list[str], workspace: Path, timeout: int
+) -> tuple[int, str]:
+    """
+    The threaded fallback for `run_agent`, with the same contract.
+
+    Same return shape and the same 124-on-timeout, so the caller cannot tell
+    which path ran -- including the timeout being reported as a spent attempt
+    rather than an error.
+    """
+    try:
+        done = subprocess.run(
+            command,
+            cwd=str(workspace),
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, f"Timed out after {timeout}s"
+
+    return done.returncode or 0, (done.stdout or "") + (done.stderr or "")
 
 
 def changed_files(workspace: Workspace, base_branch: str) -> list[str]:
@@ -523,8 +677,19 @@ def build_pr_body(
             "```",
             "",
         ]
-    else:
+    elif (request.settings or {}).get("test_command"):
         lines += ["The configured test command passed in the agent's worktree.", ""]
+    else:
+        # `test_failure` is None both when the gate passed and when there was
+        # no gate to run, so claiming a pass on the strength of it alone tells
+        # the reviewer a test suite verified this diff when none exists. That
+        # is the same failure mode as an unparseable review degrading to an
+        # empty pass: a run that checked nothing must not read as a clean one.
+        lines += [
+            "No test command is configured for this repository, so nothing "
+            "verified this diff before the pull request opened.",
+            "",
+        ]
 
     if doc_url:
         lines += [f"[Full analysis and history]({doc_url})", ""]
@@ -561,7 +726,16 @@ class OpenCodeDriver:
                 **extra,
             )
 
-        token = (integration_configs.get("github") or {}).get("token")
+        # Both keys, in the order the rest of the codebase uses them. A PAT
+        # connected through the integrations UI is stored under `api_key`
+        # (`get_integration_configs` puts it there, and `agent.py` reads it
+        # from there); `token` is what a tool body sees after
+        # `get_github_tools` rebinds it. Reading only `token` meant autonomous
+        # mode reported "GitHub is not connected" on a perfectly connected
+        # account -- and reported it as an authoring failure, which spends an
+        # attempt, so the bound was consumed by a key name.
+        github_config = integration_configs.get("github") or {}
+        token = github_config.get("api_key") or github_config.get("token")
         if not token:
             return failed("GitHub is not connected, so no pull request could be opened")
 
@@ -589,6 +763,27 @@ class OpenCodeDriver:
 
         keep = True
         try:
+            # Stamp the agent identity onto the worktree before the agent runs.
+            #
+            # SCOPE_INSTRUCTIONS tells the agent to commit its own work, and it
+            # does so with whatever identity the checkout carries -- the
+            # developer's. The `-c user.email=...` on Locus's own commit below
+            # never applies, because by then there is nothing left to commit
+            # and that case is deliberately tolerated.
+            #
+            # Two things break when the agent commits as a person. The record
+            # contradicts the disclosure: the pull request says machine-
+            # authored while `git blame` credits a human, and the history is
+            # the copy that outlives the pull request. And `human_commits_on`
+            # decides whether somebody has started by comparing authors
+            # against AGENT_EMAIL, so the agent's own commits read as a human's
+            # and the next rework hands the work item back -- the guard firing
+            # on the work it was meant to protect.
+            #
+            # Local to the worktree, so the developer's own config is untouched.
+            run_git(["config", "user.email", AGENT_EMAIL], workspace.path, check=False)
+            run_git(["config", "user.name", AGENT_NAME], workspace.path, check=False)
+
             # Someone started. Refuse before the model is invoked -- an agent
             # overwriting a person's work is the worst thing it can do quietly.
             if request.existing_branch and human_commits_on(
@@ -699,6 +894,7 @@ class OpenCodeDriver:
                     "-c", f"user.name={AGENT_NAME}",
                     "commit", "-m",
                     f"{request.ticket_key}: {request.title}",
+                    "-m", attribution_trailer(self.name, model, request.attempt),
                 ],
                 workspace.path,
                 check=False,
@@ -708,6 +904,11 @@ class OpenCodeDriver:
                     f"Could not commit the agent's work: {commit.stderr or commit.stdout}",
                     workspace_path=str(workspace.path),
                 )
+
+            # The agent commits its own work, so the message above is usually
+            # never written -- "nothing to commit" is the normal path, not the
+            # exception. Stamp the attribution onto whatever it did write.
+            stamp_attribution(workspace, base_branch, self.name, model, request.attempt)
 
             push = run_git(
                 ["push", "-u", "origin", workspace.branch], workspace.path, check=False
