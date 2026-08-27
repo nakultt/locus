@@ -858,3 +858,51 @@ class ScheduleProposalRecord(Base):
 
     def __repr__(self) -> str:
         return f"<ScheduleProposalRecord(owner_id={self.owner_id}, state={self.state})>"
+
+
+class InterruptionEvent(Base):
+    """
+    Somebody reached the owner while they were booked, and what Locus said.
+
+    This cannot live in `communication_events`: that table's `repo` and
+    `pr_number` are NOT NULL, and an interruption has neither. Reusing it would
+    mean inventing a sentinel repo, which the next reader takes for real.
+
+    `importance_source` is what makes a wrong escalation debuggable. Two of the
+    three are deterministic facts -- the sender is a reviewer mid-round, or the
+    message names a work item the worklist reports blocked on you -- and only
+    the third is a model's judgement. The UI says which, and the model-made one
+    reads as weaker than the other two.
+    """
+
+    __tablename__ = "interruption_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    occurred_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    channel = Column(String(16), nullable=False, default="slack")
+    participant = Column(String(255), nullable=True)
+    thread_ts = Column(String(32), nullable=True, index=True)
+    slack_channel = Column(String(64), nullable=True, index=True)
+
+    # free | busy | focus | off_hours -- what the calendar said at the time.
+    availability_state = Column(String(16), nullable=False, default="free")
+    # important | routine
+    importance = Column(String(16), nullable=False, default="routine")
+    # reviewer | worklist | classifier
+    importance_source = Column(String(16), nullable=False, default="classifier")
+
+    replied = Column(Integer, nullable=False, default=0)
+    # Stored **as sent**, passed to the log rather than reconstructed. A
+    # reconstruction drifts from what the channel actually saw, which makes the
+    # record worse than useless -- the same reason
+    # `merge_actions._qa_email_text` exists.
+    reply_body = Column(Text, nullable=True)
+    proposal_id = Column(Integer, nullable=True)
+    # A clipped quote of what they said, for the strip. Not the whole message:
+    # this is a record of an interruption, not a second copy of Slack.
+    excerpt = Column(Text, nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<InterruptionEvent(owner_id={self.owner_id}, state={self.availability_state})>"
