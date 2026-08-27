@@ -1,6 +1,13 @@
 # Locus v2 — Three Agents, Two Modes
 
-> **Status.** Not started. **This is the only plan for this project.**
+> **Status.** Built — all nine phases. **This is the only plan for this project.**
+>
+> It is now a record of *why*, not a list of what is missing. Every rule below has a failure
+> behind it; read the reasoning before changing the behaviour. What has **not** happened is the
+> thing the *Inherited decisions* section already warned about: none of this has run against live
+> third-party services. The solver, the parsers, the credential isolation, the workspace checks and
+> the driver's decisions are exercised directly; every call that reads or writes to GitHub, Jira,
+> Slack, Google or OpenCode is written against the documented API and is unproven.
 >
 > It absorbs and replaces `MODES_PLAN.md` (the two-mode design) and
 > `IMPLEMENTATION_PLAN.md` (the original two-feature plan, whose work has shipped), both of which

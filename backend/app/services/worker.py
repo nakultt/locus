@@ -260,3 +260,43 @@ async def qa_email_loop() -> None:
             raise
         except Exception:
             logger.exception("QA email poll failed")
+
+
+async def calendar_agent_loop() -> None:
+    """
+    Sweep enabled users' calendars for conflicts and store proposals.
+
+    The fourth loop. Its interval is in minutes rather than seconds: the
+    ceiling on how fast a calendar changes is far below the ceiling on how fast
+    Google rate-limits, and every iteration costs a Calendar call per enabled
+    user.
+
+    Propose-only unless the user turned `auto_apply` on. A moved meeting is
+    visible to everyone invited, which is why the default is a plan waiting in
+    the UI and `POST /schedule/apply` executing it unchanged.
+    """
+    from app.services.calendar_agent import SWEEP_INTERVAL_MINUTES, sweep_once
+    from app.services.locks import CALENDAR_LOCK, advisory_lock
+
+    logger.info("Calendar agent started")
+
+    while True:
+        try:
+            await asyncio.sleep(SWEEP_INTERVAL_MINUTES * 60)
+
+            # One sweeper at a time. Two instances would find the same
+            # double-booking and propose the same reshuffle twice, and a
+            # proposal is something a person is asked to act on.
+            with advisory_lock(CALENDAR_LOCK) as held:
+                if not held:
+                    continue
+                proposed = await sweep_once()
+
+            if proposed:
+                logger.info("Calendar agent proposed %s change(s)", proposed)
+
+        except asyncio.CancelledError:
+            logger.info("Calendar agent stopping")
+            raise
+        except Exception:
+            logger.exception("Calendar sweep failed")

@@ -23,7 +23,12 @@ from app.routers import (
     tasks,
     webhooks,
 )
-from app.services.worker import merge_gate_loop, qa_email_loop, worker_loop
+from app.services.worker import (
+    calendar_agent_loop,
+    merge_gate_loop,
+    qa_email_loop,
+    worker_loop,
+)
 
 
 @asynccontextmanager
@@ -35,6 +40,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(worker_loop()),
         asyncio.create_task(qa_email_loop()),
         asyncio.create_task(merge_gate_loop()),
+        asyncio.create_task(calendar_agent_loop()),
     ]
     try:
         yield

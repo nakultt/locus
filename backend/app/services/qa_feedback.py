@@ -259,6 +259,9 @@ async def handle_qa_reply(
     close_on_signoff: bool = False,
     project_board_sync: bool = True,
     project_column_map: dict[str, str] | None = None,
+    db=None,
+    owner_id: int | None = None,
+    review_slack_channel: str | None = None,
 ) -> dict:
     """
     Act on a QA reply.
@@ -271,6 +274,10 @@ async def handle_qa_reply(
         done_status: Jira status a passing sign-off moves the ticket to.
         pr_number: Named in the GitHub issue comment, so the close records
             which change was verified.
+        db: A session, when the caller has one. Only the autonomous retry
+            needs it, and it stays optional so a caller that has no session --
+            or a deployment with no authoring driver -- keeps working exactly
+            as before.
 
     Returns:
         A summary of the verdict and anything that changed.
@@ -398,4 +405,83 @@ async def handle_qa_reply(
             except Exception as e:
                 outcome["errors"].append(f"#{number}: {e}")
 
+    # The second authoring trigger, fired after the reopen rather than before
+    # it: the ticket must be back in play whether or not an agent picks it up,
+    # and a retry that raised before the reopen would leave a rejected change
+    # marked done.
+    #
+    # This opens a *new* pull request, which is exactly what
+    # `work_item.resolve_key` and `sibling_reviews` were built for -- the new
+    # PR inherits the rejection history for free, so the fix opens carrying the
+    # reason the work came back.
+    if db is not None and owner_id is not None and ticket_keys:
+        await _maybe_author_fix(
+            db,
+            owner_id=owner_id,
+            repo=repo,
+            pr_number=pr_number,
+            ticket_keys=ticket_keys,
+            rejection=reply_text,
+            integration_configs=integration_configs,
+            review_slack_channel=review_slack_channel or slack_channel,
+            outcome=outcome,
+        )
+
     return outcome
+
+
+async def _maybe_author_fix(
+    db,
+    *,
+    owner_id: int,
+    repo: str,
+    pr_number: int,
+    ticket_keys: list[str],
+    rejection: str,
+    integration_configs: dict,
+    review_slack_channel: str | None,
+    outcome: dict,
+) -> None:
+    """
+    Take an authoring swing at a rejected change, if the work item allows one.
+
+    Runs identically for a Slack reply and a Gmail one -- the channel a tester
+    happened to choose must not change what happens next.
+
+    Swallows its own failure into `outcome["errors"]`: the reopen has already
+    happened and is the part that matters, and a driver that could not start
+    must not make a completed reopen read as a failed one.
+    """
+    from app.services import authoring_flow
+    from app.services.agent_settings import resolve_settings
+
+    for key in ticket_keys:
+        try:
+            from app import models
+
+            registration = db.query(models.RepoWebhook).filter(
+                models.RepoWebhook.repo == repo,
+                models.RepoWebhook.owner_id == owner_id,
+            ).first()
+            settings = resolve_settings(db, owner_id, registration, ticket_key=key)
+            if settings.authoring_mode != "autonomous":
+                continue
+
+            result = await authoring_flow.maybe_retry(
+                db,
+                owner_id=owner_id,
+                repo=repo,
+                pr_number=pr_number,
+                ticket_key=key,
+                settings=settings,
+                integration_configs=integration_configs,
+                trigger="qa_rejected",
+                slack_channel=review_slack_channel,
+                rejection=rejection,
+            )
+            if result is not None and result.opened:
+                outcome.setdefault("authored", []).append(
+                    f"{key}: opened #{result.pr_number}"
+                )
+        except Exception as e:
+            outcome["errors"].append(f"{key}: authoring retry failed: {e}")

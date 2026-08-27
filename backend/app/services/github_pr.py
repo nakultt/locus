@@ -199,6 +199,100 @@ async def merge_pull_request(
     return False, f"GitHub refused the merge ({response.status_code}): {detail}"
 
 
+async def get_default_branch(token: str, repo: str) -> str:
+    """
+    The repository's default branch.
+
+    Read rather than assumed: hard-coding `main` cuts an authoring branch from
+    a branch that does not exist on every repo still on `master`, and the
+    failure surfaces as a confusing git error rather than a naming problem.
+    Falls back to `main` when the call fails, which is the modern default and
+    the only useful guess.
+    """
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(
+            f"{GITHUB_API_BASE}/repos/{repo}", headers=_headers(token)
+        )
+
+    if response.status_code != 200:
+        return "main"
+    return response.json().get("default_branch") or "main"
+
+
+async def create_pull_request(
+    token: str,
+    repo: str,
+    *,
+    title: str,
+    head: str,
+    base: str,
+    body: str,
+    draft: bool = False,
+) -> dict:
+    """
+    Open a pull request, resolving the two 422s that actually happen.
+
+    GitHub returns 422 both for "a pull request already exists for this head"
+    and for "no commits between base and head", and they need opposite
+    handling:
+
+    - **Already open.** The retry path hits this constantly -- a rework pushes
+      to the same branch, and the pull request from the previous attempt is
+      still there. Treated as success and the existing one is returned, since
+      that is exactly what the caller wanted to end up with.
+    - **No commits ahead.** The agent produced nothing. Reported as an error,
+      because an empty pull request is worse than none: it puts a reviewer's
+      name on a request to read a diff that does not exist.
+
+    Returns:
+        The pull request object on success, or `{"error": ...}`. A dict rather
+        than a raise so the caller can record the attempt either way -- every
+        outcome consumes an attempt, and one that raised past the recording
+        would not.
+    """
+    payload = {
+        "title": title, "head": head, "base": base, "body": body, "draft": draft
+    }
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            f"{GITHUB_API_BASE}/repos/{repo}/pulls",
+            headers=_headers(token),
+            json=payload,
+        )
+
+        if response.status_code == 201:
+            return response.json()
+
+        if response.status_code == 422:
+            detail = ""
+            try:
+                errors = response.json().get("errors") or []
+                detail = " ".join(str(e.get("message", "")) for e in errors)
+            except Exception:
+                detail = response.text
+
+            if "no commits between" in detail.lower():
+                return {"error": f"No commits between {base} and {head}"}
+
+            # Anything else 422 on a create is almost always the existing one.
+            existing = await client.get(
+                f"{GITHUB_API_BASE}/repos/{repo}/pulls",
+                headers=_headers(token),
+                params={"head": f"{repo.split('/')[0]}:{head}", "state": "open"},
+            )
+            if existing.status_code == 200 and existing.json():
+                return existing.json()[0]
+
+            return {"error": f"GitHub refused the pull request (422): {detail}"}
+
+    try:
+        message = response.json().get("message", response.text)
+    except Exception:
+        message = response.text
+    return {"error": f"GitHub refused the pull request ({response.status_code}): {message}"}
+
+
 async def get_pr_diff(token: str, repo: str, pr_number: int) -> str:
     """
     Fetch the unified diff for a pull request.
@@ -443,6 +537,39 @@ async def get_pr_commits(token: str, repo: str, pr_number: int) -> list[str]:
         c.get("commit", {}).get("message", "").split("\n")[0]
         for c in commits
     ]
+
+
+async def get_pr_commit_authors(token: str, repo: str, pr_number: int) -> list[str]:
+    """
+    The author email of every commit on a pull request.
+
+    Separate from `get_pr_commits`, which returns subject lines for ticket-key
+    extraction. The email is what distinguishes a previous authoring attempt
+    from a person taking the branch over, and the two questions want different
+    fields off the same payload.
+
+    The committer object is explicitly null on commits GitHub cannot match to
+    an account, so the email is read from the commit itself rather than from
+    the linked user -- `.get(key, default)` does not save you when the key is
+    present and the value is None.
+    """
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(
+            f"{GITHUB_API_BASE}/repos/{repo}/pulls/{pr_number}/commits",
+            headers=_headers(token),
+            params={"per_page": 100},
+        )
+        response.raise_for_status()
+        commits = response.json()
+
+    authors = []
+    for entry in commits:
+        commit = entry.get("commit") or {}
+        author = commit.get("author") or {}
+        email = author.get("email")
+        if email:
+            authors.append(email)
+    return authors
 
 
 # ============== Comment posting (idempotent) ==============
