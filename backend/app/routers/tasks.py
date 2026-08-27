@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from app import models, schemas
 from app.database import get_db
 from app.dependencies import get_current_user, get_integration_configs
-from app.services import report_sync, task_board
+from app.services import authoring, context_brief, report_sync, task_board
 from app.services.agent_settings import resolve_settings
 
 router = APIRouter()
@@ -348,3 +348,253 @@ async def set_task_mode(
 
     _assigned_cache.pop(current_user.id, None)
     return _mode_response(db, current_user.id, task_key, registration)
+
+
+@router.get(
+    "/attempts",
+    response_model=list[schemas.AuthoringAttemptEntry],
+    summary="Every authoring attempt recorded against a work item",
+)
+async def get_task_attempts(
+    task_key: str = Query(..., description='Jira key, or "owner/repo#N"'),
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[schemas.AuthoringAttemptEntry]:
+    """
+    The attempt history, oldest first, including the ones that opened nothing.
+
+    This is where a handed-back item explains itself: "the agent has tried
+    three things" and "the agent tried once and a reviewer pushed back twice"
+    are different situations, and only the trigger on each row distinguishes
+    them.
+    """
+    await _registration_for_task(db, current_user, task_key)
+    return [
+        schemas.AuthoringAttemptEntry(
+            id=row.id,
+            ticket_key=row.ticket_key,
+            repo=row.repo,
+            pr_number=row.pr_number,
+            attempt=row.attempt,
+            trigger=row.trigger,
+            driver=row.driver,
+            model=row.model,
+            context_mode=row.context_mode,
+            opened=bool(row.opened),
+            error=row.error,
+            files_changed=row.files_changed,
+            lines_changed=row.lines_changed,
+            duration_seconds=row.duration_seconds,
+            created_at=row.created_at,
+        )
+        for row in authoring.attempts_for(db, current_user.id, task_key)
+    ]
+
+
+@router.post(
+    "/author",
+    response_model=schemas.AuthoringRunResponse,
+    summary="Hand this work item to the authoring agent",
+)
+async def author_task(
+    task_key: str = Query(..., description='Jira key, or "owner/repo#N"'),
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> schemas.AuthoringRunResponse:
+    """
+    Run the authoring driver once against this work item.
+
+    A board action, not a webhook, and deliberately so. The same rule
+    `report_sync.ensure_for_ticket` follows: it is called when someone opens
+    one task and never from the listing, because a refresh would act on every
+    assigned item at once. Authoring on assignment has that shape with a far
+    worse blast radius -- a morning's tickets would open a dozen pull requests
+    together.
+
+    This is the board's **second** write, and the invariant it amends said
+    there was exactly one. That rule exists so a dashboard refresh cannot
+    notify a team twice; one deliberate click that opens one pull request
+    satisfies the reasoning behind it rather than breaking it.
+
+    Everything after the pull request exists is the pipeline that already
+    runs -- the `opened` webhook fires and nothing downstream learns which arm
+    authored the change.
+    """
+    integration_configs = get_integration_configs(db, current_user.id)
+    board = await task_board.build(
+        db, owner_id=current_user.id, integration_configs=integration_configs
+    )
+    card = _find_card(board, task_key)
+    if card is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Task not found"
+        )
+
+    repo = card.pull_requests[0].repo if card.pull_requests else _repo_from_card(card)
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "This work item is not attached to a repository, so there is "
+                "nothing to write against. Link it to a repo or open a branch "
+                "from the issue first."
+            ),
+        )
+
+    registration = db.query(models.RepoWebhook).filter(
+        models.RepoWebhook.repo == repo,
+        models.RepoWebhook.owner_id == current_user.id,
+    ).first()
+    settings = resolve_settings(db, current_user.id, registration, ticket_key=task_key)
+
+    # The guards, in order. Each names what would have to change.
+    if settings.handed_back:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "This work item was handed back: "
+                f"{settings.handed_back_reason or 'no reason recorded'}. "
+                "Switch it back to autonomous on the card to try again."
+            ),
+        )
+    if settings.authoring_mode != "autonomous":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Autonomous mode is off for this work item "
+                f"(set by: {settings.sources.get('authoring_mode', 'unset')})"
+            ),
+        )
+
+    driver = authoring.get_driver()
+    if driver.name == "none":
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="No authoring driver configured (set LOCUS_AUTHORING_DRIVER)",
+        )
+
+    if authoring.throughput_exceeded(db, owner_id=current_user.id, repo=repo):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                f"{authoring.MAX_OPEN_AUTONOMOUS_PRS} agent-authored pull "
+                f"requests are already open on {repo}. Reviewer attention is "
+                "what this mode spends; land or close one first."
+            ),
+        )
+
+    attempt = authoring.next_attempt_number(
+        db, owner_id=current_user.id, ticket_key=task_key
+    )
+    request = authoring.AuthoringRequest(
+        ticket_key=task_key,
+        title=card.title,
+        description=card.description,
+        repo=repo,
+        existing_branch=card.linked_branches[0].name if card.linked_branches else None,
+        context=_context_for(db, current_user.id, task_key, card),
+        asks=authoring.gather_asks(db, owner_id=current_user.id, ticket_key=task_key),
+        rejection=_rejection_for(db, current_user.id, task_key),
+        attempt=attempt,
+        trigger="initial",
+    ).scoped()
+
+    result = await driver.author(request, integration_configs)
+    authoring.record_attempt(
+        db, owner_id=current_user.id, request=request, result=result
+    )
+
+    if result.hand_back_reason:
+        # Persisted before anything is announced. Announcing a handoff that did
+        # not persist re-triggers the driver on the next event.
+        authoring.hand_back(
+            db,
+            owner_id=current_user.id,
+            ticket_key=task_key,
+            reason=result.hand_back_reason,
+        )
+
+    _assigned_cache.pop(current_user.id, None)
+
+    return schemas.AuthoringRunResponse(
+        ticket_key=task_key,
+        opened=result.opened,
+        pr_number=result.pr_number,
+        pr_url=result.pr_url,
+        branch=result.branch,
+        attempt=attempt,
+        attempts_remaining=max(0, settings.autonomous_max_rounds + 1 - attempt),
+        driver=result.driver,
+        model=result.model,
+        files_changed=result.files_changed,
+        lines_changed=result.lines_changed,
+        error=result.error,
+        handed_back_reason=result.hand_back_reason,
+    )
+
+
+def _repo_from_card(card: schemas.TaskCard) -> str | None:
+    """
+    The repo a work item belongs to when it has no pull request yet.
+
+    A linked branch names one, and a GitHub issue key is `owner/repo#N`. A Jira
+    ticket with neither genuinely has no repo, and saying so beats guessing --
+    pointing the agent at the wrong codebase produces a confident, entirely
+    wrong pull request.
+    """
+    for branch in card.linked_branches:
+        if branch.repo:
+            return branch.repo
+    if "#" in card.key:
+        candidate = card.key.rsplit("#", 1)[0]
+        if "/" in candidate:
+            return candidate
+    return None
+
+
+def _context_for(
+    db: Session, owner_id: int, task_key: str, card: schemas.TaskCard
+) -> str:
+    """
+    The accumulated context for this work item, rendered on demand.
+
+    Keyed by work item rather than pull request, so a retry after a QA
+    rejection opens carrying the first attempt's discussion and the rejection
+    that caused it to exist. A task with no pull request yet has no brief to
+    build from and gets the ticket alone, which the driver's prompt states
+    outright rather than presenting an empty section as context.
+    """
+    if not card.pull_requests:
+        return ""
+    return context_brief.build(
+        db,
+        owner_id=owner_id,
+        repo=card.pull_requests[-1].repo,
+        pr_number=card.pull_requests[-1].pr_number,
+        ticket_key=task_key,
+    )
+
+
+def _rejection_for(db: Session, owner_id: int, task_key: str) -> str | None:
+    """
+    The tester's own words, when the last QA verdict on this item was a
+    rejection.
+
+    Read from `communication_events`, which is where the QA loop records what
+    a tester actually said alongside the verdict the classifier reached -- the
+    thread row carries the correlation, not the reply. In the tester's words
+    rather than a summary: "it does not work" and the specific thing they tried
+    are very different amounts of help to whoever writes the fix.
+
+    Scoped to the whole work item, not one pull request, because the rejection
+    that matters is usually against the attempt before this one.
+    """
+    event = db.query(models.CommunicationEvent).filter(
+        models.CommunicationEvent.owner_id == owner_id,
+        models.CommunicationEvent.ticket_key == task_key,
+        models.CommunicationEvent.loop == "qa",
+        models.CommunicationEvent.direction == "received",
+        models.CommunicationEvent.outcome == "broken",
+    ).order_by(models.CommunicationEvent.created_at.desc()).first()
+
+    return (event.body or None) if event else None

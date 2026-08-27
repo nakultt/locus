@@ -1204,6 +1204,44 @@ class RepoRegistration(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class AuthoringAttemptEntry(BaseModel):
+    """One recorded run of the authoring driver, opened or not."""
+    id: int
+    ticket_key: str
+    repo: str | None = None
+    pr_number: int | None = None
+    attempt: int
+    # initial | changes_requested | qa_rejected
+    trigger: str
+    driver: str
+    model: str | None = None
+    context_mode: str | None = None
+    opened: bool = False
+    error: str | None = None
+    files_changed: int = 0
+    lines_changed: int = 0
+    duration_seconds: float = 0.0
+    created_at: datetime | None = None
+
+
+class AuthoringRunResponse(BaseModel):
+    """What one click of "write this" produced."""
+    ticket_key: str
+    opened: bool
+    pr_number: int | None = None
+    pr_url: str | None = None
+    branch: str | None = None
+    attempt: int
+    attempts_remaining: int
+    driver: str
+    model: str | None = None
+    files_changed: int = 0
+    lines_changed: int = 0
+    error: str | None = None
+    # Set when this outcome ended autonomous mode for the work item.
+    handed_back_reason: str | None = None
+
+
 class AuthoringPreset(BaseModel):
     """
     A named starting point for the authoring dials.
