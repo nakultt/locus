@@ -15,6 +15,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import time
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
@@ -22,9 +23,12 @@ from sqlalchemy.orm import Session
 
 from app import crud, models
 from app.database import get_db
-from app.services import comms_log, report_sync
+from app.dependencies import get_integration_configs
+from app.services import availability as availability_service
+from app.services import comms_log, interruption, report_sync
 from app.services.agent_settings import resolve_settings
 from app.services.qa_feedback import handle_qa_reply
+from app.services.review_flow import post_review_notification
 
 logger = logging.getLogger(__name__)
 
@@ -142,8 +146,15 @@ async def slack_events(
 
     thread_ts = event.get("thread_ts")
     channel = event.get("channel")
-    if not thread_ts or not channel:
+    if not channel:
         return {"ok": True}
+
+    # The `thread_ts` requirement is relaxed for the interruption branch only:
+    # a top-level channel mention carries none, and being pinged in a channel
+    # is the ordinary case. The QA lookup below still requires one, because a
+    # QA reply is by construction a threaded reply.
+    if not thread_ts:
+        return await _maybe_answer_interruption(db, event, channel, None)
 
     # The timestamp alone is effectively unique -- it is a per-message clock
     # value, not a per-channel counter -- so match on it and use the channel
@@ -159,7 +170,13 @@ async def slack_events(
     )
 
     if not thread:
-        return {"ok": True}
+        # Not a QA reply. Placed *after* the lookup, deliberately: a QA reply
+        # must reach `qa_feedback` and never be intercepted by the auto-
+        # responder. The `bot_id` / `subtype` early-return above protects this
+        # path too -- the busy reply is posted by the bot, and without that
+        # guard it would answer itself, the same self-triggering failure the
+        # `@locus ignore` marker rule prevents.
+        return await _maybe_answer_interruption(db, event, channel, thread_ts)
 
     # Backfill the id so the exact match works from here on.
     if thread.slack_channel != channel:
@@ -251,3 +268,133 @@ async def slack_events(
     )
 
     return {"ok": True, "verdict": outcome["verdict"]}
+
+
+async def _maybe_answer_interruption(
+    db: Session,
+    event: dict,
+    channel: str,
+    thread_ts: str | None,
+) -> dict:
+    """
+    Answer somebody who reached the owner while they were booked.
+
+    Off by default, and it stays quiet in every case it is not certain about:
+    no enabled agent, no mention of this user, a calendar that cannot be read,
+    or a thread already answered today.
+
+    Never holds a pipeline message. This branch only ever *adds* a reply to a
+    message nothing else claimed; the review request, the QA brief and the
+    merge notification are sent by their own paths regardless of what the
+    calendar says.
+    """
+    text = event.get("text", "") or ""
+    mentioned = re.findall(r"<@([A-Z0-9]+)>", text)
+    if not mentioned:
+        return {"ok": True}
+
+    rows = db.query(models.TimeAgentSettings).filter(
+        models.TimeAgentSettings.enabled == 1,
+        models.TimeAgentSettings.auto_reply_busy == 1,
+        models.TimeAgentSettings.slack_member_id.in_(mentioned),
+    ).all()
+    if not rows:
+        return {"ok": True}
+
+    settings = rows[0]
+    user = db.query(models.User).filter(models.User.id == settings.owner_id).first()
+    if user is None:
+        return {"ok": True}
+
+    availability = await availability_service.for_user(db, user, settings)
+    if availability.state == "free":
+        # Nothing to say. An auto-responder that fires when you are reachable
+        # is noise from the first message.
+        return {"ok": True}
+
+    importance, source = await interruption.judge(
+        db, owner_id=user.id, participant=event.get("user"), text=text
+    )
+
+    if interruption.already_replied(
+        db, owner_id=user.id, thread_ts=thread_ts, channel=channel
+    ):
+        # Recorded but not answered: the strip should still show that somebody
+        # reached them, and a second reply is what gets the bot muted.
+        interruption.record(
+            db, owner_id=user.id, participant=event.get("user"),
+            thread_ts=thread_ts, channel=channel, availability=availability,
+            importance=importance, importance_source=source,
+            replied=False, reply_body=None, excerpt=text,
+        )
+        return {"ok": True}
+
+    slots = _free_slots(db, user, settings, availability, importance)
+    body = interruption.compose_reply(
+        availability, timezone=user.timezone, importance=importance, slots=slots
+    )
+
+    sent = False
+    try:
+        configs = get_integration_configs(db, user.id)
+        if "slack" in configs:
+            sent = await post_review_notification(
+                configs["slack"], channel, body, thread_ts=thread_ts
+            )
+    except Exception as e:
+        logger.warning("Could not post a busy reply: %s", e)
+
+    interruption.record(
+        db, owner_id=user.id, participant=event.get("user"),
+        thread_ts=thread_ts, channel=channel, availability=availability,
+        importance=importance, importance_source=source,
+        # `replied` records what actually reached the channel. A failed send
+        # must not start the once-a-day cooldown, or a Slack outage silences
+        # the responder for a day.
+        replied=sent,
+        reply_body=body if sent else None,
+        excerpt=text,
+    )
+
+    return {"ok": True}
+
+
+def _free_slots(db, user, settings, availability, importance: str) -> list:
+    """
+    Candidate times to offer, on an important interruption only.
+
+    Sent as *options*, never as a booking: writing to somebody else's calendar
+    from an automated reply is a write nobody approved. A failure returns
+    nothing, so the reply degrades to the plain version rather than not going
+    out.
+    """
+    if importance != "important" or availability.state == "off_hours":
+        return []
+
+    try:
+        from app.routers.schedule import events_from_raw
+        from app.services import calendar as calendar_service
+        from app.services.scheduler import find_free_slot
+
+        configs = get_integration_configs(db, user.id)
+        if "calendar" not in configs:
+            return []
+
+        calendar_service.get_calendar_tools(
+            credentials=configs["calendar"].get("credentials", {}),
+            timezone=user.timezone,
+        )
+        raw, error = calendar_service.fetch_events("today", "in 3 days")
+        if error:
+            return []
+
+        events = events_from_raw(db, user, raw)
+        after = availability.next_free or availability.until
+        if after is None:
+            return []
+
+        slot = find_free_slot(30, after, events)
+        return [slot] if slot else []
+    except Exception as e:
+        logger.debug("Could not find free slots for an interruption: %s", e)
+        return []

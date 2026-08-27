@@ -5,7 +5,7 @@ Request/Response validation models
 
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
@@ -1445,6 +1445,42 @@ class ScheduleProposal(BaseModel):
     def requires_approval(self) -> bool:
         """Any move touching another person needs a human decision."""
         return any(m.attendee_count > 1 for m in self.moves)
+
+
+class Availability(BaseModel):
+    """
+    Whether the owner can be reached, and until when.
+
+    Carries no event title, attendee, location or description. **The type is
+    the enforcement**: a busy reply is posted into a channel other people read,
+    and "in a 1:1 with Priya re: restructure" must not be able to reach it.
+    There is no field to leak it through.
+    """
+    state: Literal["free", "busy", "focus", "off_hours"] = "free"
+    until: datetime | None = None
+    next_free: datetime | None = None
+
+
+class InterruptionEntry(BaseModel):
+    """
+    One person who reached you while you were booked, and what Locus said.
+
+    `importance_source` is rendered in plain words on the strip -- "your
+    reviewer, mid-round", "names LOC-42, blocked on you", "judged important".
+    The third is the only model-made claim there and should read as weaker
+    than the other two.
+    """
+    id: int
+    occurred_at: datetime | None = None
+    channel: str = "slack"
+    participant: str | None = None
+    slack_channel: str | None = None
+    availability_state: str = "free"
+    importance: str = "routine"
+    importance_source: str = "classifier"
+    replied: bool = False
+    reply_body: str | None = None
+    excerpt: str | None = None
 
 
 class TimeAgentSettingsUpdate(BaseModel):

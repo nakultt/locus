@@ -700,12 +700,19 @@ async def post_review_notification(
     slack_config: dict,
     channel: str,
     text: str,
+    thread_ts: str | None = None,
 ) -> bool:
     """
     Post one review-loop message to Slack.
 
     Failure is logged and swallowed: a Slack outage must not fail the job and
     lose the recorded review state, which is the part that matters.
+
+    Args:
+        thread_ts: Reply inside a thread rather than at channel level. The busy
+            reply uses it so an answer lands where the question was asked; the
+            review loop leaves it unset, since a review request is a new
+            message rather than a reply to one.
     """
     credentials = slack_config.get("credentials", {}) or {}
     bot_token = credentials.get("bot_token") or slack_config.get("api_key", "")
@@ -717,7 +724,11 @@ async def post_review_notification(
             response = await client.post(
                 "https://slack.com/api/chat.postMessage",
                 headers={"Authorization": f"Bearer {bot_token}"},
-                json={"channel": channel, "text": text},
+                json=(
+                    {"channel": channel, "text": text, "thread_ts": thread_ts}
+                    if thread_ts
+                    else {"channel": channel, "text": text}
+                ),
             )
             payload = response.json()
     except Exception as e:
