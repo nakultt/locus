@@ -6,6 +6,7 @@ SQLAlchemy ORM models for User and Integration tables
 from sqlalchemy import (
     Column,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -121,7 +122,11 @@ class PRJob(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     repo = Column(String(255), nullable=False, index=True)  # "owner/name"
-    pr_number = Column(Integer, nullable=False)
+    # Nullable because an authoring job has no pull request number when it
+    # starts -- opening one is its whole job. Queuing with 0 as a sentinel is
+    # the tempting alternative and something downstream reads it as a real PR
+    # number within a release.
+    pr_number = Column(Integer, nullable=True)
     action = Column(String(32), nullable=False)  # opened, synchronize, reopened
     head_sha = Column(String(64), nullable=True)
     # Event fields the job needs but the PR number cannot supply -- a review's
@@ -715,3 +720,57 @@ class WorkItemSettings(Base):
 
     def __repr__(self) -> str:
         return f"<WorkItemSettings(ticket_key={self.ticket_key}, mode={self.authoring_mode})>"
+
+
+class AuthoringAttempt(Base):
+    """
+    One run of the authoring driver against one work item.
+
+    Append-only, the same argument as `PRReviewRound`: a mutable counter can
+    say the agent has tried three times but cannot say *why* it tried again,
+    and "the agent has tried three things" and "the agent tried once and a
+    reviewer pushed back twice" are different situations needing different
+    responses from the person the work eventually returns to.
+
+    Every outcome is recorded, including the ones that opened nothing -- a
+    timeout, an oversized diff, a denylisted path. That is what makes the bound
+    real: a failure that left no row would not consume an attempt, and a
+    reliably-failing ticket would retry forever.
+    """
+
+    __tablename__ = "authoring_attempts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    ticket_key = Column(String(128), nullable=False, index=True)
+    repo = Column(String(255), nullable=True, index=True)
+    # Null on every outcome that opened nothing, which is most of them.
+    pr_number = Column(Integer, nullable=True)
+
+    attempt = Column(Integer, nullable=False, default=1)
+    # initial | changes_requested | qa_rejected
+    trigger = Column(String(32), nullable=False, default="initial")
+
+    driver = Column(String(64), nullable=False, default="none")
+    # Recorded per attempt rather than read from config at display time.
+    # "Which model wrote this, and how much of our internal discussion did it
+    # see" is asked after the fact, when the config value has already moved on.
+    model = Column(String(128), nullable=True)
+    context_mode = Column(String(32), nullable=True)
+
+    source_path = Column(Text, nullable=True)
+    workspace_path = Column(Text, nullable=True)
+
+    opened = Column(Integer, nullable=False, default=0)
+    error = Column(Text, nullable=True)
+    files_changed = Column(Integer, nullable=False, default=0)
+    lines_changed = Column(Integer, nullable=False, default=0)
+    duration_seconds = Column(Float, nullable=False, default=0.0)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    def __repr__(self) -> str:
+        return (
+            f"<AuthoringAttempt(ticket={self.ticket_key}, attempt={self.attempt}, "
+            f"opened={bool(self.opened)})>"
+        )
