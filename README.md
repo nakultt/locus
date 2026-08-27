@@ -66,6 +66,29 @@ Locus talks to any OpenAI-compatible endpoint. By default that is [MoE Model Man
 
 Because inference is local, **the backend must run on the machine with the GPU.** A remotely hosted backend cannot reach `127.0.0.1:8081`.
 
+#### One exception, stated plainly
+
+"Runs entirely on local models" is false the moment autonomous mode is used, so here is the
+accurate version:
+
+> **Every model that reads your code without being asked runs locally. The one that writes code
+> runs when you hand it a ticket, on a model you choose.**
+
+The security scanner, the code reviewer, the QA classifier and the review-asks summarizer all run
+on `MOE_BASE_URL` over loopback, on every push, unprompted. That is unchanged.
+
+The authoring agent is different. A local 35B model writing production code against a real ticket
+is the weakest link in the whole mode, so **OpenCode runs on its own configured model**, which is
+remote. That is a deliberate trade — better diffs in exchange for the brief leaving the machine,
+on tickets a human explicitly handed over. The mode toggle names it, every `AuthoringAttempt` row
+records which model ran, and `LOCUS_AUTHORING_CONTEXT=ticket_only` drops the Slack transcript and
+issue bodies for teams that cannot send internal discussion to a third party.
+
+**Check the model provider's data-retention terms before pointing this at a private repository.**
+Free tiers commonly reserve the right to train on inputs, and the inputs here are proprietary
+source and internal Slack threads. This is a procurement question, not an engineering one, and it
+is the one risk in this feature that cannot be walked back after the fact.
+
 ---
 
 ## Setup
@@ -425,6 +448,163 @@ Threads stop being watched after 14 days.
 The reply text reaches a model whose verdict drives state changes, so the
 classifier has no tools bound — it returns a verdict and nothing else.
 
+### Two modes: who writes the code
+
+Every setting resolves through `app/services/agent_settings.py`, which is the sole arbiter of what
+a run does. The authoring mode resolves in three layers — **work item → repo → account defaults** —
+most specific wins, and `assisted` is the fallback everywhere.
+
+Autonomy resolves per work item deliberately. A dependency bump and a change to the credential path
+are not the same risk, and as one account-wide switch the most dangerous ticket in the backlog sets
+policy for every ticket — so teams leave it off and the mode is never exercised. Each card on
+`/tasks` carries its own toggle.
+
+**Assisted** — you write the code and push a branch. **Autonomous** — you click *Write it* on a
+ticket and the driver opens the pull request. From the `opened` webhook onward the two are
+identical: the analysis, the review round trip, the QA thread, the board card and the report
+document do not know which arm ran.
+
+#### The bound
+
+`autonomous_max_rounds` defaults to `2`: the first attempt plus two reworks, then it comes back to
+a person. Retries fire on a changes-requested review and on a QA rejection.
+
+**Every failure spends an attempt** — a timeout, an oversized diff, a denylisted path, a failed
+test gate, a driver that crashed. Without that a reliably-failing ticket retries forever and the
+bound protects nothing. When the bound runs out the work item is handed back: the mode reverts to
+assisted, the reason is recorded and announced once in the review channel, and the branch, the
+review thread and the report are left exactly as they are.
+
+`MAX_OPEN_AUTONOMOUS_PRS` (default 3, per repo) caps how many agent-authored pull requests may be
+open at once. Reviewer attention is the scarce resource this mode spends; more pull requests than
+anyone can genuinely read is the failure, not the absence of a human.
+
+#### Where the code lives, and where the agent works
+
+Two different questions, and conflating them is how the agent ends up editing Locus itself.
+
+- **The source** is where your repositories already sit on disk. Configured, because re-cloning per
+  attempt throws away warm dependencies and spends the timeout on network.
+- **The workspace** is a `git worktree` cut from that repo. Always isolated. Your branch, your
+  uncommitted changes and your stashes are never touched — a shared checkout can only have one
+  branch out at a time, and an agent running `git checkout` where you are working destroys your
+  afternoon and looks like a successful run.
+
+Resolution for `owner/name`, first hit wins: the repo's `source_path`, then
+`<LOCUS_CODE_ROOT>/<name>`, then `<LOCUS_CODE_ROOT>/<owner>/<name>`, then a fresh clone into the
+workspace root.
+
+Three checks before a resolved path is used, each refusing with a named error:
+
+1. **It is a git repository.** Otherwise it is a configuration error, reported as one.
+2. **Its `origin` matches the repo being worked on.** A folder name is a guess, and `acme/api` and
+   `beta/api` collapse to one directory under a flat root. Pointing the agent at the wrong codebase
+   produces a confident, entirely wrong pull request.
+3. **It is not Locus's own tree, and does not contain it.** ⚠️ **This is the likely
+   misconfiguration, not a hypothetical.** If Locus lives at `E:\Github\locus` and you set
+   `LOCUS_CODE_ROOT=E:\Github`, then authoring the `locus` repo resolves to Locus's own directory —
+   the one holding `backend/.env` and `ENCRYPTION_KEY`, the value that must never change or every
+   stored credential becomes permanently undecryptable. Checked in both directions.
+
+#### What the agent may not touch
+
+Enforced on the diff **after** the run, never by trusting the prompt:
+
+| Path | Why |
+|---|---|
+| `.github/workflows/**` | a model that read attacker-influenced text must not edit what CI runs |
+| `**/.env*`, `**/*.pem`, `**/*.key` | secrets |
+| `backend/app/security.py`, `credential_context.py` | the credential path |
+
+A touched denylist path **aborts the attempt and records it**. It does not open a pull request with
+those files reverted: a run that tried is worth surfacing, and editing the agent's diff means the
+reviewer reads something the agent did not produce. `migrations/**` is deliberately not listed —
+schema changes are legitimate work, and review and CI catch a bad one.
+
+#### The test gate
+
+With `test_command` set, it runs in the worktree after the agent finishes.
+
+- **Passes** → open the pull request.
+- **Fails, attempts remain** → consume the attempt, open nothing, retry with the failure appended.
+- **Fails on the last attempt** → **open it anyway**, with the failure stated at the top of the
+  body. Opening nothing after three tries leaves the human with silence, which reads as the feature
+  being broken; a failing PR they can see is strictly better as long as it is labelled — and the
+  merge gate requires green CI, so it cannot land.
+
+A fresh worktree has no `node_modules` and no `.venv`, so set `prepare_command` (`uv sync`,
+`npm ci`) or the gate cannot run. Its failure fails the attempt before any model is invoked, which
+is the cheapest possible place to discover the environment is wrong.
+
+#### Environment
+
+| Variable | Default | What it does |
+|---|---|---|
+| `LOCUS_AUTHORING_DRIVER` | `none` | `opencode` to enable. `none` returns an error rather than an empty success. |
+| `LOCUS_OPENCODE_CMD` | `opencode run --prompt-file {prompt} --cwd {workspace}` | A **template**, because OpenCode's CLI moves. Pin it against your installed version. |
+| `LOCUS_OPENCODE_MODEL` | unset | Pins a model for reproducibility. Unset means OpenCode's own configured model. |
+| `LOCUS_AUTHORING_CONTEXT` | `full` | `ticket_only` drops the Slack transcript and issue bodies from the brief. Recorded per attempt. |
+| `LOCUS_CODE_ROOT` | unset | A folder holding many repos, e.g. `E:\Github`. |
+| `LOCUS_WORKSPACE_ROOT` | `<temp>/locus-workspaces` | Where worktrees are cut. |
+| `LOCUS_WORKSPACE_TTL_DAYS` | `3` | Failed runs keep their worktree this long — a failed run whose tree is gone is close to undebuggable. |
+| `LOCUS_ALLOW_IN_PLACE` | off | Work directly in the source checkout. See the warning below. |
+| `LOCUS_AUTHORING_TIMEOUT_SECONDS` | `1200` | Wall clock; kills the subprocess and records a timed-out attempt. |
+| `LOCUS_MAX_CHANGED_FILES` | `25` | A 4,000-line agent-authored diff is not reviewable. |
+| `LOCUS_MAX_CHANGED_LINES` | `600` | Same. Exceeding either consumes an attempt and is not retried smaller. |
+| `LOCUS_MAX_OPEN_AUTONOMOUS_PRS` | `3` | Per repo. The rubber-stamping mitigation. |
+| `LOCUS_AGENT_EMAIL` | `locus-agent@users.noreply.github.com` | How a previous attempt's commits are told apart from a human's. |
+
+⚠️ **`LOCUS_ALLOW_IN_PLACE=1` is off by default and costs real safety.** The agent shares a working
+tree with a human, `git checkout` becomes destructive, concurrent attempts on one repo become
+impossible, and the self-edit check is the only thing between the agent and whatever else lives in
+that directory. It exists for trees that genuinely cannot be worktree'd — submodule-heavy repos,
+build systems with absolute paths baked in — not as a convenience.
+
+#### GitHub token scoping
+
+The authoring token needs **`contents:write`** and **`pull_requests:write`**, and explicitly
+**not `workflow`**. Without the `workflow` scope GitHub itself refuses a push that touches
+`.github/workflows/**`, which is a second layer under the denylist rather than a replacement for
+it: the denylist reports the attempt, where GitHub would only reject the push.
+
+---
+
+### The calendar agent
+
+`calendar_agent_loop` sweeps enabled users' calendars every 30 minutes and stores proposals.
+Everything is off by default, per user, under `/api/schedule/agent`:
+
+| Setting | Default | Why off |
+|---|---|---|
+| `enabled` | off | A feature that starts touching a calendar unasked is the worst first impression available. |
+| `auto_apply` | off | A moved meeting is visible to everyone invited. |
+| `auto_reply_invites` | off | Posts to real people. |
+| `auto_reply_busy` | off | Same — the same category as auto-merge, and it earns the same treatment. |
+
+With `auto_apply` off, a proposal waits at `GET /api/schedule/proposals` and
+`POST /api/schedule/proposals/{id}/apply` executes **the stored plan**, not a recomputed one:
+recomputing at apply time would silently run a different plan from the one that was approved.
+
+**The busy reply.** When somebody `@`-mentions you in Slack while your calendar says you are
+booked, Locus answers with a state and a time and nothing else — no title, no attendee, no
+location, and it names its timezone. At most **once per thread per day**: a repeating
+auto-responder gets the bot muted, and a muted bot takes your review pings and QA threads with it.
+An unreadable calendar reads *free*, never busy, because a broken token and a real meeting produce
+identical silence and defaulting to busy makes you unreachable.
+
+Importance is decided deterministically first — the sender is a reviewer mid-round, or the message
+names a work item the worklist reports blocked on you — and only otherwise by a classifier with no
+tools bound. On an important interruption Locus offers candidate times as *options*; writing to
+somebody else's calendar from an automated reply is a write nobody approved.
+
+**Slack scopes** for the busy reply: `chat:write` to answer, `channels:history` (and
+`groups:history` for private channels) to receive the message, plus the existing `message.channels`
+event subscription. The member id is resolved once via `auth.test` when you save the settings — a
+mention arrives in message text as `<@U04AB…>` while contacts are stored as handles, and the two
+namespaces never compare equal, so mention matching silently never fires without it.
+
+---
+
 ### Design decisions worth knowing
 
 **Confirmed and unverified findings are never merged.** Semgrep and Gitleaks are deterministic rule matches, reported as confirmed. The LLM pass catches logic-level problems no rule encodes — missing authz, injection, unsafe deserialization — and is reported as unverified. One hallucinated "confirmed vulnerability" on a colleague's PR is enough for a team to stop trusting the bot permanently.
@@ -461,10 +641,17 @@ classifier has no tools bound — it returns a verdict and nothing else.
 | `DELETE` | `/api/schedule/deadlines/{deadline_id}` | Stop tracking one |
 | `POST` | `/api/schedule/plan-deadline/{deadline_id}` | Reserve work time before a due date |
 | `POST` | `/api/schedule/constraints` | Pin an event as fixed or flexible |
+| `GET`/`PUT` | `/api/schedule/agent` | Calendar agent settings, one row per user |
+| `GET` | `/api/schedule/proposals` | Reshuffles waiting on you |
+| `POST` | `/api/schedule/proposals/{id}/apply` | Carry out the stored plan |
+| `DELETE` | `/api/schedule/proposals/{id}` | Dismiss one (marked, not deleted) |
+| `GET` | `/api/schedule/availability` | Whether you can be reached, and until when |
+| `GET` | `/api/schedule/interruptions` | Who reached you while you were busy |
 | `POST` | `/webhooks/github` | GitHub events (HMAC-authenticated) |
 | `POST` | `/webhooks/slack` | Slack events — QA replies (HMAC-authenticated) |
 | `POST` | `/webhooks/repos` | Register a repo; returns the webhook secret once |
 | `GET` | `/webhooks/repos` | List registered repos |
+| `GET` | `/webhooks/presets` | Named starting points for the authoring dials |
 | `DELETE` | `/webhooks/repos/{owner}/{name}` | Unregister |
 | `GET` | `/webhooks/reviews` | Pull requests in the review loop; `?include_merged=true` for all |
 | `GET` | `/webhooks/reviews/{owner}/{name}/{pr_number}` | One PR's full round history |
@@ -473,6 +660,12 @@ classifier has no tools bound — it returns a verdict and nothing else.
 | `GET` | `/webhooks/jobs` | Recent analysis jobs and their errors |
 | `GET` | `/webhooks/jobs/{job_id}` | One run with findings, context, and tools used |
 | `GET` | `/webhooks/summary` | Per-capability pipeline readiness |
+| `GET` | `/tasks` | Every task assigned to you, with its pipeline position |
+| `GET` | `/tasks/detail` | One task's full pipeline and every message behind it |
+| `POST` | `/tasks/analyze` | Re-run the analysis for a task's pull request |
+| `GET`/`PUT` | `/tasks/mode` | The authoring mode for one work item, and where it resolved from |
+| `GET` | `/tasks/attempts` | Every authoring attempt, including the ones that opened nothing |
+| `POST` | `/tasks/author` | Hand this work item to the authoring agent |
 
 ### Checking model readiness
 
@@ -509,29 +702,32 @@ Worth reading before deploying anywhere real.
 
 - **The scheduler reads only the primary calendar.** Secondary and shared calendars are ignored, so a conflict on one of those will not be seen.
 - The PR agent has not been run end to end against a live GitHub webhook. Component logic is unit-tested; the Jira and Slack response-shape handling is written against the documented APIs but unverified with real credentials.
-- The worker is single-instance; multi-instance needs row locking or a real queue.
 - Gitleaks is optional and not bundled. Install with `go install github.com/zricethezav/gitleaks/v8@latest`; without it, committed-secret detection is skipped.
-- The Gmail poller runs in-process on a single instance. Multi-instance deployment would double-process replies without a lock.
+- **Multi-instance deployment is guarded but not proven.** The job claim is an atomic conditional UPDATE, and all three sweeps — auto-merge, the Gmail poller and the calendar agent — take Postgres advisory locks (`app/services/locks.py`), so duplicate outward messages are prevented by construction rather than by there being one process. It has not been run multi-instance in anger.
+- **Autonomous mode has not been measured on real tickets.** Whether it is any good depends entirely on how well OpenCode does with the brief, and that is the product risk; the phases around it are plumbing. Measure it before promising the mode to anyone.
+- **OpenCode's CLI will move.** `LOCUS_OPENCODE_CMD` is a template for that reason. Pin the exact invocation against your installed version and record which version it was pinned against.
 
 ---
 
 ## Roadmap
 
-**[docs/AGENTS_PLAN.md](docs/AGENTS_PLAN.md) is the single plan for this project.** Anything not
-yet built is specced there, and nowhere else — it replaced the earlier `IMPLEMENTATION_PLAN.md`
-and `MODES_PLAN.md`, which have been deleted.
+**[docs/AGENTS_PLAN.md](docs/AGENTS_PLAN.md) is the single plan for this project**, and all nine
+of its phases are now built. It remains the record of *why* each rule is the way it is — read it
+before changing any of them, and read the *Inherited decisions* section first, which records what
+was deliberately not built and why, so those choices are not silently re-made.
 
-It covers three agents and two modes:
+What it delivered: three agents and two modes.
 
-- **Assisted** — you write the code, Locus runs the pipeline around you. This is what ships today.
-- **Autonomous** — you hand Locus the ticket and an OpenCode-driven agent opens the pull request;
-  the review, the QA sign-off and the record are unchanged.
-- **The calendar agent** — answers on your behalf when you are booked, and proposes a reschedule
-  when what reached you actually matters.
+- **Assisted** — you write the code, Locus runs the pipeline around you.
+- **Autonomous** — you hand Locus a ticket and an OpenCode-driven agent opens the pull request.
+  The `opened` webhook is the join: the analysis, the review round trip, the QA thread and the
+  board moves are identical either way, and nothing downstream learns which arm authored the
+  change. That is what makes the second mode a setting rather than a fork.
+- **The calendar agent** — sweeps for conflicts and proposes reschedules, and answers on your
+  behalf when somebody reaches you while you are booked.
 
-Nine phases, with a stated ordering and the failure behind each rule. Read the *Inherited
-decisions* section first: it records what was deliberately not built earlier and why, so those
-choices are not silently re-made.
+The remaining work is not more features: it is exercising all of this against live third-party
+services, which nothing here has done.
 
 ---
 
