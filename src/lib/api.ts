@@ -603,7 +603,7 @@ export interface PRJobDetail extends PRJob {
   result?: PRAnalysisResult;
 }
 
-export interface RepoRegistration {
+export interface RepoRegistration extends Partial<AuthoringSettings> {
   id: number;
   repo: string;
   slack_channel?: string;
@@ -914,48 +914,95 @@ export async function listRepos(): Promise<{
   return apiRequest("/webhooks/repos");
 }
 
+/**
+ * What a repo registration says, as an options object.
+ *
+ * This was fifteen positional arguments, which is unreadable at the call site
+ * and silently reorderable. The authoring dial would have made it eighteen.
+ */
+export interface RegisterRepoOptions {
+  repo: string;
+  slackChannel?: string;
+  exportToDocs?: boolean;
+  contextDocs?: string[];
+  qaEmails?: string[];
+  jiraDoneStatus?: string;
+  closeIssuesOnMerge?: boolean;
+  closeOnQaSignoff?: boolean;
+  reviewers?: string[];
+  reviewerContacts?: string;
+  reviewSlackChannel?: string;
+  autoMergeOnApproval?: boolean;
+  mergeMethod?: MergeMethod;
+  projectBoardSync?: boolean;
+  projectColumnMap?: string;
+  /** Who writes the code for this repo's tickets. */
+  authoringMode?: AuthoringMode;
+  /** The first attempt plus this many reworks. */
+  autonomousMaxRounds?: number;
+  presetLabel?: string;
+  /** Where this repo is checked out locally; blank falls back to LOCUS_CODE_ROOT. */
+  sourcePath?: string;
+  /** Run once in the fresh worktree before the agent. */
+  prepareCommand?: string;
+  /** The authoring test gate; blank means no gate. */
+  testCommand?: string;
+}
+
 export async function registerRepo(
-  repo: string,
-  slackChannel?: string,
-  exportToDocs = false,
-  contextDocs: string[] = [],
-  qaEmails: string[] = [],
-  jiraDoneStatus = "Done",
-  closeIssuesOnMerge = true,
-  reviewers: string[] = [],
-  reviewSlackChannel?: string,
-  reviewerContacts?: string,
-  autoMergeOnApproval = false,
-  mergeMethod: MergeMethod = "squash",
-  closeOnQaSignoff = false,
-  projectBoardSync = true,
-  projectColumnMap?: string
+  options: RegisterRepoOptions
 ): Promise<RepoRegistration> {
   return apiRequest<RepoRegistration>("/webhooks/repos", {
     method: "POST",
     body: JSON.stringify({
-      repo,
-      slack_channel: slackChannel || null,
-      export_to_docs: exportToDocs,
-      context_docs: contextDocs,
-      qa_emails: qaEmails,
-      jira_done_status: jiraDoneStatus,
-      close_issues_on_merge: closeIssuesOnMerge,
-      close_on_qa_signoff: closeOnQaSignoff,
-      reviewers,
-      reviewer_contacts: reviewerContacts || null,
-      review_slack_channel: reviewSlackChannel || null,
-      auto_merge_on_approval: autoMergeOnApproval,
-      merge_method: mergeMethod,
-      project_board_sync: projectBoardSync,
-      project_column_map: projectColumnMap || null,
+      repo: options.repo,
+      slack_channel: options.slackChannel || null,
+      export_to_docs: options.exportToDocs ?? false,
+      context_docs: options.contextDocs ?? [],
+      qa_emails: options.qaEmails ?? [],
+      jira_done_status: options.jiraDoneStatus || "Done",
+      close_issues_on_merge: options.closeIssuesOnMerge ?? true,
+      close_on_qa_signoff: options.closeOnQaSignoff ?? false,
+      reviewers: options.reviewers ?? [],
+      reviewer_contacts: options.reviewerContacts || null,
+      review_slack_channel: options.reviewSlackChannel || null,
+      auto_merge_on_approval: options.autoMergeOnApproval ?? false,
+      merge_method: options.mergeMethod ?? "squash",
+      project_board_sync: options.projectBoardSync ?? true,
+      project_column_map: options.projectColumnMap || null,
+      authoring_mode: options.authoringMode ?? "assisted",
+      autonomous_max_rounds: options.autonomousMaxRounds ?? 2,
+      preset_label: options.presetLabel || null,
+      source_path: options.sourcePath || null,
+      prepare_command: options.prepareCommand || null,
+      test_command: options.testCommand || null,
     }),
   });
 }
 
 export type MergeMethod = "squash" | "merge" | "rebase";
 
-export interface PRAgentDefaults {
+/**
+ * Who writes the code for a work item.
+ *
+ * `assisted` is a person. `autonomous` hands the ticket to the authoring
+ * driver, whose model is remote — the brief leaves the machine, unlike every
+ * model that reads your code automatically.
+ */
+export type AuthoringMode = "assisted" | "autonomous";
+
+/** The authoring dials, shared by the repo registration and the defaults. */
+export interface AuthoringSettings {
+  authoring_mode: AuthoringMode;
+  autonomous_max_rounds: number;
+  /** Display only; the backend resolver decides what a run does. */
+  preset_label?: string | null;
+  source_path?: string | null;
+  prepare_command?: string | null;
+  test_command?: string | null;
+}
+
+export interface PRAgentDefaults extends AuthoringSettings {
   slack_channel?: string | null;
   export_to_docs: boolean;
   qa_emails: string[];

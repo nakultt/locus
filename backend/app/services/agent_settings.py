@@ -47,6 +47,28 @@ class EffectiveSettings:
     # absent from a non-empty map deliberately moves no card.
     project_column_map: dict[str, str] = field(default_factory=dict)
 
+    # Who writes the code: "assisted" (a person) or "autonomous" (the
+    # authoring driver). Assisted is the final fallback everywhere -- a mode
+    # that opens pull requests on its own is never inherited by accident.
+    authoring_mode: str = "assisted"
+    # The first attempt plus this many reworks.
+    autonomous_max_rounds: int = 2
+    # Display only; the UI compares the saved dials against the preset to
+    # render "Assisted (modified)".
+    preset_label: str | None = None
+    # Where this repo is checked out locally. None falls back to
+    # LOCUS_CODE_ROOT, and failing that to a managed clone.
+    source_path: str | None = None
+    # Run once in the fresh worktree before the agent runs.
+    prepare_command: str | None = None
+    # The authoring test gate. None means no gate.
+    test_command: str | None = None
+    # True when a WorkItemSettings row carries handed_back_at. The mode reads
+    # `assisted` either way; this is what lets the UI say *why*, and what the
+    # bound checks so the next event does not re-trigger the driver.
+    handed_back: bool = False
+    handed_back_reason: str | None = None
+
     # Per key: "repo", "defaults", or "unset". The dashboard shows this so a
     # skipped stage can be traced to the setting responsible.
     sources: dict[str, str] = field(default_factory=dict)
@@ -115,17 +137,40 @@ def parse_column_map(value: str | None) -> dict[str, str]:
     return mapping
 
 
+VALID_AUTHORING_MODES = ("assisted", "autonomous")
+
+
+def normalize_mode(value: str | None) -> str | None:
+    """
+    Coerce a stored or submitted mode string to one this code understands.
+
+    An unrecognised value degrades to `assisted` rather than raising: a bad
+    value should fall to the safe behaviour, not block a save or fail a run.
+    None is preserved, because None is how a repo row says nothing.
+    """
+    if value is None:
+        return None
+    cleaned = str(value).strip().lower()
+    if not cleaned:
+        return None
+    return cleaned if cleaned in VALID_AUTHORING_MODES else "assisted"
+
+
 def resolve_settings(
     db: Session,
     owner_id: int,
     registration: models.RepoWebhook | None,
+    ticket_key: str | None = None,
 ) -> EffectiveSettings:
     """
-    Merge a repo registration over the user's account defaults.
+    Merge a work item over a repo registration over the user's account defaults.
 
     Args:
         registration: The repo's own row, or None when the repo was never
             registered -- the case where falling back matters most.
+        ticket_key: The work item being resolved for. `None` must resolve
+            exactly as this function did before the work-item layer existed,
+            which is what keeps every pre-existing call site correct.
     """
     defaults = db.query(models.PRAgentDefaults).filter(
         models.PRAgentDefaults.owner_id == owner_id
@@ -292,4 +337,107 @@ def resolve_settings(
         {},
     )
 
+    _resolve_authoring(db, owner_id, registration, defaults, ticket_key, resolved)
+
     return resolved
+
+
+def _resolve_authoring(
+    db: Session,
+    owner_id: int,
+    registration: models.RepoWebhook | None,
+    defaults: models.PRAgentDefaults | None,
+    ticket_key: str | None,
+    resolved: EffectiveSettings,
+) -> None:
+    """
+    Fill in the authoring fields: work item -> repo -> defaults -> fallback.
+
+    Split out because it is the only part of the chain with three layers, and
+    because the work-item layer reads *only* the two authoring fields -- a
+    ticket is a judgement about autonomy, not a place to re-point a Slack
+    channel.
+    """
+    item = None
+    if ticket_key:
+        item = db.query(models.WorkItemSettings).filter(
+            models.WorkItemSettings.owner_id == owner_id,
+            models.WorkItemSettings.ticket_key == ticket_key,
+        ).first()
+
+    repo_mode = normalize_mode(registration.authoring_mode) if registration else None
+    default_mode = normalize_mode(defaults.authoring_mode) if defaults else None
+    item_mode = normalize_mode(item.authoring_mode) if item else None
+
+    if item is not None and item.handed_back_at is not None:
+        # The bound was spent, or a human took the branch over. This overrides
+        # everything above it: without it the next review event re-triggers the
+        # driver on a work item that was explicitly given back.
+        resolved.authoring_mode = "assisted"
+        resolved.sources["authoring_mode"] = "handed_back"
+        resolved.handed_back = True
+        resolved.handed_back_reason = item.handed_back_reason
+    elif item_mode:
+        resolved.authoring_mode = item_mode
+        resolved.sources["authoring_mode"] = "work_item"
+    elif repo_mode:
+        resolved.authoring_mode = repo_mode
+        resolved.sources["authoring_mode"] = "repo"
+    elif default_mode:
+        resolved.authoring_mode = default_mode
+        resolved.sources["authoring_mode"] = "defaults"
+    else:
+        resolved.authoring_mode = "assisted"
+        resolved.sources["authoring_mode"] = "unset"
+
+    item_rounds = item.autonomous_max_rounds if item else None
+    repo_rounds = registration.autonomous_max_rounds if registration else None
+    default_rounds = defaults.autonomous_max_rounds if defaults else None
+
+    if item_rounds is not None:
+        resolved.autonomous_max_rounds = int(item_rounds)
+        resolved.sources["autonomous_max_rounds"] = "work_item"
+    elif repo_rounds is not None:
+        resolved.autonomous_max_rounds = int(repo_rounds)
+        resolved.sources["autonomous_max_rounds"] = "repo"
+    elif default_rounds is not None:
+        resolved.autonomous_max_rounds = int(default_rounds)
+        resolved.sources["autonomous_max_rounds"] = "defaults"
+    else:
+        resolved.autonomous_max_rounds = 2
+        resolved.sources["autonomous_max_rounds"] = "unset"
+
+    resolved.preset_label = pick_text(
+        resolved, "preset_label",
+        (registration.preset_label or "").strip() if registration else "",
+        (defaults.preset_label or "").strip() if defaults else "",
+    )
+    resolved.source_path = pick_text(
+        resolved, "source_path",
+        (registration.source_path or "").strip() if registration else "",
+        (defaults.source_path or "").strip() if defaults else "",
+    )
+    resolved.prepare_command = pick_text(
+        resolved, "prepare_command",
+        (registration.prepare_command or "").strip() if registration else "",
+        (defaults.prepare_command or "").strip() if defaults else "",
+    )
+    resolved.test_command = pick_text(
+        resolved, "test_command",
+        (registration.test_command or "").strip() if registration else "",
+        (defaults.test_command or "").strip() if defaults else "",
+    )
+
+
+def pick_text(
+    resolved: EffectiveSettings, key: str, repo_value: str, default_value: str
+) -> str | None:
+    """Repo wins if it says anything, else the account default, else None."""
+    if repo_value:
+        resolved.sources[key] = "repo"
+        return repo_value
+    if default_value:
+        resolved.sources[key] = "defaults"
+        return default_value
+    resolved.sources[key] = "unset"
+    return None

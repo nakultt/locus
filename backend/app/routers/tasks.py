@@ -215,3 +215,136 @@ async def analyze_task(
     _assigned_cache.pop(current_user.id, None)
 
     return schemas.PRJobResponse.model_validate(job)
+
+
+def _mode_response(
+    db: Session, owner_id: int, task_key: str, registration: models.RepoWebhook | None
+) -> schemas.WorkItemMode:
+    """Resolve the authoring mode for one work item and say where it came from."""
+    settings = resolve_settings(db, owner_id, registration, ticket_key=task_key)
+    override = db.query(models.WorkItemSettings).filter(
+        models.WorkItemSettings.owner_id == owner_id,
+        models.WorkItemSettings.ticket_key == task_key,
+    ).first()
+
+    return schemas.WorkItemMode(
+        task_key=task_key,
+        authoring_mode=schemas.AuthoringMode(settings.authoring_mode),
+        autonomous_max_rounds=settings.autonomous_max_rounds,
+        source=settings.sources.get("authoring_mode", "unset"),
+        rounds_source=settings.sources.get("autonomous_max_rounds", "unset"),
+        override=(
+            schemas.AuthoringMode(override.authoring_mode)
+            if override is not None and override.authoring_mode
+            else None
+        ),
+        handed_back=settings.handed_back,
+        handed_back_reason=settings.handed_back_reason,
+        handed_back_at=override.handed_back_at if override is not None else None,
+        preset_label=settings.preset_label,
+    )
+
+
+async def _registration_for_task(
+    db: Session, current_user: models.User, task_key: str
+) -> models.RepoWebhook | None:
+    """
+    Find the repo registration behind a task, 404ing if it is not the caller's.
+
+    The board is rebuilt rather than trusted from the client, because the
+    assignment check *is* the authorization check here. A task not on the
+    caller's board returns 404 rather than 403: a 403 confirms the key exists,
+    which is enough to enumerate other people's work.
+    """
+    integration_configs = get_integration_configs(db, current_user.id)
+    board = await task_board.build(
+        db, owner_id=current_user.id, integration_configs=integration_configs
+    )
+    card = _find_card(board, task_key)
+    if card is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Task not found"
+        )
+
+    if not card.pull_requests:
+        return None
+    return db.query(models.RepoWebhook).filter(
+        models.RepoWebhook.repo == card.pull_requests[0].repo,
+        models.RepoWebhook.owner_id == current_user.id,
+    ).first()
+
+
+@router.get(
+    "/mode",
+    response_model=schemas.WorkItemMode,
+    summary="The authoring mode a run on this work item would use",
+)
+async def get_task_mode(
+    task_key: str = Query(..., description='Jira key, or "owner/repo#N"'),
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> schemas.WorkItemMode:
+    """Resolved mode plus the layer that supplied it, for one work item."""
+    registration = await _registration_for_task(db, current_user, task_key)
+    return _mode_response(db, current_user.id, task_key, registration)
+
+
+@router.put(
+    "/mode",
+    response_model=schemas.WorkItemMode,
+    summary="Override the authoring mode for one work item",
+)
+async def set_task_mode(
+    payload: schemas.WorkItemModeUpdate,
+    task_key: str = Query(..., description='Jira key, or "owner/repo#N"'),
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> schemas.WorkItemMode:
+    """
+    Upsert the per-work-item override, or delete it when nothing is set.
+
+    Autonomy is a judgement about *this ticket*: a dependency bump and a change
+    to the credential path are not the same risk, and forcing one account-wide
+    switch to cover both is why the mode would otherwise stay off everywhere.
+
+    Clearing every field deletes the row rather than storing nulls -- a row of
+    nulls reads as a deliberate choice to the next person who queries the
+    table, where absence correctly reads as "inherit".
+    """
+    registration = await _registration_for_task(db, current_user, task_key)
+
+    row = db.query(models.WorkItemSettings).filter(
+        models.WorkItemSettings.owner_id == current_user.id,
+        models.WorkItemSettings.ticket_key == task_key,
+    ).first()
+
+    mode = payload.authoring_mode.value if payload.authoring_mode else None
+    rounds = payload.autonomous_max_rounds
+
+    if mode is None and rounds is None:
+        # Nothing left to say. Deleting also clears any handoff, which is what
+        # makes "put it back on autonomous" a single action rather than
+        # requiring the user to find a flag they never set.
+        if row is not None:
+            db.delete(row)
+            db.commit()
+    elif row is None:
+        db.add(models.WorkItemSettings(
+            ticket_key=task_key,
+            authoring_mode=mode,
+            autonomous_max_rounds=rounds,
+            owner_id=current_user.id,
+        ))
+        db.commit()
+    else:
+        row.authoring_mode = mode
+        row.autonomous_max_rounds = rounds
+        # An explicit choice takes the item back off the handoff. The handoff
+        # exists to stop the driver re-triggering itself, not to stop a person
+        # from deciding otherwise.
+        row.handed_back_at = None
+        row.handed_back_reason = None
+        db.commit()
+
+    _assigned_cache.pop(current_user.id, None)
+    return _mode_response(db, current_user.id, task_key, registration)

@@ -927,6 +927,19 @@ class TaskDetail(BaseModel):
     doc_url: str | None = None
 
 
+class AuthoringMode(str, Enum):
+    """
+    Who writes the code for a work item.
+
+    `assisted` is a person; `autonomous` hands the ticket to the authoring
+    driver, which opens a pull request that flows through the same analysis,
+    review and QA pipeline. Assisted is the fallback everywhere -- a mode that
+    writes code on its own is never inherited by accident.
+    """
+    assisted = "assisted"
+    autonomous = "autonomous"
+
+
 class MergeMethod(str, Enum):
     """How an auto-merge lands the branch. Mirrors GitHub's own options."""
     squash = "squash"
@@ -1020,6 +1033,36 @@ class RepoRegister(BaseModel):
             "default map; a stage left out of a non-empty map moves no card."
         ),
     )
+    authoring_mode: AuthoringMode = Field(
+        AuthoringMode.assisted,
+        description=(
+            "Who writes the code for this repo's tickets. Autonomous sends "
+            "the brief to the configured authoring model, which is remote."
+        ),
+    )
+    autonomous_max_rounds: int = Field(
+        2,
+        ge=0,
+        le=10,
+        description="The first attempt plus this many reworks before handing back",
+    )
+    preset_label: str | None = Field(
+        None, description="Display only; the resolver decides what a run does"
+    )
+    source_path: str | None = Field(
+        None,
+        description=(
+            "Where this repo is checked out locally. Blank falls back to "
+            "LOCUS_CODE_ROOT, and failing that to a managed clone."
+        ),
+    )
+    prepare_command: str | None = Field(
+        None,
+        description="Run once in the fresh worktree before the agent (uv sync, npm ci)",
+    )
+    test_command: str | None = Field(
+        None, description="The authoring test gate. Blank means no gate."
+    )
 
 
 class PRAgentDefaultsUpdate(BaseModel):
@@ -1074,6 +1117,36 @@ class PRAgentDefaultsUpdate(BaseModel):
     project_column_map: str | None = Field(
         None, description="Default stage-to-column map, one entry per line"
     )
+    authoring_mode: AuthoringMode = Field(
+        AuthoringMode.assisted,
+        description=(
+            "Who writes the code for this repo's tickets. Autonomous sends "
+            "the brief to the configured authoring model, which is remote."
+        ),
+    )
+    autonomous_max_rounds: int = Field(
+        2,
+        ge=0,
+        le=10,
+        description="The first attempt plus this many reworks before handing back",
+    )
+    preset_label: str | None = Field(
+        None, description="Display only; the resolver decides what a run does"
+    )
+    source_path: str | None = Field(
+        None,
+        description=(
+            "Where this repo is checked out locally. Blank falls back to "
+            "LOCUS_CODE_ROOT, and failing that to a managed clone."
+        ),
+    )
+    prepare_command: str | None = Field(
+        None,
+        description="Run once in the fresh worktree before the agent (uv sync, npm ci)",
+    )
+    test_command: str | None = Field(
+        None, description="The authoring test gate. Blank means no gate."
+    )
     context_docs: list[str] = Field(
         default_factory=list,
         description=(
@@ -1114,6 +1187,12 @@ class RepoRegistration(BaseModel):
     merge_method: MergeMethod = MergeMethod.squash
     project_board_sync: bool = True
     project_column_map: str | None = None
+    authoring_mode: AuthoringMode = AuthoringMode.assisted
+    autonomous_max_rounds: int = 2
+    preset_label: str | None = None
+    source_path: str | None = None
+    prepare_command: str | None = None
+    test_command: str | None = None
     enabled: bool = True
     webhook_url: str | None = Field(
         None, description="Payload URL to paste into GitHub"
@@ -1123,6 +1202,45 @@ class RepoRegistration(BaseModel):
     )
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class WorkItemModeUpdate(BaseModel):
+    """
+    An authoring override for one work item.
+
+    Every field is optional and `None` means "inherit" rather than "assisted".
+    Rows here are sparse by design: an absent row is the ordinary case, and
+    clearing every field deletes it rather than storing a row of nulls that
+    reads as a deliberate choice.
+    """
+    authoring_mode: AuthoringMode | None = Field(
+        None, description="Null clears the override and inherits from the repo"
+    )
+    autonomous_max_rounds: int | None = Field(
+        None, ge=0, le=10, description="Null inherits the repo or account bound"
+    )
+
+
+class WorkItemMode(BaseModel):
+    """
+    The authoring mode a run on this work item would actually use.
+
+    `source` is the layer that supplied it -- "work_item", "repo", "defaults",
+    "unset", or "handed_back" -- so a mode the user did not expect can be
+    traced to the setting responsible rather than guessed at.
+    """
+    task_key: str
+    authoring_mode: AuthoringMode
+    autonomous_max_rounds: int
+    source: str
+    rounds_source: str
+    # The stored override, if there is one. Distinct from the resolved value:
+    # the UI renders the toggle from this and the caption from `source`.
+    override: AuthoringMode | None = None
+    handed_back: bool = False
+    handed_back_reason: str | None = None
+    handed_back_at: datetime | None = None
+    preset_label: str | None = None
 
 
 class RepoRegistrationList(BaseModel):

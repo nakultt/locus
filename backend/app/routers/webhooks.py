@@ -307,6 +307,7 @@ async def register_repo(
         existing.merge_method = request.merge_method.value
         existing.project_board_sync = 1 if request.project_board_sync else 0
         existing.project_column_map = request.project_column_map
+        _apply_authoring(existing, request)
         existing.enabled = 1
         registration = existing
     else:
@@ -330,6 +331,7 @@ async def register_repo(
             enabled=1,
             owner_id=current_user.id,
         )
+        _apply_authoring(registration, request)
         db.add(registration)
 
     db.commit()
@@ -352,10 +354,48 @@ async def register_repo(
         merge_method=registration.merge_method or "squash",
         project_board_sync=bool(registration.project_board_sync),
         project_column_map=registration.project_column_map,
+        **_authoring_fields(registration),
         enabled=True,
         webhook_url=f"{PUBLIC_BASE_URL.rstrip('/')}/webhooks/github",
         webhook_secret=secret,
     )
+
+
+
+
+def _blank_to_none(value: str | None) -> str | None:
+    """Store a blank as NULL, because NULL is how the resolver hears "says nothing"."""
+    return (value or "").strip() or None
+
+
+def _apply_authoring(row, request) -> None:
+    """
+    Copy the authoring dials from a settings payload onto its row.
+
+    One function for both the repo registration and the account defaults, so
+    the two cannot drift into disagreeing about what a field means -- the same
+    reason `resolve_settings` is the sole arbiter of which of them wins.
+    """
+    row.authoring_mode = request.authoring_mode.value
+    row.autonomous_max_rounds = request.autonomous_max_rounds
+    row.preset_label = _blank_to_none(request.preset_label)
+    row.source_path = _blank_to_none(request.source_path)
+    row.prepare_command = _blank_to_none(request.prepare_command)
+    row.test_command = _blank_to_none(request.test_command)
+
+
+def _authoring_fields(row) -> dict:
+    """The authoring dials as a response fragment, read back off a row."""
+    return {
+        "authoring_mode": row.authoring_mode or "assisted",
+        "autonomous_max_rounds": (
+            2 if row.autonomous_max_rounds is None else row.autonomous_max_rounds
+        ),
+        "preset_label": row.preset_label,
+        "source_path": row.source_path,
+        "prepare_command": row.prepare_command,
+        "test_command": row.test_command,
+    }
 
 
 @router.get(
@@ -391,6 +431,7 @@ async def list_repos(
                 merge_method=r.merge_method or "squash",
                 project_board_sync=bool(r.project_board_sync),
                 project_column_map=r.project_column_map,
+                **_authoring_fields(r),
                 enabled=bool(r.enabled),
             )
             for r in rows
@@ -461,6 +502,7 @@ async def get_defaults(
         merge_method=row.merge_method or "squash",
         project_board_sync=bool(row.project_board_sync),
         project_column_map=row.project_column_map,
+        **_authoring_fields(row),
         context_docs=[
             d for d in (row.context_doc_ids or "").splitlines() if d.strip()
         ],
@@ -511,6 +553,7 @@ async def save_defaults(
     row.merge_method = request.merge_method.value
     row.project_board_sync = 1 if request.project_board_sync else 0
     row.project_column_map = (request.project_column_map or "").strip() or None
+    _apply_authoring(row, request)
     row.context_doc_ids = "\n".join(doc_ids) if doc_ids else None
 
     db.commit()
@@ -530,6 +573,7 @@ async def save_defaults(
         merge_method=row.merge_method or "squash",
         project_board_sync=bool(row.project_board_sync),
         project_column_map=row.project_column_map,
+        **_authoring_fields(row),
         context_docs=doc_ids,
     )
 
