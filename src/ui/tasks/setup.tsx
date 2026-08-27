@@ -1,9 +1,12 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle, Check, ChevronDown, ChevronRight, GitPullRequest, Loader2, X } from "lucide-react";
 import {
+  getAuthoringPresets,
   getPRAgentDefaults,
   getPRJob,
+  matchesPreset,
   savePRAgentDefaults,
+  type AuthoringPreset,
   type PRAgentDefaults,
   type PRJob,
   type PRJobDetail,
@@ -93,6 +96,7 @@ export const GlobalDefaults = ({ docsConnected }: { docsConnected: boolean }) =>
   const [reviewersInput, setReviewersInput] = useState("");
   const [contactsInput, setContactsInput] = useState("");
   const [docsInput, setDocsInput] = useState("");
+  const [presets, setPresets] = useState<AuthoringPreset[]>([]);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -107,6 +111,8 @@ export const GlobalDefaults = ({ docsConnected }: { docsConnected: boolean }) =>
         setDocsInput((d.context_docs ?? []).join("\n"));
       })
       .catch(() => setValues(null));
+    // A preset list that fails to load costs the shortcut, never the form.
+    getAuthoringPresets().then(setPresets).catch(() => setPresets([]));
   }, []);
 
   if (!values) return null;
@@ -173,6 +179,134 @@ export const GlobalDefaults = ({ docsConnected }: { docsConnected: boolean }) =>
         where it is announced, and what happens on merge. A repository can override
         any of them, but nothing here needs a repository to be registered first.
       </p>
+
+      {/* A preset writes these dials into the form and nothing else. Every one
+          of them stays visible and editable below, and the backend resolver
+          remains the only thing that decides what a run does — a preset
+          expanded at read time would be a second resolution layer above it. */}
+      {presets.length > 0 && (
+        <div className="mt-3 rounded-lg border border-border bg-muted/20 p-3">
+          <p className="text-xs font-semibold text-foreground">Who writes the code</p>
+          <div className="mt-2 grid gap-2 sm:grid-cols-2">
+            {presets.map((preset) => {
+              const active = values.authoring_mode === preset.values.authoring_mode;
+              const modified = active && !matchesPreset(preset, values);
+              return (
+                <button
+                  key={preset.name}
+                  type="button"
+                  onClick={() =>
+                    setValues({
+                      ...values,
+                      ...preset.values,
+                      preset_label: preset.name,
+                    })
+                  }
+                  className={`rounded-lg border p-2.5 text-left transition ${
+                    active
+                      ? "border-primary bg-primary/5"
+                      : "border-border bg-background hover:border-primary/40"
+                  }`}
+                >
+                  <span className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
+                    {preset.label}
+                    {modified && (
+                      <span className="text-[10px] font-normal text-muted-foreground">
+                        (modified)
+                      </span>
+                    )}
+                  </span>
+                  <span className="mt-1 block text-xs text-muted-foreground">
+                    {preset.description}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          {values.authoring_mode === "autonomous" && (
+            <div className="mt-2.5 space-y-2">
+              {/* The one claim a user must not find in a changelog. Every model
+                  that reads your code automatically runs locally; this one
+                  does not. */}
+              <div className="flex items-start gap-1.5 rounded-lg border border-yellow-500/40 bg-yellow-500/5 px-2.5 py-1.5">
+                <AlertTriangle size={12} className="mt-0.5 shrink-0 text-yellow-600" />
+                <p className="text-xs text-foreground">
+                  The security scan, the code review and the QA classifier run on
+                  your local model server, on every push, without being asked.
+                  Authoring does not: a ticket you hand over sends its brief — the
+                  description, the Slack discussion and your source — to the model
+                  OpenCode is configured with, which is remote. Check that
+                  provider's retention and training terms before pointing this at a
+                  private repository.
+                </p>
+              </div>
+              <label className="flex items-center gap-2 text-xs text-foreground">
+                Attempts before it comes back to you
+                <input
+                  type="number"
+                  min={0}
+                  max={10}
+                  value={values.autonomous_max_rounds}
+                  onChange={(e) =>
+                    setValues({
+                      ...values,
+                      autonomous_max_rounds: Number(e.target.value),
+                    })
+                  }
+                  className="w-16 rounded border border-border bg-background px-2 py-0.5 text-xs"
+                />
+                <span className="text-muted-foreground">
+                  first attempt plus {values.autonomous_max_rounds} rework
+                  {values.autonomous_max_rounds === 1 ? "" : "s"}
+                </span>
+              </label>
+              <p className="text-xs text-muted-foreground">
+                A run that times out, blows the diff cap or fails the test gate
+                spends an attempt exactly as a rejected review does — otherwise a
+                reliably-failing ticket retries forever and the bound protects
+                nothing. Any single ticket can be switched back to Assisted from
+                its own card.
+              </p>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <div>
+                  <label className="mb-1 block text-xs text-muted-foreground">
+                    Prepare command — run in the fresh worktree
+                  </label>
+                  <input
+                    value={values.prepare_command ?? ""}
+                    onChange={(e) =>
+                      setValues({ ...values, prepare_command: e.target.value || null })
+                    }
+                    placeholder="uv sync --extra security"
+                    className="w-full rounded-lg border border-border bg-background px-3 py-1.5 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-primary"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-muted-foreground">
+                    Test command — the gate before a pull request opens
+                  </label>
+                  <input
+                    value={values.test_command ?? ""}
+                    onChange={(e) =>
+                      setValues({ ...values, test_command: e.target.value || null })
+                    }
+                    placeholder="uv run pytest tests/ -q"
+                    className="w-full rounded-lg border border-border bg-background px-3 py-1.5 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-primary"
+                  />
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                A fresh worktree has no{" "}
+                <span className="font-mono">node_modules</span> and no{" "}
+                <span className="font-mono">.venv</span>, so the gate cannot run
+                without the prepare command. Leave the test command blank for no
+                gate.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="mt-3 grid gap-3 sm:grid-cols-2">
         <div>

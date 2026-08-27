@@ -1204,6 +1204,24 @@ class RepoRegistration(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class AuthoringPreset(BaseModel):
+    """
+    A named starting point for the authoring dials.
+
+    Applied at write time only. The values here are copied into form state and
+    the resolver never reads this -- a preset expanded at read time would be a
+    second resolution layer above `resolve_settings`.
+    """
+    name: str
+    label: str
+    description: str
+    values: dict[str, object]
+
+
+class AuthoringPresetList(BaseModel):
+    presets: list[AuthoringPreset]
+
+
 class WorkItemModeUpdate(BaseModel):
     """
     An authoring override for one work item.

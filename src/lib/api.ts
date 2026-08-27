@@ -1028,6 +1028,43 @@ export interface PRAgentDefaults extends AuthoringSettings {
   context_docs: string[];
 }
 
+export interface AuthoringPreset {
+  name: string;
+  label: string;
+  description: string;
+  /**
+   * The dials this preset writes into form state.
+   *
+   * Applied at write time only. The backend resolver never reads a preset —
+   * expanding one at read time would be a second resolution layer above it.
+   */
+  values: Partial<PRAgentDefaults>;
+}
+
+/** Named starting points for the authoring dials, from the backend's one dict. */
+export async function getAuthoringPresets(): Promise<AuthoringPreset[]> {
+  const body = await apiRequest<{ presets: AuthoringPreset[] }>(
+    "/webhooks/presets"
+  );
+  return body.presets;
+}
+
+/**
+ * Whether saved settings still match the preset they name.
+ *
+ * Mirrors `presets.matches` on the backend: only the keys the preset states
+ * are compared, so a repo that set a Slack channel has not thereby modified
+ * the preset.
+ */
+export function matchesPreset(
+  preset: AuthoringPreset,
+  values: Partial<PRAgentDefaults>
+): boolean {
+  return (Object.keys(preset.values) as (keyof PRAgentDefaults)[]).every(
+    (key) => values[key] === preset.values[key]
+  );
+}
+
 /** Account-wide fallbacks used by any repo that does not set its own. */
 export async function getPRAgentDefaults(): Promise<PRAgentDefaults> {
   return apiRequest<PRAgentDefaults>("/webhooks/defaults");
