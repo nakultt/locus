@@ -460,3 +460,91 @@ class TestSourceDegradation:
         assert board.jira_available is False
         assert board.github_available is True
         assert board.unavailable == ["jira"]
+
+
+class TestAuthoringStage:
+    """
+    The `authoring` step, and where it ranks.
+
+    Rendered only when the resolved mode is autonomous -- the same rule
+    `changes_requested` follows, because a greyed-out step implies a step that
+    was skipped where in fact it was never available.
+    """
+
+    def test_the_step_is_absent_on_an_assisted_task(self, db):
+        from app.services.task_board import _build_stages
+
+        stages = _build_stages(
+            schemas.TaskStage.assigned, False, [], [], autonomous=False
+        )
+
+        assert not any(s.stage is schemas.TaskStage.authoring for s in stages)
+
+    def test_the_step_is_rendered_on_an_autonomous_task(self, db):
+        from app.services.task_board import _build_stages
+
+        stages = _build_stages(
+            schemas.TaskStage.assigned, False, [], [], autonomous=True
+        )
+
+        assert any(s.stage is schemas.TaskStage.authoring for s in stages)
+
+    def test_the_stepper_can_never_omit_its_own_current_stage(self, db):
+        """
+        Deriving the step from the current stage as well is what makes this
+        impossible, rather than merely unlikely.
+        """
+        from app.services.task_board import _build_stages
+
+        stages = _build_stages(
+            schemas.TaskStage.authoring, False, [], [], autonomous=False
+        )
+
+        assert any(s.stage is schemas.TaskStage.authoring for s in stages)
+
+    def test_an_attempt_ranks_below_a_linked_branch(self, db):
+        """
+        The attempt row is append-only and stays behind forever, so a rule
+        letting it win would walk a reviewed card back to "Locus is writing it"
+        on every refresh.
+        """
+        from app.services.task_board import _derive_stage
+
+        stage, _ = _derive_stage(
+            [], None, False, has_pr=False, has_branch=True, has_attempt=True
+        )
+
+        assert stage is schemas.TaskStage.branch_created
+
+    def test_an_attempt_ranks_below_every_pull_request_stage(self, db):
+        from app.services.task_board import _derive_stage
+
+        stage, _ = _derive_stage(
+            [], None, False, has_pr=True, has_branch=False, has_attempt=True
+        )
+
+        assert stage is schemas.TaskStage.in_progress
+
+    def test_an_attempt_alone_beats_assigned(self, db):
+        """
+        A ticket the agent is actively writing has not "not started", which is
+        what `assigned` claims.
+        """
+        from app.services.task_board import _derive_stage
+
+        stage, _ = _derive_stage(
+            [], None, False, has_pr=False, has_branch=False, has_attempt=True
+        )
+
+        assert stage is schemas.TaskStage.authoring
+
+    def test_the_step_counts_the_attempts(self, db):
+        from app.services.task_board import _build_stages
+
+        stages = _build_stages(
+            schemas.TaskStage.authoring, False, [], [], autonomous=True,
+            attempts=3,
+        )
+
+        step = next(s for s in stages if s.stage is schemas.TaskStage.authoring)
+        assert step.detail == "3 attempts"

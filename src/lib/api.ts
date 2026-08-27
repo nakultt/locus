@@ -1103,6 +1103,8 @@ export type TaskSource = "github" | "jira";
  */
 export type TaskStage =
   | "assigned"
+  /** The authoring agent is writing, or has written, the first draft. */
+  | "authoring"
   | "branch_created"
   | "in_progress"
   | "analyzed"
@@ -1173,6 +1175,115 @@ export interface TaskCard {
   blocked_reason?: string | null;
   age_hours: number;
   round_number: number;
+
+  /**
+   * Who writes the code for this work item, resolved by the backend through
+   * the same chain a run would use — so the chip and the run cannot disagree.
+   */
+  authoring_mode: AuthoringMode;
+  /** "work_item", "repo", "defaults", "unset", or "handed_back". */
+  authoring_source: string;
+  /**
+   * Handed back after the bound ran out, or because a human took the branch
+   * over. Styled as attention rather than error: it is the mode working.
+   */
+  handed_back: boolean;
+  handed_back_reason?: string | null;
+  authoring_attempts: number;
+}
+
+/** The authoring mode a run on one work item would use, and where it came from. */
+export interface WorkItemMode {
+  task_key: string;
+  authoring_mode: AuthoringMode;
+  autonomous_max_rounds: number;
+  source: string;
+  rounds_source: string;
+  override?: AuthoringMode | null;
+  handed_back: boolean;
+  handed_back_reason?: string | null;
+  handed_back_at?: string | null;
+  preset_label?: string | null;
+}
+
+/** One recorded run of the authoring driver, opened or not. */
+export interface AuthoringAttempt {
+  id: number;
+  ticket_key: string;
+  repo?: string | null;
+  pr_number?: number | null;
+  attempt: number;
+  /** initial | changes_requested | qa_rejected */
+  trigger: string;
+  driver: string;
+  model?: string | null;
+  context_mode?: string | null;
+  opened: boolean;
+  error?: string | null;
+  files_changed: number;
+  lines_changed: number;
+  duration_seconds: number;
+  created_at?: string | null;
+}
+
+export interface AuthoringRun {
+  ticket_key: string;
+  opened: boolean;
+  pr_number?: number | null;
+  pr_url?: string | null;
+  branch?: string | null;
+  attempt: number;
+  attempts_remaining: number;
+  driver: string;
+  model?: string | null;
+  files_changed: number;
+  lines_changed: number;
+  error?: string | null;
+  handed_back_reason?: string | null;
+}
+
+export async function getTaskMode(taskKey: string): Promise<WorkItemMode> {
+  return apiRequest<WorkItemMode>(
+    `/tasks/mode?task_key=${encodeURIComponent(taskKey)}`
+  );
+}
+
+/**
+ * Override the mode for one work item. A null mode clears the override and
+ * inherits again — absence means "inherit", where a stored null would read as
+ * a deliberate choice.
+ */
+export async function setTaskMode(
+  taskKey: string,
+  authoringMode: AuthoringMode | null,
+  autonomousMaxRounds?: number | null
+): Promise<WorkItemMode> {
+  return apiRequest<WorkItemMode>(
+    `/tasks/mode?task_key=${encodeURIComponent(taskKey)}`,
+    {
+      method: "PUT",
+      body: JSON.stringify({
+        authoring_mode: authoringMode,
+        autonomous_max_rounds: autonomousMaxRounds ?? null,
+      }),
+    }
+  );
+}
+
+export async function getTaskAttempts(
+  taskKey: string
+): Promise<AuthoringAttempt[]> {
+  return apiRequest<AuthoringAttempt[]>(
+    `/tasks/attempts?task_key=${encodeURIComponent(taskKey)}`
+  );
+}
+
+/** Hand this work item to the authoring agent. The board's second write. */
+export async function authorTask(taskKey: string): Promise<AuthoringRun> {
+  return apiRequest<AuthoringRun>(
+    `/tasks/author?task_key=${encodeURIComponent(taskKey)}`,
+    { method: "POST" }
+  );
 }
 
 export interface TaskBoard {
@@ -1260,6 +1371,43 @@ export interface ScheduleProposal {
 export interface CalendarConflict {
   first: { title: string; start: string; id: string };
   second: { title: string; start: string; id: string };
+}
+
+/**
+ * Whether you can be reached, and until when.
+ *
+ * Carries a state and a time and nothing else — no title, no attendee, no
+ * location. The type is the enforcement: this same value is what the Slack
+ * busy reply is built from, and it is posted into a channel other people read.
+ */
+export interface Availability {
+  state: "free" | "busy" | "focus" | "off_hours";
+  until?: string | null;
+  next_free?: string | null;
+}
+
+export interface InterruptionEntry {
+  id: number;
+  occurred_at?: string | null;
+  channel: string;
+  participant?: string | null;
+  slack_channel?: string | null;
+  availability_state: string;
+  importance: string;
+  /** reviewer | worklist | classifier — the third is the only model-made claim. */
+  importance_source: string;
+  replied: boolean;
+  reply_body?: string | null;
+  excerpt?: string | null;
+}
+
+/** The same value the Slack reply uses, so the channel and the UI agree. */
+export async function getAvailability(): Promise<Availability> {
+  return apiRequest<Availability>("/api/schedule/availability");
+}
+
+export async function getInterruptions(): Promise<InterruptionEntry[]> {
+  return apiRequest<InterruptionEntry[]>("/api/schedule/interruptions");
 }
 
 export async function getScheduleConflicts(days = 14): Promise<{
