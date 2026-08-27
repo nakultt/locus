@@ -780,6 +780,19 @@ class IssueLinks(BaseModel):
     pull_requests: list[LinkedPullRequest] = Field(default_factory=list)
 
 
+class AuthoringMode(str, Enum):
+    """
+    Who writes the code for a work item.
+
+    `assisted` is a person; `autonomous` hands the ticket to the authoring
+    driver, which opens a pull request that flows through the same analysis,
+    review and QA pipeline. Assisted is the fallback everywhere -- a mode that
+    writes code on its own is never inherited by accident.
+    """
+    assisted = "assisted"
+    autonomous = "autonomous"
+
+
 class TaskStage(str, Enum):
     """
     How far along the automated pipeline one task has travelled.
@@ -792,6 +805,12 @@ class TaskStage(str, Enum):
     and collapsing the two would lose where it stalled.
     """
     assigned = "assigned"
+    # The authoring agent is writing, or has written, the first draft.
+    #
+    # Rendered only when the resolved mode is autonomous -- the same rule
+    # `changes_requested` follows, because a greyed-out step implies work that
+    # was skipped rather than a step that was never available.
+    authoring = "authoring"
     branch_created = "branch_created"
     in_progress = "in_progress"
     analyzed = "analyzed"
@@ -807,6 +826,7 @@ class TaskStage(str, Enum):
 # "not there yet" rather than being absent from the picture entirely.
 TASK_STAGE_ORDER: list[TaskStage] = [
     TaskStage.assigned,
+    TaskStage.authoring,
     TaskStage.branch_created,
     TaskStage.in_progress,
     TaskStage.analyzed,
@@ -880,6 +900,16 @@ class TaskCard(BaseModel):
     age_hours: float = 0.0
     round_number: int = 1
 
+    # Who writes the code for this work item, resolved through the same
+    # `agent_settings` chain a run would use -- so the chip and the run cannot
+    # disagree. `handed_back` reads as attention rather than error in the UI:
+    # it is the mode working, not the mode failing.
+    authoring_mode: AuthoringMode = AuthoringMode.assisted
+    authoring_source: str = "unset"
+    handed_back: bool = False
+    handed_back_reason: str | None = None
+    authoring_attempts: int = 0
+
 
 class TaskBoard(BaseModel):
     """Every assigned task, ordered by whether it is waiting on you."""
@@ -925,19 +955,6 @@ class TaskDetail(BaseModel):
     # The task's report document. Null when Docs is not connected -- the task
     # renders without a link rather than the view failing.
     doc_url: str | None = None
-
-
-class AuthoringMode(str, Enum):
-    """
-    Who writes the code for a work item.
-
-    `assisted` is a person; `autonomous` hands the ticket to the authoring
-    driver, which opens a pull request that flows through the same analysis,
-    review and QA pipeline. Assisted is the fallback everywhere -- a mode that
-    writes code on its own is never inherited by accident.
-    """
-    assisted = "assisted"
-    autonomous = "autonomous"
 
 
 class MergeMethod(str, Enum):

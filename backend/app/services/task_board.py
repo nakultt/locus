@@ -32,6 +32,7 @@ from sqlalchemy.orm import Session
 
 from app import models, schemas
 from app.services import assigned, comms_log, issue_links, review_flow, worklist
+from app.services.agent_settings import resolve_settings
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ logger = logging.getLogger(__name__)
 # not as the action Locus took, because the card describes the work.
 STAGE_LABELS: dict[schemas.TaskStage, str] = {
     schemas.TaskStage.assigned: "Assigned",
+    schemas.TaskStage.authoring: "Locus is writing it",
     schemas.TaskStage.branch_created: "Branch created",
     schemas.TaskStage.in_progress: "Pull request opened",
     schemas.TaskStage.analyzed: "Context gathered and scanned",
@@ -62,6 +64,10 @@ STAGE_LABELS: dict[schemas.TaskStage, str] = {
 CONDITIONAL_STAGES = {
     schemas.TaskStage.changes_requested,
     schemas.TaskStage.branch_created,
+    # Rendered only when the resolved mode is autonomous. Showing it greyed-out
+    # on every assisted task would imply a step that was skipped, where in fact
+    # it was never available -- the same argument as `changes_requested`.
+    schemas.TaskStage.authoring,
 }
 
 
@@ -80,6 +86,7 @@ def _derive_stage(
     analyzed: bool,
     has_pr: bool = False,
     has_branch: bool = False,
+    has_attempt: bool = False,
 ) -> tuple[schemas.TaskStage, bool]:
     """
     How far this task has travelled, and whether changes were ever requested.
@@ -110,6 +117,11 @@ def _derive_stage(
     pull-request stage rather than replacing them: the branch stays linked
     after its PR opens, and letting it win would walk a reviewed task
     backwards to "branch created" on every refresh.
+
+    An authoring attempt ranks below even that, for exactly the same reason:
+    the attempt row is append-only and stays behind forever, so a rule letting
+    it win would walk a reviewed card back to "Locus is writing it" on every
+    refresh.
     """
     # Computed across every attempt, in flight or not: a round trip on the
     # first pull request is still something that happened to this task.
@@ -142,6 +154,8 @@ def _derive_stage(
             return schemas.TaskStage.in_progress, False
         if has_branch:
             return schemas.TaskStage.branch_created, False
+        if has_attempt:
+            return schemas.TaskStage.authoring, False
         return schemas.TaskStage.assigned, False
 
     # Ranked by how far along the loop each state is.
@@ -165,6 +179,8 @@ def _build_stages(
     had_changes: bool,
     reviews: list[models.PRReview],
     branches: list[schemas.LinkedBranch] | None = None,
+    autonomous: bool = False,
+    attempts: int = 0,
 ) -> list[schemas.TaskStageStatus]:
     """
     The stepper: every stage, marked done, current or not yet reached.
@@ -183,6 +199,11 @@ def _build_stages(
         # render a card whose current stage is missing from its own order.
         schemas.TaskStage.branch_created: bool(branches)
         or current is schemas.TaskStage.branch_created,
+        # Only for a work item actually set to autonomous. Deriving it from
+        # the current stage as well means the stepper can never render a card
+        # whose current stage is missing from its own order.
+        schemas.TaskStage.authoring: autonomous
+        or current is schemas.TaskStage.authoring,
     }
     order = [
         stage for stage in schemas.TASK_STAGE_ORDER
@@ -209,6 +230,8 @@ def _build_stages(
             detail = branches[0].name
             if len(branches) > 1:
                 detail += f" +{len(branches) - 1}"
+        elif stage is schemas.TaskStage.authoring and attempts:
+            detail = f"{attempts} attempt" + ("s" if attempts > 1 else "")
         elif stage is schemas.TaskStage.in_review and reviews:
             rounds = max(r.round_number for r in reviews)
             if rounds > 1:
@@ -446,6 +469,13 @@ async def build(
         task.key: task for task in (work.needs_you + work.waiting_on_others)
     }
 
+    # Attempt counts for every work item at once, rather than a query per card.
+    attempts_by_key: dict[str, int] = {}
+    for row in db.query(models.AuthoringAttempt).filter(
+        models.AuthoringAttempt.owner_id == owner_id
+    ).all():
+        attempts_by_key[row.ticket_key] = attempts_by_key.get(row.ticket_key, 0) + 1
+
     cards: list[schemas.TaskCard] = []
     for item in items:
         links = links_by_key.get(item.key)
@@ -479,10 +509,24 @@ async def build(
             )
 
         branches = links.branches if links else []
+
+        # The mode this work item would actually run in, resolved through the
+        # same chain the worker uses, against the registration of the repo the
+        # work is happening in. Reading it here rather than in the UI is what
+        # keeps the chip and the run from disagreeing.
+        item_settings = resolve_settings(
+            db,
+            owner_id,
+            _registration_for(db, owner_id, pr_idents, branches),
+            ticket_key=item.key,
+        )
+        attempts = attempts_by_key.get(item.key, 0)
+
         stage, had_changes = _derive_stage(
             matched, qa, analyzed,
             has_pr=bool(pr_idents),
             has_branch=bool(branches),
+            has_attempt=bool(attempts),
         )
         task = by_key.get(item.key)
 
@@ -530,7 +574,11 @@ async def build(
             updated_at=item.updated_at,
             description=item.body,
             stage=stage,
-            stages=_build_stages(stage, had_changes, matched, branches),
+            stages=_build_stages(
+                stage, had_changes, matched, branches,
+                autonomous=item_settings.authoring_mode == "autonomous",
+                attempts=attempts,
+            ),
             pull_requests=pull_requests,
             linked_branches=branches,
             items=task.items if task else [],
@@ -538,6 +586,11 @@ async def build(
             blocked_reason=_blocked_reason(task.items) if task else None,
             age_hours=task.age_hours if task else 0.0,
             round_number=max((r.round_number for r in matched), default=1),
+            authoring_mode=schemas.AuthoringMode(item_settings.authoring_mode),
+            authoring_source=item_settings.sources.get("authoring_mode", "unset"),
+            handed_back=item_settings.handed_back,
+            handed_back_reason=item_settings.handed_back_reason,
+            authoring_attempts=attempts,
         ))
 
     # Needs-you first, then staleness -- a task that has been round-tripping
@@ -675,3 +728,31 @@ def _review_detail(
         .first()
     )
     return review_flow.to_detail(review) if review else None
+
+
+def _registration_for(
+    db: Session,
+    owner_id: int,
+    pr_idents: set,
+    branches: list[schemas.LinkedBranch],
+) -> models.RepoWebhook | None:
+    """
+    The repo registration behind a work item, from wherever the work is.
+
+    A pull request names its repo; before one exists a linked branch does. A
+    work item with neither has no repo settings to resolve against, and falls
+    back to the account defaults -- which is correct, not a gap.
+    """
+    repo = None
+    if pr_idents:
+        repo = sorted(pr_idents)[0][0]
+    elif branches:
+        repo = next((b.repo for b in branches if b.repo), None)
+
+    if not repo:
+        return None
+
+    return db.query(models.RepoWebhook).filter(
+        models.RepoWebhook.repo == repo,
+        models.RepoWebhook.owner_id == owner_id,
+    ).first()
