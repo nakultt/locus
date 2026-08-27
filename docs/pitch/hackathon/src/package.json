@@ -1,0 +1,6 @@
+{
+  "name": "locus-hackathon-deck",
+  "private": true,
+  "//": "The repo root sets type:module, which makes these .js files ESM and breaks require(). Scoping the deck build to CommonJS here keeps build.js unchanged and leaves the app's module setting alone.",
+  "type": "commonjs"
+}

@@ -1289,6 +1289,9 @@ export async function authorTask(taskKey: string): Promise<AuthoringRun> {
 export interface TaskBoard {
   needs_you: TaskCard[];
   in_flight: TaskCard[];
+  /** Finished in the last week. A record, not a queue — never acted on. */
+  recently_done: TaskCard[];
+  /** Open work only, so the count does not grow every time something ships. */
   total: number;
   github_available: boolean;
   jira_available: boolean;

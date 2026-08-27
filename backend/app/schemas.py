@@ -915,6 +915,13 @@ class TaskBoard(BaseModel):
     """Every assigned task, ordered by whether it is waiting on you."""
     needs_you: list[TaskCard] = []
     in_flight: list[TaskCard] = []
+
+    # Work that finished in the last week. Separate from the two queues above
+    # rather than a stage within them: it is a record, not something to act on.
+    recently_done: list[TaskCard] = []
+
+    # Open work only -- the badge answers "how much is on my plate", so it must
+    # not grow every time something ships.
     total: int = 0
 
     # Which sources actually answered. A source that failed is reported rather

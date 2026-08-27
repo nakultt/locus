@@ -18,7 +18,7 @@ worse than a board that says so and shows the rest.
 """
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 
@@ -40,6 +40,25 @@ JIRA_ASSIGNED_JQL = (
     "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC"
 )
 
+# How far back "recently done" reaches.
+#
+# The board exists to answer "what is assigned to me and how far has it got",
+# and both queries above are scoped to unfinished work -- so the moment QA
+# sign-off closes a ticket it vanishes, taking the whole pipeline record with
+# it. The run that worked is the one you can no longer look at, which is the
+# wrong way round: everything is still stored, but the board is the only
+# surface that assembles it.
+#
+# Bounded rather than unbounded because this is a board and not an archive. A
+# week covers "what did we ship" without the finished work outgrowing the work
+# still to do.
+DONE_WINDOW_DAYS = 7
+
+JIRA_DONE_JQL = (
+    "assignee = currentUser() AND statusCategory = Done "
+    f"AND updated >= -{DONE_WINDOW_DAYS}d ORDER BY updated DESC"
+)
+
 JIRA_FIELDS = "summary,status,assignee,updated,priority,issuetype,description"
 
 
@@ -53,7 +72,26 @@ def _parse_stamp(raw: str | None) -> datetime | None:
         return None
 
 
-async def github_assigned(token: str) -> list[schemas.AssignedItem]:
+async def github_recently_done(token: str) -> list[schemas.AssignedItem]:
+    """
+    GitHub issues assigned to the token's owner that closed in the last week.
+
+    A separate call rather than a widened one: `state=all` would return the
+    open and closed sets together and leave the caller to split them, and the
+    open query is the one that must never be slowed down or made to fail by
+    this. Degrades to an empty list exactly like its sibling -- a completed
+    section that cannot load must cost the completed section only.
+    """
+    since = datetime.now(UTC) - timedelta(days=DONE_WINDOW_DAYS)
+    return await github_assigned(token, state="closed", since=since)
+
+
+async def github_assigned(
+    token: str,
+    *,
+    state: str = "open",
+    since: datetime | None = None,
+) -> list[schemas.AssignedItem]:
     """
     Every open GitHub issue assigned to the token's owner.
 
@@ -74,9 +112,13 @@ async def github_assigned(token: str) -> list[schemas.AssignedItem]:
                 headers=build_headers(token),
                 params={
                     "filter": "assigned",
-                    "state": "open",
+                    "state": state,
                     "per_page": MAX_ITEMS,
                     "sort": "updated",
+                    # `since` filters on updated-at, which is the only time
+                    # bound this endpoint offers. Close enough: an issue that
+                    # closed inside the window was updated inside it too.
+                    **({"since": since.isoformat()} if since else {}),
                 },
             )
             if response.status_code != 200:
@@ -175,7 +217,20 @@ def jira_text(field: object) -> str | None:
     return " ".join(parts).strip() or None
 
 
-async def jira_assigned(jira_config: dict) -> list[schemas.AssignedItem]:
+async def jira_recently_done(jira_config: dict) -> list[schemas.AssignedItem]:
+    """
+    Jira tickets assigned to the credential's owner that reached Done recently.
+
+    `statusCategory = Done` rather than a named status, for the same reason the
+    open query uses `!= Done`: every board names its final column differently,
+    and the category is the part Jira guarantees.
+    """
+    return await jira_assigned(jira_config, jql=JIRA_DONE_JQL)
+
+
+async def jira_assigned(
+    jira_config: dict, *, jql: str = JIRA_ASSIGNED_JQL
+) -> list[schemas.AssignedItem]:
     """
     Every open Jira ticket assigned to the credential's owner.
 
@@ -195,7 +250,7 @@ async def jira_assigned(jira_config: dict) -> list[schemas.AssignedItem]:
                 response = await client.get(
                     f"{base_url}{path}",
                     params={
-                        "jql": JIRA_ASSIGNED_JQL,
+                        "jql": jql,
                         "maxResults": MAX_ITEMS,
                         "fields": JIRA_FIELDS,
                     },
