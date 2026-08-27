@@ -486,6 +486,23 @@ async def author_task(
     attempt = authoring.next_attempt_number(
         db, owner_id=current_user.id, ticket_key=task_key
     )
+    # The report link goes in the pull request body: a Google Doc nobody links
+    # to is work nobody reads, and the analysis behind the ticket is where the
+    # requirement context lives. A failure to fetch it costs the link, never
+    # the run.
+    detail_doc_url = await report_sync.ensure_for_ticket(
+        db,
+        owner_id=current_user.id,
+        key=task_key,
+        title=card.title,
+        integration_configs=integration_configs,
+        url=card.url,
+        status=card.status,
+        assignee=card.assignee,
+        priority=card.priority,
+        description=card.description,
+        repo=repo,
+    )
     request = authoring.AuthoringRequest(
         ticket_key=task_key,
         title=card.title,
@@ -497,6 +514,18 @@ async def author_task(
         rejection=_rejection_for(db, current_user.id, task_key),
         attempt=attempt,
         trigger="initial",
+        settings={
+            "source_path": settings.source_path,
+            "prepare_command": settings.prepare_command,
+            "test_command": settings.test_command,
+            # What the test gate consults on a failure: with attempts left it
+            # opens nothing and retries, on the last one it opens the pull
+            # request anyway with the failure stated.
+            "attempts_remaining": max(
+                0, settings.autonomous_max_rounds + 1 - attempt
+            ),
+            "doc_url": detail_doc_url,
+        },
     ).scoped()
 
     result = await driver.author(request, integration_configs)
