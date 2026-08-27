@@ -8,7 +8,7 @@ the user first and applied only on their say-so.
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -16,7 +16,9 @@ from sqlalchemy.orm import Session
 from app import models, schemas
 from app.database import get_db
 from app.dependencies import get_current_user, get_integration_configs
+from app.services import availability as availability_service
 from app.services import calendar as calendar_service
+from app.services import calendar_agent
 from app.services.datetimes import parse_datetime, resolve_timezone
 from app.services.scheduler import (
     SchedulingContext,
@@ -61,6 +63,21 @@ def _load_calendar(
             detail=f"Could not read the calendar: {error}",
         )
 
+    return events_from_raw(db, user, raw)
+
+
+def events_from_raw(
+    db: Session, user: models.User, raw: list[dict]
+) -> list[schemas.ScheduledEvent]:
+    """
+    Turn Google's payload into the solver's shape.
+
+    Split out from `_load_calendar` so the calendar agent's background loop can
+    reuse it: the loop fetches on its own schedule and must not raise
+    `HTTPException`, but the parsing -- the timezone handling, the override
+    lookup, the external-attendee test -- has to be identical or the sweep and
+    the endpoint would disagree about the same calendar.
+    """
     tz = resolve_timezone(user.timezone)
     own_domain = user.email.split("@")[-1].lower() if user.email else ""
 
@@ -409,3 +426,229 @@ async def apply_plan(
             failed.append(f"{addition.title}: {e}")
 
     return {"applied": applied, "failed": failed}
+
+
+@router.get(
+    "/agent",
+    response_model=schemas.TimeAgentSettingsResponse,
+    summary="The calendar agent's settings",
+)
+async def get_agent_settings(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> schemas.TimeAgentSettingsResponse:
+    """
+    Returns the defaults when nothing has been saved, so the client never has
+    to special-case a missing row -- and reading a setting never writes one.
+    """
+    row = calendar_agent.get_settings(db, current_user.id)
+
+    return schemas.TimeAgentSettingsResponse(
+        enabled=bool(row.enabled),
+        auto_apply=bool(row.auto_apply),
+        auto_reply_invites=bool(row.auto_reply_invites),
+        auto_reply_busy=bool(row.auto_reply_busy),
+        working_hours_start=row.working_hours_start or "09:30",
+        working_hours_end=row.working_hours_end or "18:30",
+        protect_focus_blocks=bool(row.protect_focus_blocks),
+        slack_member_id=row.slack_member_id,
+        timezone=current_user.timezone,
+    )
+
+
+@router.put(
+    "/agent",
+    response_model=schemas.TimeAgentSettingsResponse,
+    summary="Save the calendar agent's settings",
+)
+async def save_agent_settings(
+    request: schemas.TimeAgentSettingsUpdate,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> schemas.TimeAgentSettingsResponse:
+    """
+    Create or replace this user's settings. One row per user.
+
+    The Slack member id is resolved here rather than stored by hand: a mention
+    arrives in message text as `<@U04AB…>` while contacts are written as
+    handles, and the two namespaces never compare equal. A failure to resolve
+    it costs mention matching, never the save.
+    """
+    row = db.query(models.TimeAgentSettings).filter(
+        models.TimeAgentSettings.owner_id == current_user.id
+    ).first()
+    if row is None:
+        row = models.TimeAgentSettings(owner_id=current_user.id)
+        db.add(row)
+
+    row.enabled = 1 if request.enabled else 0
+    row.auto_apply = 1 if request.auto_apply else 0
+    row.auto_reply_invites = 1 if request.auto_reply_invites else 0
+    row.auto_reply_busy = 1 if request.auto_reply_busy else 0
+    row.working_hours_start = request.working_hours_start
+    row.working_hours_end = request.working_hours_end
+    row.protect_focus_blocks = 1 if request.protect_focus_blocks else 0
+
+    if row.slack_member_id is None:
+        configs = get_integration_configs(db, current_user.id)
+        row.slack_member_id = await calendar_agent.resolve_slack_member_id(
+            configs.get("slack") or {}
+        )
+
+    db.commit()
+    db.refresh(row)
+
+    return await get_agent_settings(current_user=current_user, db=db)
+
+
+@router.get(
+    "/proposals",
+    response_model=list[schemas.StoredProposal],
+    summary="Reshuffles the agent proposed, waiting on you",
+)
+async def list_proposals(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[schemas.StoredProposal]:
+    """
+    The propose-only half of the agent. With `auto_apply` off, this is where a
+    plan waits until somebody looks at it.
+    """
+    return [
+        schemas.StoredProposal(
+            id=record.id,
+            trigger=record.trigger,
+            summary=record.summary,
+            state=record.state,
+            created_at=record.created_at,
+            proposal=calendar_agent.load_proposal(record),
+        )
+        for record in calendar_agent.pending_proposals(db, current_user.id)
+    ]
+
+
+@router.post(
+    "/proposals/{proposal_id}/apply",
+    summary="Carry out a proposal the agent made",
+)
+async def apply_proposal(
+    proposal_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """
+    Apply the stored plan, not a freshly recomputed one.
+
+    Recomputing at apply time would silently execute a different plan from the
+    one the person approved -- the calendar has moved since, and that is
+    exactly why they were asked.
+
+    A proposal that is not this user's returns 404, never 403.
+    """
+    record = db.query(models.ScheduleProposalRecord).filter(
+        models.ScheduleProposalRecord.id == proposal_id,
+        models.ScheduleProposalRecord.owner_id == current_user.id,
+    ).first()
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Proposal not found"
+        )
+
+    proposal = calendar_agent.load_proposal(record)
+    result = await apply_plan(
+        schemas.ScheduleApplyRequest(
+            moves=proposal.moves, additions=proposal.additions
+        ),
+        current_user=current_user,
+        db=db,
+    )
+
+    record.state = "applied"
+    record.resolved_at = datetime.now(UTC)
+    db.commit()
+
+    return result
+
+
+@router.delete(
+    "/proposals/{proposal_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Dismiss a proposal",
+)
+async def dismiss_proposal(
+    proposal_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> None:
+    """Dismissed rather than deleted, so the sweep does not re-propose it."""
+    record = db.query(models.ScheduleProposalRecord).filter(
+        models.ScheduleProposalRecord.id == proposal_id,
+        models.ScheduleProposalRecord.owner_id == current_user.id,
+    ).first()
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Proposal not found"
+        )
+
+    record.state = "dismissed"
+    record.resolved_at = datetime.now(UTC)
+    db.commit()
+
+
+@router.get(
+    "/availability",
+    response_model=schemas.Availability,
+    summary="Whether you can be reached, and until when",
+)
+async def get_availability(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> schemas.Availability:
+    """
+    The same `availability.current_status` the Slack reply uses.
+
+    One source, so the channel and the UI cannot disagree about whether you are
+    in a meeting. Carries a state and a time and nothing else -- no title, no
+    attendee, no location. The type is the enforcement.
+
+    Reads `free` when the calendar cannot be read: a broken token and a real
+    meeting produce identical silence, and defaulting to busy fails in the
+    direction that makes you unreachable.
+    """
+    settings = calendar_agent.get_settings(db, current_user.id)
+    return await availability_service.for_user(db, current_user, settings)
+
+
+@router.get(
+    "/interruptions",
+    response_model=list[schemas.InterruptionEntry],
+    summary="Who reached you while you were busy",
+)
+async def list_interruptions(
+    limit: int = 25,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[schemas.InterruptionEntry]:
+    """Most recent first. Records the ones nobody was answered on, too."""
+    rows = db.query(models.InterruptionEvent).filter(
+        models.InterruptionEvent.owner_id == current_user.id
+    ).order_by(models.InterruptionEvent.occurred_at.desc()).limit(
+        min(max(limit, 1), 100)
+    ).all()
+
+    return [
+        schemas.InterruptionEntry(
+            id=row.id,
+            occurred_at=row.occurred_at,
+            channel=row.channel,
+            participant=row.participant,
+            slack_channel=row.slack_channel,
+            availability_state=row.availability_state,
+            importance=row.importance,
+            importance_source=row.importance_source,
+            replied=bool(row.replied),
+            reply_body=row.reply_body,
+            excerpt=row.excerpt,
+        )
+        for row in rows
+    ]

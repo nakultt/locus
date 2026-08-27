@@ -10,13 +10,17 @@ import {
   Users,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
-import { formatWithWeekday } from "@/lib/datetime";
+import { formatFull, formatWithWeekday } from "@/lib/datetime";
 import {
   applySchedule,
+  getAvailability,
+  getInterruptions,
   getScheduleConflicts,
   planSchedule,
+  type Availability,
   type CalendarConflict,
   type EventClass,
+  type InterruptionEntry,
   type ScheduleMove,
   type ScheduleProposal,
 } from "@/lib/api";
@@ -75,6 +79,107 @@ const MoveRow = ({ move }: { move: ScheduleMove }) => {
   );
 };
 
+/**
+ * Whether you can be reached, reading the same value the Slack reply uses.
+ *
+ * One source, so the channel and this chip cannot disagree about whether you
+ * are in a meeting. Times render through `src/lib/datetime.ts` with its
+ * explicit zone, so every viewer reads the same wall clock.
+ */
+const AvailabilityChip = ({ availability }: { availability: Availability }) => {
+  const tone = {
+    free: "bg-green-500/10 text-green-600 dark:text-green-400",
+    busy: "bg-orange-500/10 text-orange-600 dark:text-orange-400",
+    focus: "bg-violet-500/10 text-violet-600 dark:text-violet-400",
+    off_hours: "bg-muted text-muted-foreground",
+  }[availability.state];
+
+  const label = {
+    free: "Free",
+    busy: "In a meeting",
+    focus: "Heads-down",
+    off_hours: "Outside working hours",
+  }[availability.state];
+
+  return (
+    <span
+      className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${tone}`}
+    >
+      {label}
+      {availability.until && ` until ${formatFull(availability.until)}`}
+    </span>
+  );
+};
+
+/**
+ * How Locus judged an interruption, in plain words.
+ *
+ * Two of the three are deterministic facts. The third is a model's opinion and
+ * is worded to read as the weaker claim it is.
+ */
+const IMPORTANCE_CAPTION: Record<string, string> = {
+  reviewer: "your reviewer, mid-round",
+  worklist: "names work blocked on you",
+  classifier: "judged important",
+};
+
+/** Who reached you while you were busy, and what Locus said back. */
+const InterruptionsStrip = ({
+  interruptions,
+}: {
+  interruptions: InterruptionEntry[];
+}) => (
+  <div className="mb-6 rounded-xl border border-border bg-card p-4">
+    <h2 className="text-sm font-semibold text-foreground">
+      Reached you while you were busy
+    </h2>
+    <ul className="mt-2 space-y-2">
+      {interruptions.map((entry) => (
+        <li key={entry.id} className="rounded-lg border border-border p-2.5">
+          <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+            <span className="font-medium text-foreground">
+              {entry.participant ?? "Someone"}
+            </span>
+            <span className="rounded bg-muted px-1.5 py-0.5 text-muted-foreground">
+              {entry.availability_state}
+            </span>
+            {entry.importance === "important" && (
+              <span className="rounded bg-orange-500/10 px-1.5 py-0.5 text-orange-600 dark:text-orange-400">
+                {IMPORTANCE_CAPTION[entry.importance_source] ?? "important"}
+              </span>
+            )}
+            {!entry.replied && (
+              <span
+                title="Already answered in this thread today, or the send failed"
+                className="rounded bg-muted px-1.5 py-0.5 text-muted-foreground"
+              >
+                no reply sent
+              </span>
+            )}
+            {entry.occurred_at && (
+              <span className="ml-auto text-muted-foreground">
+                {formatFull(entry.occurred_at)}
+              </span>
+            )}
+          </div>
+          {entry.excerpt && (
+            <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
+              {entry.excerpt}
+            </p>
+          )}
+          {/* Stored as sent, not reconstructed — a reconstruction drifts from
+              what the channel actually saw. */}
+          {entry.reply_body && (
+            <p className="mt-1 text-xs text-foreground">
+              Locus replied: {entry.reply_body}
+            </p>
+          )}
+        </li>
+      ))}
+    </ul>
+  </div>
+);
+
 export default function SchedulerPage() {
   const { user } = useAuth();
 
@@ -92,6 +197,8 @@ export default function SchedulerPage() {
   const [planning, setPlanning] = useState(false);
   const [applying, setApplying] = useState(false);
   const [applied, setApplied] = useState<string[] | null>(null);
+  const [availability, setAvailability] = useState<Availability | null>(null);
+  const [interruptions, setInterruptions] = useState<InterruptionEntry[]>([]);
 
   const refresh = useCallback(async () => {
     try {
@@ -108,6 +215,10 @@ export default function SchedulerPage() {
 
   useEffect(() => {
     refresh();
+    // Both are decoration on the page below. A failure costs the chip or the
+    // strip, never the conflicts view that is the point of the page.
+    getAvailability().then(setAvailability).catch(() => setAvailability(null));
+    getInterruptions().then(setInterruptions).catch(() => setInterruptions([]));
   }, [refresh]);
 
   const handlePlan = async () => {
@@ -145,7 +256,10 @@ export default function SchedulerPage() {
       <div className="mx-auto max-w-3xl p-6">
         <div className="mb-6 flex items-start justify-between">
           <div>
-            <h1 className="text-2xl font-bold text-foreground">Scheduler</h1>
+            <h1 className="flex items-center gap-2 text-2xl font-bold text-foreground">
+              Scheduler
+              {availability && <AvailabilityChip availability={availability} />}
+            </h1>
             <p className="text-sm text-muted-foreground">
               Rearranges your calendar around new work, protecting deadlines.
               Times are read in {user?.timezone ?? "Asia/Kolkata"}.
@@ -164,6 +278,10 @@ export default function SchedulerPage() {
           <div className="mb-4 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">
             {error}
           </div>
+        )}
+
+        {interruptions.length > 0 && (
+          <InterruptionsStrip interruptions={interruptions} />
         )}
 
         {applied && (

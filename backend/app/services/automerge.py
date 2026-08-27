@@ -117,8 +117,27 @@ async def attempt_merge(
             # looking like a failure to read findings.
             analysis = None
 
+    # Whether this pull request was written by the authoring agent, and what
+    # it touched. Only consulted for a machine-authored one, so the file
+    # listing is not fetched for the ordinary case.
+    machine_authored = _is_machine_authored(db, owner_id, repo, pr_number)
+    changed_paths: list[str] = []
+    if machine_authored:
+        try:
+            changed_paths = [
+                entry.get("filename", "")
+                for entry in await github_pr.get_pr_files(token, repo, pr_number)
+            ]
+        except Exception:
+            # A file listing that failed must not silently un-block the check
+            # it feeds. Treated as "the workflow directory might be in there",
+            # which holds the merge and says so.
+            changed_paths = [".github/workflows/(file list unavailable)"]
+
     allowed, blockers = review_flow.evaluate_merge_gate(
-        review, analysis, ci_state, failing, pr.get("mergeable")
+        review, analysis, ci_state, failing, pr.get("mergeable"),
+        changed_paths=changed_paths,
+        machine_authored=machine_authored,
     )
 
     if not allowed:
@@ -238,3 +257,20 @@ async def sweep_once() -> int:
         db.close()
 
     return merged_count
+
+
+def _is_machine_authored(db, owner_id: int, repo: str, pr_number: int) -> bool:
+    """
+    Whether the authoring agent opened this pull request.
+
+    Read from `AuthoringAttempt` rather than from the commit author, because
+    the question is who *produced* the change -- a rework a person then pushed
+    to is still a machine-authored pull request, and the extra caution the gate
+    applies to one is not something a follow-up commit should clear.
+    """
+    return db.query(models.AuthoringAttempt).filter(
+        models.AuthoringAttempt.owner_id == owner_id,
+        models.AuthoringAttempt.repo == repo,
+        models.AuthoringAttempt.pr_number == pr_number,
+        models.AuthoringAttempt.opened == 1,
+    ).first() is not None

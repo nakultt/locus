@@ -12,11 +12,16 @@ import {
 } from "lucide-react";
 import {
   analyzeTask,
+  authorTask,
+  getTaskAttempts,
   getTaskDetail,
+  setTaskMode,
+  type AuthoringAttempt,
   type TaskCard as TaskCardData,
   type TaskDetail,
   type TaskStage,
 } from "@/lib/api";
+import { formatFull } from "@/lib/datetime";
 import { OUTCOME_LABEL, REVIEW_STATE_STYLE, ageLabel } from "./shared";
 import { MessageRow, WorklistItemRow } from "./messages";
 import { AnalysisView } from "./analysis";
@@ -69,10 +74,133 @@ const StageStepper = ({ stages }: { stages: TaskCardData["stages"] }) => (
   </ol>
 );
 
+/**
+ * Where a resolved mode came from, in words.
+ *
+ * The `sources` dict already exists for exactly this: a mode somebody did not
+ * expect should be traceable to the setting responsible.
+ */
+const SOURCE_CAPTION: Record<string, string> = {
+  work_item: "Set on this ticket, overriding the repository.",
+  repo: "Inherited from this repository's settings.",
+  defaults: "Inherited from your account defaults.",
+  unset: "Nothing has been configured, so the safe default applies.",
+  handed_back: "Handed back to you after the agent ran out of attempts.",
+};
+
 const SOURCE_STYLE: Record<string, string> = {
   github: "bg-slate-500/10 text-slate-600 dark:text-slate-300",
   jira: "bg-blue-500/10 text-blue-600 dark:text-blue-400",
 };
+
+/**
+ * Who writes the code for this work item.
+ *
+ * "Handed back" is styled as attention, not error. It is the mode working —
+ * the agent spent its attempts, or a person took the branch over, and the work
+ * is now correctly waiting on a human rather than silently retrying.
+ */
+const ModeChip = ({ card }: { card: TaskCardData }) => {
+  if (card.handed_back) {
+    return (
+      <span
+        title={card.handed_back_reason ?? undefined}
+        className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400"
+      >
+        Handed back
+      </span>
+    );
+  }
+
+  if (card.authoring_mode !== "autonomous") return null;
+
+  return (
+    <span
+      title={`Set by: ${card.authoring_source}`}
+      className="rounded bg-violet-500/10 px-1.5 py-0.5 text-[10px] font-medium text-violet-600 dark:text-violet-400"
+    >
+      Autonomous
+    </span>
+  );
+};
+
+/** How an attempt came to be run, in words rather than an enum value. */
+const TRIGGER_LABEL: Record<string, string> = {
+  initial: "first attempt",
+  changes_requested: "after a reviewer asked for changes",
+  qa_rejected: "after the testing team rejected it",
+};
+
+/**
+ * Every authoring attempt, including the ones that opened nothing.
+ *
+ * This is where a handed-back item explains itself: "the agent has tried three
+ * things" and "the agent tried once and a reviewer pushed back twice" are
+ * different situations, and only the trigger on each row tells them apart.
+ */
+const AttemptHistory = ({ attempts }: { attempts: AuthoringAttempt[] }) => (
+  <ol className="space-y-1.5">
+    {attempts.map((attempt) => (
+      <li
+        key={attempt.id}
+        className="rounded-lg border border-border bg-muted/20 p-2"
+      >
+        <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+          <span className="font-mono font-semibold text-foreground">
+            #{attempt.attempt}
+          </span>
+          <span
+            className={
+              attempt.opened
+                ? "rounded bg-green-500/10 px-1.5 py-0.5 text-green-600 dark:text-green-400"
+                : "rounded bg-muted px-1.5 py-0.5 text-muted-foreground"
+            }
+          >
+            {attempt.opened
+              ? `opened #${attempt.pr_number}`
+              : "opened nothing"}
+          </span>
+          <span className="text-muted-foreground">
+            {TRIGGER_LABEL[attempt.trigger] ?? attempt.trigger}
+          </span>
+          {/* Recorded per attempt rather than read from config now: "which
+              model wrote this" is asked after the fact, when the config value
+              has already moved on. */}
+          {attempt.model && (
+            <span className="font-mono text-muted-foreground">
+              {attempt.model}
+            </span>
+          )}
+          {attempt.context_mode === "ticket_only" && (
+            <span
+              title="The internal discussion was withheld from this run"
+              className="rounded bg-muted px-1.5 py-0.5 text-muted-foreground"
+            >
+              ticket only
+            </span>
+          )}
+          {attempt.created_at && (
+            <span className="ml-auto text-muted-foreground">
+              {formatFull(attempt.created_at)}
+            </span>
+          )}
+        </div>
+        {attempt.opened && (
+          <p className="mt-1 text-[10px] text-muted-foreground">
+            {attempt.files_changed} file
+            {attempt.files_changed === 1 ? "" : "s"}, {attempt.lines_changed}{" "}
+            lines
+          </p>
+        )}
+        {attempt.error && (
+          <p className="mt-1 whitespace-pre-wrap break-words font-mono text-[10px] text-orange-600 dark:text-orange-400">
+            {attempt.error.slice(0, 400)}
+          </p>
+        )}
+      </li>
+    ))}
+  </ol>
+);
 
 /** Stages that mean the work is finished, for the muted card treatment. */
 const SETTLED: TaskStage[] = ["done"];
@@ -99,6 +227,7 @@ export const TaskCard = ({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<"all" | "review" | "qa" | "context">("all");
+  const [attempts, setAttempts] = useState<AuthoringAttempt[]>([]);
 
   const load = async () => {
     setLoading(true);
@@ -109,6 +238,48 @@ export const TaskCard = ({
       setError(e instanceof Error ? e.message : "Could not load this task");
     } finally {
       setLoading(false);
+    }
+    // A failure here costs the history, never the task: the attempts are
+    // context on the mode, and the pipeline below is the point of the card.
+    try {
+      setAttempts(await getTaskAttempts(card.key));
+    } catch {
+      setAttempts([]);
+    }
+  };
+
+  const changeMode = async (mode: "assisted" | "autonomous" | null) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await setTaskMode(card.key, mode);
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not change the mode");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runAuthoring = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const run = await authorTask(card.key);
+      if (!run.opened) {
+        // Said plainly rather than swallowed. An attempt that opened nothing
+        // has still been spent, and the person needs to know which.
+        setError(
+          run.error ??
+            "The agent opened no pull request. That attempt is spent."
+        );
+      }
+      setAttempts(await getTaskAttempts(card.key));
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not start the agent");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -177,6 +348,7 @@ export const TaskCard = ({
                 {card.issue_type}
               </span>
             )}
+            <ModeChip card={card} />
             {card.round_number > 1 && (
               <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
                 round {card.round_number}
@@ -307,6 +479,92 @@ export const TaskCard = ({
                 </button>
               )}
             </div>
+          </div>
+
+          {/* Who writes the code for this one ticket.
+              Autonomy is a judgement about *this* work item — a dependency
+              bump and a change to the credential path are not the same risk —
+              so the switch lives on the card rather than only in settings. */}
+          <div className="rounded-lg border border-border bg-muted/20 p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-semibold text-foreground">
+                Who writes this
+              </span>
+              <div className="flex overflow-hidden rounded-lg border border-border">
+                {(["assisted", "autonomous"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    disabled={busy}
+                    onClick={() => changeMode(mode)}
+                    className={`px-2 py-0.5 text-[11px] capitalize disabled:opacity-50 ${
+                      card.authoring_mode === mode && !card.handed_back
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-background text-muted-foreground hover:bg-muted"
+                    }`}
+                  >
+                    {mode}
+                  </button>
+                ))}
+              </div>
+              {card.authoring_source === "work_item" && (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => changeMode(null)}
+                  className="text-[11px] text-muted-foreground underline hover:text-foreground disabled:opacity-50"
+                >
+                  clear override
+                </button>
+              )}
+              {card.authoring_mode === "autonomous" && !card.handed_back && (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={runAuthoring}
+                  className="ml-auto inline-flex items-center gap-1 rounded-lg bg-primary px-2 py-1 text-[11px] font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+                >
+                  {busy ? (
+                    <Loader2 size={11} className="animate-spin" />
+                  ) : (
+                    <Play size={11} />
+                  )}
+                  Write it
+                </button>
+              )}
+            </div>
+
+            {/* The resolved source, printed beneath. A mode somebody did not
+                expect can then be traced to the setting responsible rather
+                than guessed at. */}
+            <p className="mt-1.5 text-[11px] text-muted-foreground">
+              {card.handed_back
+                ? `Handed back${
+                    card.handed_back_reason
+                      ? `: ${card.handed_back_reason}`
+                      : ""
+                  }. Choosing a mode above puts it back in play.`
+                : SOURCE_CAPTION[card.authoring_source] ??
+                  `Set by: ${card.authoring_source}`}
+            </p>
+
+            {card.authoring_mode === "autonomous" && !card.handed_back && (
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                The brief for this ticket — its description, the Slack
+                discussion and your source — goes to the model OpenCode is
+                configured with, which is remote. Every model that reads your
+                code automatically still runs locally.
+              </p>
+            )}
+
+            {attempts.length > 0 && (
+              <div className="mt-2.5">
+                <p className="mb-1.5 text-[11px] font-medium text-foreground">
+                  {attempts.length} attempt{attempts.length === 1 ? "" : "s"}
+                </p>
+                <AttemptHistory attempts={attempts} />
+              </div>
+            )}
           </div>
 
           {error && (
