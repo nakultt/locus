@@ -74,6 +74,10 @@ MAX_PROJECTS_PER_ISSUE = 10
 # pipeline exists because a human still confirms the second.
 DEFAULT_STAGE_COLUMNS: dict[str, str] = {
     "assigned": "Todo",
+    # An agent writing the first draft is somebody working on it, as far as the
+    # board is concerned. The distinction between who is writing belongs on the
+    # card's own mode chip, not in a status column every teammate reads.
+    "authoring": "In progress",
     "branch_created": "In progress",
     "in_progress": "In progress",
     "analyzed": "In progress",
