@@ -29,6 +29,7 @@ from app.services import (
     context_brief,
     finding_diff,
     github_pr,
+    presets,
     project_board,
     report_sync,
     review_flow,
@@ -396,6 +397,32 @@ def _authoring_fields(row) -> dict:
         "prepare_command": row.prepare_command,
         "test_command": row.test_command,
     }
+
+
+@router.get(
+    "/presets",
+    response_model=schemas.AuthoringPresetList,
+    summary="Named starting points for the authoring dials",
+)
+async def list_presets(
+    current_user: models.User = Depends(get_current_user),
+) -> schemas.AuthoringPresetList:
+    """
+    The presets, from the one dict the API and the UI both read.
+
+    Picking one in the UI mutates form state and nothing else: every dial stays
+    visible and editable below it, and `resolve_settings` remains the sole
+    arbiter of what a run does.
+    """
+    return schemas.AuthoringPresetList(presets=[
+        schemas.AuthoringPreset(
+            name=name,
+            label=preset["label"],
+            description=preset["description"],
+            values=preset["values"],
+        )
+        for name, preset in presets.PRESETS.items()
+    ])
 
 
 @router.get(
