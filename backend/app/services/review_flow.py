@@ -597,6 +597,8 @@ def evaluate_merge_gate(
     ci_state: str,
     failing_checks: list[str],
     mergeable: bool | None,
+    changed_paths: list[str] | None = None,
+    machine_authored: bool = False,
 ) -> tuple[bool, list[str]]:
     """
     Decide whether an approved PR may be merged automatically.
@@ -645,6 +647,34 @@ def evaluate_merge_gate(
         blockers.append(
             f"{len(analysis.confirmed_findings)} confirmed security finding(s)"
         )
+
+    # An agent-authored change to what CI runs never auto-merges, at any
+    # approval. The driver refuses to produce one -- a workflow edit aborts the
+    # attempt on the diff -- so reaching here means it arrived by some other
+    # route, and the one thing that must not happen is a machine-written change
+    # to the checks that gate machine-written changes landing on the strength
+    # of those checks.
+    if machine_authored:
+        workflow_edits = [
+            path for path in (changed_paths or [])
+            if ".github/workflows/" in path.lower()
+        ]
+        if workflow_edits:
+            blockers.append(
+                "machine-authored change touches CI workflows: "
+                + ", ".join(sorted(workflow_edits))
+            )
+
+    # True today by construction -- GitHub does not let you approve your own
+    # pull request -- and asserted so it cannot regress. An approval by the
+    # author is not a review, and autonomous mode makes the author a machine.
+    if (
+        review.state == schemas.ReviewState.approved.value
+        and review.author
+        and review.last_reviewer
+        and review.author.lower() == review.last_reviewer.lower()
+    ):
+        blockers.append("the approving reviewer is the pull request author")
 
     return (not blockers), blockers
 

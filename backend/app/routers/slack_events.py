@@ -208,6 +208,9 @@ async def slack_events(
             close_on_signoff=settings.close_on_qa_signoff,
             project_board_sync=settings.project_board_sync,
             project_column_map=settings.project_column_map,
+            db=db,
+            owner_id=thread.owner_id,
+            review_slack_channel=settings.review_slack_channel,
         )
     except Exception as e:
         logger.exception("QA reply handling failed for %s", thread.repo)

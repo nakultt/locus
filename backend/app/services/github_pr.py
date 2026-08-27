@@ -539,6 +539,39 @@ async def get_pr_commits(token: str, repo: str, pr_number: int) -> list[str]:
     ]
 
 
+async def get_pr_commit_authors(token: str, repo: str, pr_number: int) -> list[str]:
+    """
+    The author email of every commit on a pull request.
+
+    Separate from `get_pr_commits`, which returns subject lines for ticket-key
+    extraction. The email is what distinguishes a previous authoring attempt
+    from a person taking the branch over, and the two questions want different
+    fields off the same payload.
+
+    The committer object is explicitly null on commits GitHub cannot match to
+    an account, so the email is read from the commit itself rather than from
+    the linked user -- `.get(key, default)` does not save you when the key is
+    present and the value is None.
+    """
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(
+            f"{GITHUB_API_BASE}/repos/{repo}/pulls/{pr_number}/commits",
+            headers=_headers(token),
+            params={"per_page": 100},
+        )
+        response.raise_for_status()
+        commits = response.json()
+
+    authors = []
+    for entry in commits:
+        commit = entry.get("commit") or {}
+        author = commit.get("author") or {}
+        email = author.get("email")
+        if email:
+            authors.append(email)
+    return authors
+
+
 # ============== Comment posting (idempotent) ==============
 
 # Every comment Locus posts carries this marker. On the next push we find our

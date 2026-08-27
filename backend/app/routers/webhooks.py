@@ -24,6 +24,7 @@ from app import crud, models, schemas, security
 from app.database import SessionLocal, get_db
 from app.dependencies import get_current_user, get_integration_configs
 from app.services import (
+    authoring_flow,
     automerge,
     comms_log,
     context_brief,
@@ -1183,6 +1184,46 @@ async def _run_review_job(
                 board_stage,
                 column_map=settings.project_column_map,
             )
+
+    # A changes-requested review is the pipeline saying "this is not done",
+    # which is exactly what an authoring attempt answers. Placed before the
+    # Slack early-return below, for the same reason the board move is: a repo
+    # with no review channel configured still gets the behaviour it enabled.
+    #
+    # Every guard lives in `should_retry` -- the mode, the bound, a human's
+    # push, the throughput cap -- so this cannot rework forever and destroy
+    # `round_number`, the signal that makes a stalled review visible.
+    if outcome is schemas.ReviewOutcome.changes_requested:
+        try:
+            ticket_key = authoring_flow.key_for(
+                db, owner_id=job.owner_id, repo=job.repo, pr_number=job.pr_number
+            )
+            item_settings = resolve_settings(
+                db,
+                job.owner_id,
+                db.query(models.RepoWebhook).filter(
+                    models.RepoWebhook.repo == job.repo,
+                    models.RepoWebhook.owner_id == job.owner_id,
+                ).first(),
+                ticket_key=ticket_key,
+            )
+            if item_settings.authoring_mode == "autonomous":
+                await authoring_flow.maybe_retry(
+                    db,
+                    owner_id=job.owner_id,
+                    repo=job.repo,
+                    pr_number=job.pr_number,
+                    ticket_key=ticket_key,
+                    settings=item_settings,
+                    integration_configs=integration_configs,
+                    trigger="changes_requested",
+                    slack_channel=settings.review_slack_channel,
+                )
+        except Exception as e:
+            # Swallowed like every other integration failure in this path: a
+            # retry that could not start must not cost the review notification
+            # the reviewer is waiting on.
+            logger.warning("Authoring retry failed for %s: %s", job.repo, e)
 
     channel = settings.review_slack_channel
     if not channel or "slack" not in integration_configs:

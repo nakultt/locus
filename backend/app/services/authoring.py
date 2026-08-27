@@ -325,3 +325,85 @@ def gather_asks(db: Session, *, owner_id: int, ticket_key: str) -> list[str]:
         if entry.outcome == "changes_requested" and body and body not in asks:
             asks.append(body)
     return asks
+
+
+def should_retry(
+    db: Session,
+    *,
+    owner_id: int,
+    ticket_key: str,
+    settings,
+    repo: str | None = None,
+    human_pushed: bool = False,
+) -> tuple[bool, str]:
+    """
+    Whether the driver should take another swing at this work item.
+
+    Returns `(retry, reason)`. The reason is always populated on a refusal,
+    because every refusal is either announced or held silently and both need to
+    say why somewhere.
+
+    Refuses when the item is handed back, when the mode is not autonomous, when
+    the bound is spent, when a human has pushed to the branch since the last
+    attempt, or when the throughput cap is reached.
+
+    Nothing before this is dangerous; nothing before this is complete either.
+    Shipping the driver without the bound means the first reviewer who requests
+    changes twice gets an agent that reworks forever, and `round_number` -- the
+    signal that makes a stalled review visible -- stops meaning anything.
+    """
+    if getattr(settings, "handed_back", False):
+        return False, settings.handed_back_reason or "This work item was handed back"
+
+    if settings.authoring_mode != "autonomous":
+        return False, "Autonomous mode is off for this work item"
+
+    if human_pushed:
+        # A person took it over. The same rule as a human commit at authoring
+        # time, and for the same reason: an agent overwriting somebody's work
+        # is the worst thing it can do quietly.
+        return False, "A human has pushed to this branch"
+
+    attempts = len(attempts_for(db, owner_id, ticket_key))
+    allowed = settings.autonomous_max_rounds + 1
+    if attempts >= allowed:
+        return False, (
+            f"Locus attempted this {attempts} time{'s' if attempts != 1 else ''} "
+            f"and the bound is {allowed}"
+        )
+
+    if repo and throughput_exceeded(db, owner_id=owner_id, repo=repo):
+        # Held silently by the caller. A held retry that reports every time
+        # trains people to ignore the channel, the same rule
+        # `automerge.sweep_once` follows.
+        return False, (
+            f"{MAX_OPEN_AUTONOMOUS_PRS} agent-authored pull requests are "
+            f"already open on {repo}"
+        )
+
+    return True, ""
+
+
+def handoff_message(
+    ticket_key: str, *, attempts: int, reason: str, pr_url: str | None = None
+) -> str:
+    """
+    What the team is told when a work item comes back.
+
+    States the count and what happens next, because "Locus gave up" tells
+    somebody nothing they can act on. The branch, the review thread and the
+    report are named as unchanged: the most useful thing to know is that
+    picking it up costs nothing beyond reading what is already there.
+    """
+    lines = [
+        f"*{ticket_key} is yours now.*",
+        "",
+        f"Locus attempted this {attempts} time{'s' if attempts != 1 else ''} "
+        f"and stopped: {reason}",
+        "",
+        "The branch, the review thread and the report are unchanged — nothing "
+        "was rolled back, so picking it up costs only reading what is there.",
+    ]
+    if pr_url:
+        lines += ["", pr_url]
+    return "\n".join(lines)
