@@ -5,7 +5,7 @@ Request/Response validation models
 
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
@@ -780,6 +780,19 @@ class IssueLinks(BaseModel):
     pull_requests: list[LinkedPullRequest] = Field(default_factory=list)
 
 
+class AuthoringMode(str, Enum):
+    """
+    Who writes the code for a work item.
+
+    `assisted` is a person; `autonomous` hands the ticket to the authoring
+    driver, which opens a pull request that flows through the same analysis,
+    review and QA pipeline. Assisted is the fallback everywhere -- a mode that
+    writes code on its own is never inherited by accident.
+    """
+    assisted = "assisted"
+    autonomous = "autonomous"
+
+
 class TaskStage(str, Enum):
     """
     How far along the automated pipeline one task has travelled.
@@ -792,6 +805,12 @@ class TaskStage(str, Enum):
     and collapsing the two would lose where it stalled.
     """
     assigned = "assigned"
+    # The authoring agent is writing, or has written, the first draft.
+    #
+    # Rendered only when the resolved mode is autonomous -- the same rule
+    # `changes_requested` follows, because a greyed-out step implies work that
+    # was skipped rather than a step that was never available.
+    authoring = "authoring"
     branch_created = "branch_created"
     in_progress = "in_progress"
     analyzed = "analyzed"
@@ -807,6 +826,7 @@ class TaskStage(str, Enum):
 # "not there yet" rather than being absent from the picture entirely.
 TASK_STAGE_ORDER: list[TaskStage] = [
     TaskStage.assigned,
+    TaskStage.authoring,
     TaskStage.branch_created,
     TaskStage.in_progress,
     TaskStage.analyzed,
@@ -879,6 +899,16 @@ class TaskCard(BaseModel):
     blocked_reason: str | None = None
     age_hours: float = 0.0
     round_number: int = 1
+
+    # Who writes the code for this work item, resolved through the same
+    # `agent_settings` chain a run would use -- so the chip and the run cannot
+    # disagree. `handed_back` reads as attention rather than error in the UI:
+    # it is the mode working, not the mode failing.
+    authoring_mode: AuthoringMode = AuthoringMode.assisted
+    authoring_source: str = "unset"
+    handed_back: bool = False
+    handed_back_reason: str | None = None
+    authoring_attempts: int = 0
 
 
 class TaskBoard(BaseModel):
@@ -1020,6 +1050,36 @@ class RepoRegister(BaseModel):
             "default map; a stage left out of a non-empty map moves no card."
         ),
     )
+    authoring_mode: AuthoringMode = Field(
+        AuthoringMode.assisted,
+        description=(
+            "Who writes the code for this repo's tickets. Autonomous sends "
+            "the brief to the configured authoring model, which is remote."
+        ),
+    )
+    autonomous_max_rounds: int = Field(
+        2,
+        ge=0,
+        le=10,
+        description="The first attempt plus this many reworks before handing back",
+    )
+    preset_label: str | None = Field(
+        None, description="Display only; the resolver decides what a run does"
+    )
+    source_path: str | None = Field(
+        None,
+        description=(
+            "Where this repo is checked out locally. Blank falls back to "
+            "LOCUS_CODE_ROOT, and failing that to a managed clone."
+        ),
+    )
+    prepare_command: str | None = Field(
+        None,
+        description="Run once in the fresh worktree before the agent (uv sync, npm ci)",
+    )
+    test_command: str | None = Field(
+        None, description="The authoring test gate. Blank means no gate."
+    )
 
 
 class PRAgentDefaultsUpdate(BaseModel):
@@ -1074,6 +1134,36 @@ class PRAgentDefaultsUpdate(BaseModel):
     project_column_map: str | None = Field(
         None, description="Default stage-to-column map, one entry per line"
     )
+    authoring_mode: AuthoringMode = Field(
+        AuthoringMode.assisted,
+        description=(
+            "Who writes the code for this repo's tickets. Autonomous sends "
+            "the brief to the configured authoring model, which is remote."
+        ),
+    )
+    autonomous_max_rounds: int = Field(
+        2,
+        ge=0,
+        le=10,
+        description="The first attempt plus this many reworks before handing back",
+    )
+    preset_label: str | None = Field(
+        None, description="Display only; the resolver decides what a run does"
+    )
+    source_path: str | None = Field(
+        None,
+        description=(
+            "Where this repo is checked out locally. Blank falls back to "
+            "LOCUS_CODE_ROOT, and failing that to a managed clone."
+        ),
+    )
+    prepare_command: str | None = Field(
+        None,
+        description="Run once in the fresh worktree before the agent (uv sync, npm ci)",
+    )
+    test_command: str | None = Field(
+        None, description="The authoring test gate. Blank means no gate."
+    )
     context_docs: list[str] = Field(
         default_factory=list,
         description=(
@@ -1114,6 +1204,12 @@ class RepoRegistration(BaseModel):
     merge_method: MergeMethod = MergeMethod.squash
     project_board_sync: bool = True
     project_column_map: str | None = None
+    authoring_mode: AuthoringMode = AuthoringMode.assisted
+    autonomous_max_rounds: int = 2
+    preset_label: str | None = None
+    source_path: str | None = None
+    prepare_command: str | None = None
+    test_command: str | None = None
     enabled: bool = True
     webhook_url: str | None = Field(
         None, description="Payload URL to paste into GitHub"
@@ -1123,6 +1219,101 @@ class RepoRegistration(BaseModel):
     )
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class AuthoringAttemptEntry(BaseModel):
+    """One recorded run of the authoring driver, opened or not."""
+    id: int
+    ticket_key: str
+    repo: str | None = None
+    pr_number: int | None = None
+    attempt: int
+    # initial | changes_requested | qa_rejected
+    trigger: str
+    driver: str
+    model: str | None = None
+    context_mode: str | None = None
+    opened: bool = False
+    error: str | None = None
+    files_changed: int = 0
+    lines_changed: int = 0
+    duration_seconds: float = 0.0
+    created_at: datetime | None = None
+
+
+class AuthoringRunResponse(BaseModel):
+    """What one click of "write this" produced."""
+    ticket_key: str
+    opened: bool
+    pr_number: int | None = None
+    pr_url: str | None = None
+    branch: str | None = None
+    attempt: int
+    attempts_remaining: int
+    driver: str
+    model: str | None = None
+    files_changed: int = 0
+    lines_changed: int = 0
+    error: str | None = None
+    # Set when this outcome ended autonomous mode for the work item.
+    handed_back_reason: str | None = None
+
+
+class AuthoringPreset(BaseModel):
+    """
+    A named starting point for the authoring dials.
+
+    Applied at write time only. The values here are copied into form state and
+    the resolver never reads this -- a preset expanded at read time would be a
+    second resolution layer above `resolve_settings`.
+    """
+    name: str
+    label: str
+    description: str
+    values: dict[str, object]
+
+
+class AuthoringPresetList(BaseModel):
+    presets: list[AuthoringPreset]
+
+
+class WorkItemModeUpdate(BaseModel):
+    """
+    An authoring override for one work item.
+
+    Every field is optional and `None` means "inherit" rather than "assisted".
+    Rows here are sparse by design: an absent row is the ordinary case, and
+    clearing every field deletes it rather than storing a row of nulls that
+    reads as a deliberate choice.
+    """
+    authoring_mode: AuthoringMode | None = Field(
+        None, description="Null clears the override and inherits from the repo"
+    )
+    autonomous_max_rounds: int | None = Field(
+        None, ge=0, le=10, description="Null inherits the repo or account bound"
+    )
+
+
+class WorkItemMode(BaseModel):
+    """
+    The authoring mode a run on this work item would actually use.
+
+    `source` is the layer that supplied it -- "work_item", "repo", "defaults",
+    "unset", or "handed_back" -- so a mode the user did not expect can be
+    traced to the setting responsible rather than guessed at.
+    """
+    task_key: str
+    authoring_mode: AuthoringMode
+    autonomous_max_rounds: int
+    source: str
+    rounds_source: str
+    # The stored override, if there is one. Distinct from the resolved value:
+    # the UI renders the toggle from this and the caption from `source`.
+    override: AuthoringMode | None = None
+    handed_back: bool = False
+    handed_back_reason: str | None = None
+    handed_back_at: datetime | None = None
+    preset_label: str | None = None
 
 
 class RepoRegistrationList(BaseModel):
@@ -1271,6 +1462,87 @@ class ScheduleProposal(BaseModel):
     def requires_approval(self) -> bool:
         """Any move touching another person needs a human decision."""
         return any(m.attendee_count > 1 for m in self.moves)
+
+
+class Availability(BaseModel):
+    """
+    Whether the owner can be reached, and until when.
+
+    Carries no event title, attendee, location or description. **The type is
+    the enforcement**: a busy reply is posted into a channel other people read,
+    and "in a 1:1 with Priya re: restructure" must not be able to reach it.
+    There is no field to leak it through.
+    """
+    state: Literal["free", "busy", "focus", "off_hours"] = "free"
+    until: datetime | None = None
+    next_free: datetime | None = None
+
+
+class InterruptionEntry(BaseModel):
+    """
+    One person who reached you while you were booked, and what Locus said.
+
+    `importance_source` is rendered in plain words on the strip -- "your
+    reviewer, mid-round", "names LOC-42, blocked on you", "judged important".
+    The third is the only model-made claim there and should read as weaker
+    than the other two.
+    """
+    id: int
+    occurred_at: datetime | None = None
+    channel: str = "slack"
+    participant: str | None = None
+    slack_channel: str | None = None
+    availability_state: str = "free"
+    importance: str = "routine"
+    importance_source: str = "classifier"
+    replied: bool = False
+    reply_body: str | None = None
+    excerpt: str | None = None
+
+
+class TimeAgentSettingsUpdate(BaseModel):
+    """
+    The calendar agent's dials, one set per user.
+
+    Four default to off, each for its own reason. `enabled`, because a feature
+    that starts touching a calendar unasked is the worst first impression
+    available. `auto_apply`, because a moved meeting is visible to everyone
+    invited. Both auto-replies, because they post to real people -- the same
+    category as auto-merge, and they earn the same treatment.
+    """
+    enabled: bool = False
+    auto_apply: bool = Field(
+        False,
+        description="Act on a plan rather than storing it for you to confirm",
+    )
+    auto_reply_invites: bool = False
+    auto_reply_busy: bool = Field(
+        False, description="Answer someone who reaches you while you are booked"
+    )
+    working_hours_start: str = Field("09:30", pattern=r"^\d{2}:\d{2}$")
+    working_hours_end: str = Field("18:30", pattern=r"^\d{2}:\d{2}$")
+    protect_focus_blocks: bool = True
+
+
+class TimeAgentSettingsResponse(TimeAgentSettingsUpdate):
+    """Stored settings, plus what could be resolved about the Slack identity."""
+    # "U04AB...", not a handle. A Slack mention arrives as `<@U04AB…>` while
+    # contacts are stored as handles -- different namespaces that never compare
+    # equal, so mention matching silently never fires without this.
+    slack_member_id: str | None = None
+    timezone: str | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class StoredProposal(BaseModel):
+    """A reshuffle the agent proposed, waiting for a human to confirm it."""
+    id: int
+    trigger: str
+    summary: str | None = None
+    state: str
+    created_at: datetime | None = None
+    proposal: "ScheduleProposal"
 
 
 class SchedulePlanRequest(BaseModel):

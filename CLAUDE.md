@@ -8,8 +8,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 It replaced `IMPLEMENTATION_PLAN.md` and `docs/MODES_PLAN.md`, which were deleted — if either is
 referenced anywhere, that reference is stale.
 
-Nothing in it is built yet. Do not describe its features as shipped, and check the code before
-repeating anything from it as fact.
+All nine phases are now built: the authoring dial, presets, the driver contract, the OpenCode
+driver, the bound and handoff, the calendar agent, availability and interruption, the board
+surface, and this documentation. The plan is now a record of *why*, not a list of what is missing.
+
+One caveat from the plan itself still stands and is the most important thing to know: **nothing
+here has run against live third-party services.** The solver, the parsers, the credential
+isolation, the workspace checks and the driver's decisions are all exercised directly; every call
+that reads or writes to GitHub, Jira, Slack, Google or OpenCode is written against the documented
+API and is unproven. Measure autonomous mode on real tickets before promising it to anyone.
 
 ## Branch convention
 
@@ -65,10 +72,12 @@ was removed in 1.0. Task events are emitted from the graph stream, and a tool th
 becomes a failed task rather than an aborted run, so a request touching five integrations
 keeps the four that succeeded. `tests/test_agent_migration.py` pins this message contract.
 
-**Two background loops** start in `main.py`'s lifespan: `worker_loop` (PR analysis jobs) and
-`qa_email_loop` (Gmail polling for QA replies). Jobs are persisted rather than held in
-`BackgroundTasks`, which would lose queued work on restart. Both are single-instance —
-multi-instance deployment needs row locking.
+**Four background loops** start in `main.py`'s lifespan: `worker_loop` (PR analysis jobs),
+`qa_email_loop` (Gmail polling for QA replies), `merge_gate_loop` (re-evaluating held merges) and
+`calendar_agent_loop` (sweeping enabled calendars for conflicts). Jobs are persisted rather than
+held in `BackgroundTasks`, which would lose queued work on restart. Each sweep takes a Postgres
+advisory lock (`app/services/locks.py`), because a sweep matches rows rather than claiming them and
+every one of these loops ends in a message to a person.
 
 ### Invariants worth knowing before you change things
 
@@ -156,7 +165,17 @@ A service is called unhealthy only after `UNHEALTHY_AFTER` consecutive failures,
 failed poll is ordinary; and a service never attempted is absent from the list rather than
 reported healthy, which would be a claim nothing supports.
 
-**Models that read attacker-influenced text have no tools bound.** Diff text, Slack messages,
+**Models that read attacker-influenced text have no tools bound — with exactly one named
+exception.** Autonomous authoring is that exception, and nothing else may claim it. The OpenCode
+driver gets a shell in a checkout, which is the largest capability in the system, and it is held by
+compensating constraints rather than by having no tools: it runs only on a ticket a human
+explicitly handed over, only in a `git worktree` isolated from Locus's own tree and from the
+developer's checkout, only against a source path that passed the self-edit, git-repository and
+origin checks, and its diff is refused after the run if it touches CI workflows, secrets or the
+credential path. `authoring.should_retry` bounds how many times it may try, and every failure
+spends an attempt.
+
+**The analysis models have no tools bound.** Diff text, Slack messages,
 QA replies, and review bodies are controlled by anyone who can open a PR, post in a channel,
 or review. The security scanner, the code reviewer, the QA classifier, and the review-asks
 summarizer return findings or a verdict and nothing else — they cannot act on what they read.
@@ -310,7 +329,11 @@ row per user behind `GET`/`PUT /webhooks/defaults`; a merge run must read the *s
 registration, not form state, which `tests/test_merge_uses_registration.py` pins after a bug
 where ticked-but-unsubmitted settings were silently skipped.
 
-**Every message is recorded, not summarized.** `communication_events` stores what was searched
+**Every message is recorded, not summarized.** `comms_log` stays the only writer for anything
+keyed to a pull request. `InterruptionEvent` is a second table rather than an exception to that:
+`communication_events.repo` and `.pr_number` are `NOT NULL` and an interruption has neither —
+somebody pinged you in a channel, which belongs to no pull request — so reusing it would mean
+inventing a sentinel repo that the next reader takes for real. `communication_events` stores what was searched
 for, what came back, and what was actually sent, per PR, across both loops.
 `app/services/comms_log.py` is the only writer. Two rules there: logging never fails the work
 it describes (every helper swallows its own errors — a message that was genuinely sent must
@@ -465,7 +488,13 @@ assigned", which is the one wrong answer. A source that did not answer is report
 to get backwards — the Jira API token is in `api_key` while `url` and `email` are under
 `credentials`.
 
-**The board offers exactly one write.** `POST /tasks/analyze` re-runs the analysis; everything
+**The board offers exactly two writes, and the second is deliberate.** `POST /tasks/analyze`
+re-runs the analysis and `POST /tasks/author` hands one work item to the authoring driver. The rule
+this amends said there was exactly one, and it exists so a dashboard refresh cannot notify a team
+twice — one deliberate click that opens one pull request satisfies that reasoning rather than
+breaking it. Authoring is emphatically *not* fired on assignment: that has the same shape as the
+mistake `report_sync.ensure_for_ticket` avoids by never running from the board listing, with a far
+worse blast radius, since a morning's tickets would open a dozen pull requests together. Everything
 else the pipeline does reaches other people — a Slack post, a QA email, a merge — and stays
 driven by webhooks and the background loops. A dashboard refresh must never be able to notify a
 team twice.
@@ -587,6 +616,90 @@ is `Asia/Kolkata` (UTC+05:30) and the half-hour offset breaks naive hour arithme
 sent to Google with the zone attached rather than converted to UTC, which keeps recurring
 events correct across a DST shift. Natural language is parsed by `dateparser`, which returns
 nothing rather than guessing when no time can be read.
+
+**The code-writing agent never runs where Locus's credentials live.** The one rule everything
+else in autonomous mode is arranged around. Locus's working directory holds `.env` with
+`SECRET_KEY` and `ENCRYPTION_KEY` — the value that must never change or every stored credential
+becomes permanently undecryptable. `workspace.check_not_locus` compares a resolved source path
+against Locus's own root **in both directions** and refuses with a named error. With a code root
+this stops being hypothetical: Locus at `E:\Github\locus` plus `LOCUS_CODE_ROOT=E:\Github`
+resolves the `locus` repo to exactly that directory, and that layout is the normal one, which makes
+this the most likely misconfiguration the feature has.
+
+**The source location and the workspace are different settings.** `LOCUS_CODE_ROOT` and
+`repo_webhooks.source_path` say where your repos already sit — cloned, dependencies installed,
+caches warm — because re-cloning per attempt spends the timeout on network. The agent still works
+in a `git worktree` cut from that repo, so a human's branch, uncommitted changes and stashes are
+never touched. This is not a convenience: a shared checkout can only have one branch out at a time,
+and an agent running `git checkout` in the directory somebody is working in destroys their
+afternoon and looks like a successful run. `LOCUS_ALLOW_IN_PLACE` exists for trees that genuinely
+cannot be worktree'd, is off by default, and the README states what it costs.
+
+**A resolved path whose `origin` does not match the repo is refused.** `<root>/<name>` is a guess
+based on a folder name, and `acme/api` and `beta/api` collapse to one directory under a flat root.
+Pointing the agent at the wrong codebase produces a confident, entirely wrong pull request — worse
+than refusing, because it looks like success. A path that is not a git repository is likewise
+reported as a configuration error rather than as a failed authoring attempt: the two want
+completely different responses.
+
+**A forbidden path aborts the attempt rather than being reverted.** The denylist is enforced on the
+diff, after the run, never by trusting the prompt. A run that tried to edit `.github/workflows/**`,
+a secret or the credential path is a signal worth surfacing, and silently editing the agent's diff
+means the reviewer reads something the agent did not produce. `migrations/**` is deliberately not
+on the list — schema changes are legitimate work, and the review and CI gates catch a bad one.
+
+**An empty diff opens no pull request.** An empty PR puts a reviewer's name on a request to read a
+diff that does not exist.
+
+**Every failure consumes an attempt.** A timeout, an oversized diff, a denylisted path, a failed
+test gate and a driver that raised all record an `AuthoringAttempt` row and spend the bound.
+Without that a reliably-failing ticket retries forever and the bound protects nothing — and
+`PRReview.round_number`, the signal that makes a stalled review visible, stops meaning anything.
+
+**A human commit on the branch ends autonomous mode for that work item** — at authoring time as
+well as at rework time. An agent overwriting a person's work is the worst thing it can do quietly.
+A branch carrying a *previous attempt's* commits is continued, so a rework builds on what the
+reviewer already read; commits by anyone else hand the item back before the model is invoked.
+
+**A handoff is written before it is announced.** The reverse — announcing a handoff that did not
+persist — re-triggers the driver on the next event, so the team reads "it is yours now" while the
+agent keeps working. A failed announcement leaves the work correctly stopped; a failed write leaves
+it running with everybody told otherwise. The handoff announces once, because a repeat is what gets
+a bot muted, and a muted bot takes the review pings and QA threads with it.
+
+**The analysis models run locally; the authoring model does not.** Every model that reads your code
+*automatically* — the security scanner, the code reviewer, the QA classifier, the asks summarizer —
+runs on `MOE_BASE_URL` over loopback, on every push, without being asked. That claim is unchanged
+and is worth keeping. Authoring is the deliberate exception: OpenCode runs on its own configured
+model, which is remote, so the brief leaves the machine on tickets a human explicitly handed over.
+The mode toggle says so before the first attempt, every `AuthoringAttempt` records which model ran,
+and `LOCUS_AUTHORING_CONTEXT=ticket_only` drops the Slack transcript for teams that cannot send
+internal discussion to a third party. "Runs entirely on local models" is false the moment
+autonomous mode is used; the accurate claim is narrower and still strong.
+
+**A busy reply carries a state and a time and nothing else.** `Availability` has three fields —
+state, until, next_free — and **the type is the enforcement**: the reply is posted into a channel
+other people read, and "in a 1:1 with Priya re: restructure" must not be able to reach it. There is
+no field to leak it through. It names its timezone, because `google_meet` stamping "UTC" onto
+server-local times is the bug that rule was written from, and it fires at most once per thread per
+day: a repeating auto-responder gets the bot muted.
+
+**An unreadable calendar reads free, never busy.** A broken token and a real meeting produce
+identical silence, and defaulting to busy fails in the direction that makes the user unreachable —
+the responder tells everybody they are in a meeting they are not in, and the reply they were
+waiting for never comes. The breakage surfaces through `integration_health`.
+
+**An interruption's importance is decided deterministically first.** The sender is a reviewer
+mid-round, or the message names a work item `worklist.build()` reports blocked on you. Only when
+neither fact applies is a classifier consulted, with no tools bound, and `unclear` resolves to
+routine — the reply goes out either way, so the choice is between an important message getting a
+plain reply and a focus block being interrupted over nothing, and the second is worse.
+`importance_source` records which test decided, and the UI renders the model-made claim as the
+weaker one.
+
+**The calendar agent never holds a pipeline message.** Delaying a review request until a focus
+block ends manufactures the exact silence that makes an approved pull request look like a broken
+feature. The agent runs alongside the pipeline, never inside it.
 
 **The scheduler's solver is plain Python, not a model.** A model asked to rearrange a calendar
 produces plausible-looking schedules with overlaps and missed deadlines. Events are classified

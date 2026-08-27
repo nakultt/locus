@@ -24,11 +24,13 @@ from app import crud, models, schemas, security
 from app.database import SessionLocal, get_db
 from app.dependencies import get_current_user, get_integration_configs
 from app.services import (
+    authoring_flow,
     automerge,
     comms_log,
     context_brief,
     finding_diff,
     github_pr,
+    presets,
     project_board,
     report_sync,
     review_flow,
@@ -307,6 +309,7 @@ async def register_repo(
         existing.merge_method = request.merge_method.value
         existing.project_board_sync = 1 if request.project_board_sync else 0
         existing.project_column_map = request.project_column_map
+        _apply_authoring(existing, request)
         existing.enabled = 1
         registration = existing
     else:
@@ -330,6 +333,7 @@ async def register_repo(
             enabled=1,
             owner_id=current_user.id,
         )
+        _apply_authoring(registration, request)
         db.add(registration)
 
     db.commit()
@@ -352,10 +356,74 @@ async def register_repo(
         merge_method=registration.merge_method or "squash",
         project_board_sync=bool(registration.project_board_sync),
         project_column_map=registration.project_column_map,
+        **_authoring_fields(registration),
         enabled=True,
         webhook_url=f"{PUBLIC_BASE_URL.rstrip('/')}/webhooks/github",
         webhook_secret=secret,
     )
+
+
+
+
+def _blank_to_none(value: str | None) -> str | None:
+    """Store a blank as NULL, because NULL is how the resolver hears "says nothing"."""
+    return (value or "").strip() or None
+
+
+def _apply_authoring(row, request) -> None:
+    """
+    Copy the authoring dials from a settings payload onto its row.
+
+    One function for both the repo registration and the account defaults, so
+    the two cannot drift into disagreeing about what a field means -- the same
+    reason `resolve_settings` is the sole arbiter of which of them wins.
+    """
+    row.authoring_mode = request.authoring_mode.value
+    row.autonomous_max_rounds = request.autonomous_max_rounds
+    row.preset_label = _blank_to_none(request.preset_label)
+    row.source_path = _blank_to_none(request.source_path)
+    row.prepare_command = _blank_to_none(request.prepare_command)
+    row.test_command = _blank_to_none(request.test_command)
+
+
+def _authoring_fields(row) -> dict:
+    """The authoring dials as a response fragment, read back off a row."""
+    return {
+        "authoring_mode": row.authoring_mode or "assisted",
+        "autonomous_max_rounds": (
+            2 if row.autonomous_max_rounds is None else row.autonomous_max_rounds
+        ),
+        "preset_label": row.preset_label,
+        "source_path": row.source_path,
+        "prepare_command": row.prepare_command,
+        "test_command": row.test_command,
+    }
+
+
+@router.get(
+    "/presets",
+    response_model=schemas.AuthoringPresetList,
+    summary="Named starting points for the authoring dials",
+)
+async def list_presets(
+    current_user: models.User = Depends(get_current_user),
+) -> schemas.AuthoringPresetList:
+    """
+    The presets, from the one dict the API and the UI both read.
+
+    Picking one in the UI mutates form state and nothing else: every dial stays
+    visible and editable below it, and `resolve_settings` remains the sole
+    arbiter of what a run does.
+    """
+    return schemas.AuthoringPresetList(presets=[
+        schemas.AuthoringPreset(
+            name=name,
+            label=preset["label"],
+            description=preset["description"],
+            values=preset["values"],
+        )
+        for name, preset in presets.PRESETS.items()
+    ])
 
 
 @router.get(
@@ -391,6 +459,7 @@ async def list_repos(
                 merge_method=r.merge_method or "squash",
                 project_board_sync=bool(r.project_board_sync),
                 project_column_map=r.project_column_map,
+                **_authoring_fields(r),
                 enabled=bool(r.enabled),
             )
             for r in rows
@@ -461,6 +530,7 @@ async def get_defaults(
         merge_method=row.merge_method or "squash",
         project_board_sync=bool(row.project_board_sync),
         project_column_map=row.project_column_map,
+        **_authoring_fields(row),
         context_docs=[
             d for d in (row.context_doc_ids or "").splitlines() if d.strip()
         ],
@@ -511,6 +581,7 @@ async def save_defaults(
     row.merge_method = request.merge_method.value
     row.project_board_sync = 1 if request.project_board_sync else 0
     row.project_column_map = (request.project_column_map or "").strip() or None
+    _apply_authoring(row, request)
     row.context_doc_ids = "\n".join(doc_ids) if doc_ids else None
 
     db.commit()
@@ -530,6 +601,7 @@ async def save_defaults(
         merge_method=row.merge_method or "squash",
         project_board_sync=bool(row.project_board_sync),
         project_column_map=row.project_column_map,
+        **_authoring_fields(row),
         context_docs=doc_ids,
     )
 
@@ -1112,6 +1184,46 @@ async def _run_review_job(
                 board_stage,
                 column_map=settings.project_column_map,
             )
+
+    # A changes-requested review is the pipeline saying "this is not done",
+    # which is exactly what an authoring attempt answers. Placed before the
+    # Slack early-return below, for the same reason the board move is: a repo
+    # with no review channel configured still gets the behaviour it enabled.
+    #
+    # Every guard lives in `should_retry` -- the mode, the bound, a human's
+    # push, the throughput cap -- so this cannot rework forever and destroy
+    # `round_number`, the signal that makes a stalled review visible.
+    if outcome is schemas.ReviewOutcome.changes_requested:
+        try:
+            ticket_key = authoring_flow.key_for(
+                db, owner_id=job.owner_id, repo=job.repo, pr_number=job.pr_number
+            )
+            item_settings = resolve_settings(
+                db,
+                job.owner_id,
+                db.query(models.RepoWebhook).filter(
+                    models.RepoWebhook.repo == job.repo,
+                    models.RepoWebhook.owner_id == job.owner_id,
+                ).first(),
+                ticket_key=ticket_key,
+            )
+            if item_settings.authoring_mode == "autonomous":
+                await authoring_flow.maybe_retry(
+                    db,
+                    owner_id=job.owner_id,
+                    repo=job.repo,
+                    pr_number=job.pr_number,
+                    ticket_key=ticket_key,
+                    settings=item_settings,
+                    integration_configs=integration_configs,
+                    trigger="changes_requested",
+                    slack_channel=settings.review_slack_channel,
+                )
+        except Exception as e:
+            # Swallowed like every other integration failure in this path: a
+            # retry that could not start must not cost the review notification
+            # the reviewer is waiting on.
+            logger.warning("Authoring retry failed for %s: %s", job.repo, e)
 
     channel = settings.review_slack_channel
     if not channel or "slack" not in integration_configs:

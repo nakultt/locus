@@ -3,7 +3,16 @@ Database Models
 SQLAlchemy ORM models for User and Integration tables
 """
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -113,7 +122,11 @@ class PRJob(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     repo = Column(String(255), nullable=False, index=True)  # "owner/name"
-    pr_number = Column(Integer, nullable=False)
+    # Nullable because an authoring job has no pull request number when it
+    # starts -- opening one is its whole job. Queuing with 0 as a sentinel is
+    # the tempting alternative and something downstream reads it as a real PR
+    # number within a release.
+    pr_number = Column(Integer, nullable=True)
     action = Column(String(32), nullable=False)  # opened, synchronize, reopened
     head_sha = Column(String(64), nullable=True)
     # Event fields the job needs but the PR number cannot supply -- a review's
@@ -583,6 +596,23 @@ class RepoWebhook(Base):
     # default map in project_board. A stage left out moves no card, which is
     # what makes a partial map safe to write.
     project_column_map = Column(Text, nullable=True)
+    # Who writes the code for this repo's tickets: "assisted" (a person) or
+    # "autonomous" (the authoring driver). NULL is how resolve_settings hears
+    # "this repo says nothing" and falls through to the account defaults --
+    # which is why this is nullable where the defaults column is not.
+    authoring_mode = Column(String(16), nullable=True)
+    # The first attempt plus this many reworks. NULL falls through.
+    autonomous_max_rounds = Column(Integer, nullable=True)
+    # Display only. resolve_settings is the sole arbiter of what a run does;
+    # a preset expanded at read time would be a second resolution layer.
+    preset_label = Column(String(64), nullable=True)
+    # Where this repo is checked out locally. NULL falls back to
+    # LOCUS_CODE_ROOT, and failing that to a managed clone.
+    source_path = Column(Text, nullable=True)
+    # Run once in the fresh worktree before the agent (uv sync, npm ci).
+    prepare_command = Column(Text, nullable=True)
+    # The authoring test gate. NULL means no gate.
+    test_command = Column(Text, nullable=True)
     enabled = Column(Integer, nullable=False, default=1)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -623,6 +653,16 @@ class PRAgentDefaults(Base):
     merge_method = Column(String(16), nullable=False, default="squash")
     project_board_sync = Column(Integer, nullable=False, default=1)
     project_column_map = Column(Text, nullable=True)
+    # A defaults row that exists is a deliberate choice, so unlike the repo
+    # columns these are NOT NULL -- they must never read back as "says
+    # nothing". Assisted by default: a mode that writes code on its own has to
+    # be turned on, never inherited.
+    authoring_mode = Column(String(16), nullable=False, default="assisted")
+    autonomous_max_rounds = Column(Integer, nullable=False, default=2)
+    preset_label = Column(String(64), nullable=True)
+    source_path = Column(Text, nullable=True)
+    prepare_command = Column(Text, nullable=True)
+    test_command = Column(Text, nullable=True)
     # Newline-separated Google Doc ids read as context on every run. Per-repo
     # docs describe one codebase; these are the standards that apply to all of
     # them, and without them an unregistered repo reviews against nothing.
@@ -639,3 +679,230 @@ class PRAgentDefaults(Base):
 
     def __repr__(self) -> str:
         return f"<PRAgentDefaults(owner_id={self.owner_id})>"
+
+
+class WorkItemSettings(Base):
+    """
+    Per-work-item overrides of the authoring mode.
+
+    The third and most specific source `resolve_settings` reads. Autonomy is a
+    judgement about *this ticket* -- a dependency bump and a change to the
+    credential path are not the same risk -- and an account-wide toggle forces
+    the most dangerous ticket in the backlog to set policy for all of them,
+    which is how teams end up leaving the mode off entirely.
+
+    Deliberately narrow: only the authoring fields live here. Rows are sparse,
+    so absence means "inherit", never "assisted".
+    """
+
+    __tablename__ = "work_item_settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    # Jira key ("LOC-42") or the "owner/repo#N" fallback worklist._task_key
+    # already groups on. Same key space as PRReview.ticket_keys.
+    ticket_key = Column(String(128), nullable=False, index=True)
+    authoring_mode = Column(String(16), nullable=True)
+    autonomous_max_rounds = Column(Integer, nullable=True)
+    # Set when the bound was exhausted, or when a human took the branch over.
+    # Distinct from someone choosing `assisted` by hand: this reads in the UI
+    # as "handed back after N attempts", and it is what stops the next event
+    # re-triggering the driver.
+    handed_back_at = Column(DateTime(timezone=True), nullable=True)
+    handed_back_reason = Column(Text, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+
+    __table_args__ = (
+        UniqueConstraint("owner_id", "ticket_key", name="uq_work_item_settings"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<WorkItemSettings(ticket_key={self.ticket_key}, mode={self.authoring_mode})>"
+
+
+class AuthoringAttempt(Base):
+    """
+    One run of the authoring driver against one work item.
+
+    Append-only, the same argument as `PRReviewRound`: a mutable counter can
+    say the agent has tried three times but cannot say *why* it tried again,
+    and "the agent has tried three things" and "the agent tried once and a
+    reviewer pushed back twice" are different situations needing different
+    responses from the person the work eventually returns to.
+
+    Every outcome is recorded, including the ones that opened nothing -- a
+    timeout, an oversized diff, a denylisted path. That is what makes the bound
+    real: a failure that left no row would not consume an attempt, and a
+    reliably-failing ticket would retry forever.
+    """
+
+    __tablename__ = "authoring_attempts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    ticket_key = Column(String(128), nullable=False, index=True)
+    repo = Column(String(255), nullable=True, index=True)
+    # Null on every outcome that opened nothing, which is most of them.
+    pr_number = Column(Integer, nullable=True)
+
+    attempt = Column(Integer, nullable=False, default=1)
+    # initial | changes_requested | qa_rejected
+    trigger = Column(String(32), nullable=False, default="initial")
+
+    driver = Column(String(64), nullable=False, default="none")
+    # Recorded per attempt rather than read from config at display time.
+    # "Which model wrote this, and how much of our internal discussion did it
+    # see" is asked after the fact, when the config value has already moved on.
+    model = Column(String(128), nullable=True)
+    context_mode = Column(String(32), nullable=True)
+
+    source_path = Column(Text, nullable=True)
+    workspace_path = Column(Text, nullable=True)
+
+    opened = Column(Integer, nullable=False, default=0)
+    error = Column(Text, nullable=True)
+    files_changed = Column(Integer, nullable=False, default=0)
+    lines_changed = Column(Integer, nullable=False, default=0)
+    duration_seconds = Column(Float, nullable=False, default=0.0)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    def __repr__(self) -> str:
+        return (
+            f"<AuthoringAttempt(ticket={self.ticket_key}, attempt={self.attempt}, "
+            f"opened={bool(self.opened)})>"
+        )
+
+
+class TimeAgentSettings(Base):
+    """
+    The calendar agent's settings, one row per user.
+
+    Per user rather than per repo, because a calendar belongs to a person.
+
+    Four things are off by default, each for its own reason. `enabled`, because
+    a feature that starts touching a calendar unasked is the worst first
+    impression available. `auto_apply`, because a moved meeting is visible to
+    everyone invited. Both auto-replies, because they post to real people --
+    the same category as auto-merge, and they earn the same treatment.
+    """
+
+    __tablename__ = "time_agent_settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    owner_id = Column(
+        Integer, ForeignKey("users.id"), nullable=False, unique=True, index=True
+    )
+
+    enabled = Column(Integer, nullable=False, default=0)
+    # Propose versus act. With this off the proposal is stored and surfaced,
+    # and POST /schedule/apply executes it unchanged.
+    auto_apply = Column(Integer, nullable=False, default=0)
+    auto_reply_invites = Column(Integer, nullable=False, default=0)
+    auto_reply_busy = Column(Integer, nullable=False, default=0)
+
+    # "HH:MM", interpreted in User.timezone through a real timezone library.
+    # The default zone is UTC+05:30 and the half-hour offset breaks naive hour
+    # arithmetic, which is why nothing here is an integer offset.
+    working_hours_start = Column(String(5), nullable=False, default="09:30")
+    working_hours_end = Column(String(5), nullable=False, default="18:30")
+    protect_focus_blocks = Column(Integer, nullable=False, default=1)
+
+    # "U04AB...", not a handle.
+    #
+    # A Slack mention arrives in message text as `<@U04AB…>` while
+    # `reviewer_contacts` stores handles -- different namespaces that never
+    # compare equal, which is why mention matching silently never fires
+    # without this. Resolved once via auth.test.
+    slack_member_id = Column(String(32), nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    def __repr__(self) -> str:
+        return f"<TimeAgentSettings(owner_id={self.owner_id}, enabled={self.enabled})>"
+
+
+class ScheduleProposalRecord(Base):
+    """
+    A reshuffle the calendar agent proposed, waiting for a human.
+
+    Stored rather than sent, because with `auto_apply` off the proposal has to
+    survive until somebody looks at it -- and `POST /schedule/apply` already
+    exists as the confirm step, which is exactly the propose-only shape this
+    needs.
+
+    Anything with external attendees is reported blocked rather than moved, and
+    that is `scheduler.classify_event`'s existing behaviour: this table records
+    proposals, it does not weaken them.
+    """
+
+    __tablename__ = "schedule_proposals"
+
+    id = Column(Integer, primary_key=True, index=True)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+
+    # What prompted it: a conflict found by the sweep, or an interruption.
+    trigger = Column(String(255), nullable=False)
+    # The serialized ScheduleProposal, so applying it later runs the same plan
+    # that was shown rather than a freshly recomputed one.
+    proposal_json = Column(Text, nullable=False)
+    summary = Column(Text, nullable=True)
+
+    # pending | applied | dismissed | superseded
+    state = Column(String(16), nullable=False, default="pending", index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<ScheduleProposalRecord(owner_id={self.owner_id}, state={self.state})>"
+
+
+class InterruptionEvent(Base):
+    """
+    Somebody reached the owner while they were booked, and what Locus said.
+
+    This cannot live in `communication_events`: that table's `repo` and
+    `pr_number` are NOT NULL, and an interruption has neither. Reusing it would
+    mean inventing a sentinel repo, which the next reader takes for real.
+
+    `importance_source` is what makes a wrong escalation debuggable. Two of the
+    three are deterministic facts -- the sender is a reviewer mid-round, or the
+    message names a work item the worklist reports blocked on you -- and only
+    the third is a model's judgement. The UI says which, and the model-made one
+    reads as weaker than the other two.
+    """
+
+    __tablename__ = "interruption_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    occurred_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    channel = Column(String(16), nullable=False, default="slack")
+    participant = Column(String(255), nullable=True)
+    thread_ts = Column(String(32), nullable=True, index=True)
+    slack_channel = Column(String(64), nullable=True, index=True)
+
+    # free | busy | focus | off_hours -- what the calendar said at the time.
+    availability_state = Column(String(16), nullable=False, default="free")
+    # important | routine
+    importance = Column(String(16), nullable=False, default="routine")
+    # reviewer | worklist | classifier
+    importance_source = Column(String(16), nullable=False, default="classifier")
+
+    replied = Column(Integer, nullable=False, default=0)
+    # Stored **as sent**, passed to the log rather than reconstructed. A
+    # reconstruction drifts from what the channel actually saw, which makes the
+    # record worse than useless -- the same reason
+    # `merge_actions._qa_email_text` exists.
+    reply_body = Column(Text, nullable=True)
+    proposal_id = Column(Integer, nullable=True)
+    # A clipped quote of what they said, for the strip. Not the whole message:
+    # this is a record of an interruption, not a second copy of Slack.
+    excerpt = Column(Text, nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<InterruptionEvent(owner_id={self.owner_id}, state={self.availability_state})>"

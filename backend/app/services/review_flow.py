@@ -597,6 +597,8 @@ def evaluate_merge_gate(
     ci_state: str,
     failing_checks: list[str],
     mergeable: bool | None,
+    changed_paths: list[str] | None = None,
+    machine_authored: bool = False,
 ) -> tuple[bool, list[str]]:
     """
     Decide whether an approved PR may be merged automatically.
@@ -646,6 +648,34 @@ def evaluate_merge_gate(
             f"{len(analysis.confirmed_findings)} confirmed security finding(s)"
         )
 
+    # An agent-authored change to what CI runs never auto-merges, at any
+    # approval. The driver refuses to produce one -- a workflow edit aborts the
+    # attempt on the diff -- so reaching here means it arrived by some other
+    # route, and the one thing that must not happen is a machine-written change
+    # to the checks that gate machine-written changes landing on the strength
+    # of those checks.
+    if machine_authored:
+        workflow_edits = [
+            path for path in (changed_paths or [])
+            if ".github/workflows/" in path.lower()
+        ]
+        if workflow_edits:
+            blockers.append(
+                "machine-authored change touches CI workflows: "
+                + ", ".join(sorted(workflow_edits))
+            )
+
+    # True today by construction -- GitHub does not let you approve your own
+    # pull request -- and asserted so it cannot regress. An approval by the
+    # author is not a review, and autonomous mode makes the author a machine.
+    if (
+        review.state == schemas.ReviewState.approved.value
+        and review.author
+        and review.last_reviewer
+        and review.author.lower() == review.last_reviewer.lower()
+    ):
+        blockers.append("the approving reviewer is the pull request author")
+
     return (not blockers), blockers
 
 
@@ -670,12 +700,19 @@ async def post_review_notification(
     slack_config: dict,
     channel: str,
     text: str,
+    thread_ts: str | None = None,
 ) -> bool:
     """
     Post one review-loop message to Slack.
 
     Failure is logged and swallowed: a Slack outage must not fail the job and
     lose the recorded review state, which is the part that matters.
+
+    Args:
+        thread_ts: Reply inside a thread rather than at channel level. The busy
+            reply uses it so an answer lands where the question was asked; the
+            review loop leaves it unset, since a review request is a new
+            message rather than a reply to one.
     """
     credentials = slack_config.get("credentials", {}) or {}
     bot_token = credentials.get("bot_token") or slack_config.get("api_key", "")
@@ -687,7 +724,11 @@ async def post_review_notification(
             response = await client.post(
                 "https://slack.com/api/chat.postMessage",
                 headers={"Authorization": f"Bearer {bot_token}"},
-                json={"channel": channel, "text": text},
+                json=(
+                    {"channel": channel, "text": text, "thread_ts": thread_ts}
+                    if thread_ts
+                    else {"channel": channel, "text": text}
+                ),
             )
             payload = response.json()
     except Exception as e:
