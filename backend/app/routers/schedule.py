@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app import models, schemas
 from app.database import get_db
 from app.dependencies import get_current_user, get_integration_configs
+from app.services import availability as availability_service
 from app.services import calendar as calendar_service
 from app.services import calendar_agent
 from app.services.datetimes import parse_datetime, resolve_timezone
@@ -592,3 +593,62 @@ async def dismiss_proposal(
     record.state = "dismissed"
     record.resolved_at = datetime.now(UTC)
     db.commit()
+
+
+@router.get(
+    "/availability",
+    response_model=schemas.Availability,
+    summary="Whether you can be reached, and until when",
+)
+async def get_availability(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> schemas.Availability:
+    """
+    The same `availability.current_status` the Slack reply uses.
+
+    One source, so the channel and the UI cannot disagree about whether you are
+    in a meeting. Carries a state and a time and nothing else -- no title, no
+    attendee, no location. The type is the enforcement.
+
+    Reads `free` when the calendar cannot be read: a broken token and a real
+    meeting produce identical silence, and defaulting to busy fails in the
+    direction that makes you unreachable.
+    """
+    settings = calendar_agent.get_settings(db, current_user.id)
+    return await availability_service.for_user(db, current_user, settings)
+
+
+@router.get(
+    "/interruptions",
+    response_model=list[schemas.InterruptionEntry],
+    summary="Who reached you while you were busy",
+)
+async def list_interruptions(
+    limit: int = 25,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[schemas.InterruptionEntry]:
+    """Most recent first. Records the ones nobody was answered on, too."""
+    rows = db.query(models.InterruptionEvent).filter(
+        models.InterruptionEvent.owner_id == current_user.id
+    ).order_by(models.InterruptionEvent.occurred_at.desc()).limit(
+        min(max(limit, 1), 100)
+    ).all()
+
+    return [
+        schemas.InterruptionEntry(
+            id=row.id,
+            occurred_at=row.occurred_at,
+            channel=row.channel,
+            participant=row.participant,
+            slack_channel=row.slack_channel,
+            availability_state=row.availability_state,
+            importance=row.importance,
+            importance_source=row.importance_source,
+            replied=bool(row.replied),
+            reply_body=row.reply_body,
+            excerpt=row.excerpt,
+        )
+        for row in rows
+    ]
