@@ -1447,6 +1447,51 @@ class ScheduleProposal(BaseModel):
         return any(m.attendee_count > 1 for m in self.moves)
 
 
+class TimeAgentSettingsUpdate(BaseModel):
+    """
+    The calendar agent's dials, one set per user.
+
+    Four default to off, each for its own reason. `enabled`, because a feature
+    that starts touching a calendar unasked is the worst first impression
+    available. `auto_apply`, because a moved meeting is visible to everyone
+    invited. Both auto-replies, because they post to real people -- the same
+    category as auto-merge, and they earn the same treatment.
+    """
+    enabled: bool = False
+    auto_apply: bool = Field(
+        False,
+        description="Act on a plan rather than storing it for you to confirm",
+    )
+    auto_reply_invites: bool = False
+    auto_reply_busy: bool = Field(
+        False, description="Answer someone who reaches you while you are booked"
+    )
+    working_hours_start: str = Field("09:30", pattern=r"^\d{2}:\d{2}$")
+    working_hours_end: str = Field("18:30", pattern=r"^\d{2}:\d{2}$")
+    protect_focus_blocks: bool = True
+
+
+class TimeAgentSettingsResponse(TimeAgentSettingsUpdate):
+    """Stored settings, plus what could be resolved about the Slack identity."""
+    # "U04AB...", not a handle. A Slack mention arrives as `<@U04AB…>` while
+    # contacts are stored as handles -- different namespaces that never compare
+    # equal, so mention matching silently never fires without this.
+    slack_member_id: str | None = None
+    timezone: str | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class StoredProposal(BaseModel):
+    """A reshuffle the agent proposed, waiting for a human to confirm it."""
+    id: int
+    trigger: str
+    summary: str | None = None
+    state: str
+    created_at: datetime | None = None
+    proposal: "ScheduleProposal"
+
+
 class SchedulePlanRequest(BaseModel):
     """Ask for a plan without applying it."""
     title: str = Field(..., description="What is being scheduled")
