@@ -61,6 +61,14 @@ class AuthoringRequest(BaseModel):
     attempt: int = 1
     # initial | changes_requested | qa_rejected
     trigger: str = "initial"
+    # The resolved per-repo authoring settings this run should use, and the
+    # report link to put in the pull request body.
+    #
+    # Threaded on the request rather than re-resolved inside the driver, so the
+    # driver needs no database session and `resolve_settings` stays the only
+    # place the chain is walked. The worker, the API and the driver cannot then
+    # disagree about what a run will do.
+    settings: dict = Field(default_factory=dict)
 
     def scoped(self) -> AuthoringRequest:
         """
