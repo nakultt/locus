@@ -3,7 +3,15 @@ Database Models
 SQLAlchemy ORM models for User and Integration tables
 """
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -583,6 +591,23 @@ class RepoWebhook(Base):
     # default map in project_board. A stage left out moves no card, which is
     # what makes a partial map safe to write.
     project_column_map = Column(Text, nullable=True)
+    # Who writes the code for this repo's tickets: "assisted" (a person) or
+    # "autonomous" (the authoring driver). NULL is how resolve_settings hears
+    # "this repo says nothing" and falls through to the account defaults --
+    # which is why this is nullable where the defaults column is not.
+    authoring_mode = Column(String(16), nullable=True)
+    # The first attempt plus this many reworks. NULL falls through.
+    autonomous_max_rounds = Column(Integer, nullable=True)
+    # Display only. resolve_settings is the sole arbiter of what a run does;
+    # a preset expanded at read time would be a second resolution layer.
+    preset_label = Column(String(64), nullable=True)
+    # Where this repo is checked out locally. NULL falls back to
+    # LOCUS_CODE_ROOT, and failing that to a managed clone.
+    source_path = Column(Text, nullable=True)
+    # Run once in the fresh worktree before the agent (uv sync, npm ci).
+    prepare_command = Column(Text, nullable=True)
+    # The authoring test gate. NULL means no gate.
+    test_command = Column(Text, nullable=True)
     enabled = Column(Integer, nullable=False, default=1)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -623,6 +648,16 @@ class PRAgentDefaults(Base):
     merge_method = Column(String(16), nullable=False, default="squash")
     project_board_sync = Column(Integer, nullable=False, default=1)
     project_column_map = Column(Text, nullable=True)
+    # A defaults row that exists is a deliberate choice, so unlike the repo
+    # columns these are NOT NULL -- they must never read back as "says
+    # nothing". Assisted by default: a mode that writes code on its own has to
+    # be turned on, never inherited.
+    authoring_mode = Column(String(16), nullable=False, default="assisted")
+    autonomous_max_rounds = Column(Integer, nullable=False, default=2)
+    preset_label = Column(String(64), nullable=True)
+    source_path = Column(Text, nullable=True)
+    prepare_command = Column(Text, nullable=True)
+    test_command = Column(Text, nullable=True)
     # Newline-separated Google Doc ids read as context on every run. Per-repo
     # docs describe one codebase; these are the standards that apply to all of
     # them, and without them an unregistered repo reviews against nothing.
@@ -639,3 +674,44 @@ class PRAgentDefaults(Base):
 
     def __repr__(self) -> str:
         return f"<PRAgentDefaults(owner_id={self.owner_id})>"
+
+
+class WorkItemSettings(Base):
+    """
+    Per-work-item overrides of the authoring mode.
+
+    The third and most specific source `resolve_settings` reads. Autonomy is a
+    judgement about *this ticket* -- a dependency bump and a change to the
+    credential path are not the same risk -- and an account-wide toggle forces
+    the most dangerous ticket in the backlog to set policy for all of them,
+    which is how teams end up leaving the mode off entirely.
+
+    Deliberately narrow: only the authoring fields live here. Rows are sparse,
+    so absence means "inherit", never "assisted".
+    """
+
+    __tablename__ = "work_item_settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    # Jira key ("LOC-42") or the "owner/repo#N" fallback worklist._task_key
+    # already groups on. Same key space as PRReview.ticket_keys.
+    ticket_key = Column(String(128), nullable=False, index=True)
+    authoring_mode = Column(String(16), nullable=True)
+    autonomous_max_rounds = Column(Integer, nullable=True)
+    # Set when the bound was exhausted, or when a human took the branch over.
+    # Distinct from someone choosing `assisted` by hand: this reads in the UI
+    # as "handed back after N attempts", and it is what stops the next event
+    # re-triggering the driver.
+    handed_back_at = Column(DateTime(timezone=True), nullable=True)
+    handed_back_reason = Column(Text, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+
+    __table_args__ = (
+        UniqueConstraint("owner_id", "ticket_key", name="uq_work_item_settings"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<WorkItemSettings(ticket_key={self.ticket_key}, mode={self.authoring_mode})>"

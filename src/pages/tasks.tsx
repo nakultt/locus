@@ -285,23 +285,23 @@ export default function TasksPage() {
         .map((r) => r.trim().replace(/^@/, ""))
         .filter(Boolean);
 
-      const reg = await registerRepo(
-        repoInput.trim(),
-        channelInput.trim() || undefined,
-        exportDocs,
+      const reg = await registerRepo({
+        repo: repoInput.trim(),
+        slackChannel: channelInput.trim() || undefined,
+        exportToDocs: exportDocs,
         contextDocs,
         qaEmails,
-        jiraDoneStatus.trim() || "Done",
-        closeIssues,
+        jiraDoneStatus: jiraDoneStatus.trim() || "Done",
+        closeIssuesOnMerge: closeIssues,
         reviewers,
-        reviewChannelInput.trim() || undefined,
-        reviewerContactsInput.trim() || undefined,
-        autoMerge,
+        reviewSlackChannel: reviewChannelInput.trim() || undefined,
+        reviewerContacts: reviewerContactsInput.trim() || undefined,
+        autoMergeOnApproval: autoMerge,
         mergeMethod,
-        closeOnSignoff,
-        boardSync,
-        columnMapInput.trim() || undefined
-      );
+        closeOnQaSignoff: closeOnSignoff,
+        projectBoardSync: boardSync,
+        projectColumnMap: columnMapInput.trim() || undefined,
+      });
       setJustRegistered(reg);
       setRepoInput("");
       setChannelInput("");
