@@ -36,6 +36,10 @@ logger = logging.getLogger(__name__)
 # stay stable -- changing one lets an old instance and a new one both run.
 MERGE_SWEEP_LOCK = 8_417_001
 QA_POLL_LOCK = 8_417_002
+# The calendar agent sweeps for conflicts rather than claiming them, so two
+# instances would find the same double-booking and propose the same reshuffle
+# twice -- and a proposal is something a person is asked to act on.
+CALENDAR_LOCK = 8_417_003
 
 
 def _supports_advisory_locks() -> bool:
