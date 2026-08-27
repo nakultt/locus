@@ -774,3 +774,87 @@ class AuthoringAttempt(Base):
             f"<AuthoringAttempt(ticket={self.ticket_key}, attempt={self.attempt}, "
             f"opened={bool(self.opened)})>"
         )
+
+
+class TimeAgentSettings(Base):
+    """
+    The calendar agent's settings, one row per user.
+
+    Per user rather than per repo, because a calendar belongs to a person.
+
+    Four things are off by default, each for its own reason. `enabled`, because
+    a feature that starts touching a calendar unasked is the worst first
+    impression available. `auto_apply`, because a moved meeting is visible to
+    everyone invited. Both auto-replies, because they post to real people --
+    the same category as auto-merge, and they earn the same treatment.
+    """
+
+    __tablename__ = "time_agent_settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    owner_id = Column(
+        Integer, ForeignKey("users.id"), nullable=False, unique=True, index=True
+    )
+
+    enabled = Column(Integer, nullable=False, default=0)
+    # Propose versus act. With this off the proposal is stored and surfaced,
+    # and POST /schedule/apply executes it unchanged.
+    auto_apply = Column(Integer, nullable=False, default=0)
+    auto_reply_invites = Column(Integer, nullable=False, default=0)
+    auto_reply_busy = Column(Integer, nullable=False, default=0)
+
+    # "HH:MM", interpreted in User.timezone through a real timezone library.
+    # The default zone is UTC+05:30 and the half-hour offset breaks naive hour
+    # arithmetic, which is why nothing here is an integer offset.
+    working_hours_start = Column(String(5), nullable=False, default="09:30")
+    working_hours_end = Column(String(5), nullable=False, default="18:30")
+    protect_focus_blocks = Column(Integer, nullable=False, default=1)
+
+    # "U04AB...", not a handle.
+    #
+    # A Slack mention arrives in message text as `<@U04AB…>` while
+    # `reviewer_contacts` stores handles -- different namespaces that never
+    # compare equal, which is why mention matching silently never fires
+    # without this. Resolved once via auth.test.
+    slack_member_id = Column(String(32), nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    def __repr__(self) -> str:
+        return f"<TimeAgentSettings(owner_id={self.owner_id}, enabled={self.enabled})>"
+
+
+class ScheduleProposalRecord(Base):
+    """
+    A reshuffle the calendar agent proposed, waiting for a human.
+
+    Stored rather than sent, because with `auto_apply` off the proposal has to
+    survive until somebody looks at it -- and `POST /schedule/apply` already
+    exists as the confirm step, which is exactly the propose-only shape this
+    needs.
+
+    Anything with external attendees is reported blocked rather than moved, and
+    that is `scheduler.classify_event`'s existing behaviour: this table records
+    proposals, it does not weaken them.
+    """
+
+    __tablename__ = "schedule_proposals"
+
+    id = Column(Integer, primary_key=True, index=True)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+
+    # What prompted it: a conflict found by the sweep, or an interruption.
+    trigger = Column(String(255), nullable=False)
+    # The serialized ScheduleProposal, so applying it later runs the same plan
+    # that was shown rather than a freshly recomputed one.
+    proposal_json = Column(Text, nullable=False)
+    summary = Column(Text, nullable=True)
+
+    # pending | applied | dismissed | superseded
+    state = Column(String(16), nullable=False, default="pending", index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<ScheduleProposalRecord(owner_id={self.owner_id}, state={self.state})>"
