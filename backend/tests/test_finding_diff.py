@@ -15,8 +15,8 @@ identical one newly introduced -- which is worse than reporting nothing.
 import json
 
 from app import schemas
-from app.services import finding_diff
-from app.services.pr_agent import render_pr_comment
+from app.services.pipeline import finding_diff
+from app.services.pipeline.pr_agent import render_pr_comment
 
 
 def context() -> schemas.PRContext:

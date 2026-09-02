@@ -13,12 +13,12 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import models
-from app.services.agent_settings import resolve_settings
+from app.services.pipeline.agent_settings import resolve_settings
 
 
 @pytest.fixture
 def db(tmp_path):
-    from app.database import Base
+    from app.core.database import Base
 
     engine = create_engine(
         f"sqlite:///{tmp_path}/d.db", connect_args={"check_same_thread": False}
@@ -154,8 +154,8 @@ class TestIsolation:
 
 @pytest.fixture
 def client(tmp_path):
-    import main
-    from app.database import Base, get_db
+    from app import main
+    from app.core.database import Base, get_db
 
     engine = create_engine(
         f"sqlite:///{tmp_path}/api.db", connect_args={"check_same_thread": False}

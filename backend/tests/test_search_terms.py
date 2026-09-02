@@ -6,7 +6,7 @@ LOC-431 matches "loc" or "431" anywhere, and a PR title searched verbatim
 matches nothing. These tests pin the query shapes.
 """
 
-from app.services.search_terms import jira_jql, significant_words, slack_queries
+from app.services.pipeline.search_terms import jira_jql, significant_words, slack_queries
 
 
 class TestSignificantWords:

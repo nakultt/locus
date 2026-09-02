@@ -25,8 +25,8 @@ from app import models, schemas
 
 @pytest.fixture
 def client(tmp_path):
-    import main
-    from app.database import Base, get_db
+    from app import main
+    from app.core.database import Base, get_db
 
     engine = create_engine(
         f"sqlite:///{tmp_path}/cmd.db", connect_args={"check_same_thread": False}
@@ -177,7 +177,7 @@ class TestUntrustedInput:
         The posted comment ends with an `@locus ignore` hint. Acting on it
         would make the bot instruct itself into hiding its own findings.
         """
-        from app.services import github_pr
+        from app.services.integrations import github_pr
 
         body = (
             f"{github_pr.COMMENT_MARKER}\n"
@@ -192,7 +192,7 @@ class TestUntrustedInput:
     def test_an_inline_suggestion_comment_is_also_ignored(
         self, client, registered, analyzed
     ):
-        from app.services import github_pr
+        from app.services.integrations import github_pr
 
         body = f"{github_pr.INLINE_MARKER}\n@locus ignore Unused import"
         response = _send(client, registered["webhook_secret"], _comment(body))

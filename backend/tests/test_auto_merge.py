@@ -12,7 +12,7 @@ Every test here is a case where merging would have been wrong.
 import pytest
 
 from app import models, schemas
-from app.services import review_flow
+from app.services.pipeline import review_flow
 
 
 def _review(state=schemas.ReviewState.approved):
@@ -235,8 +235,8 @@ class TestSettingsDefaultOff:
         from sqlalchemy import create_engine
         from sqlalchemy.orm import sessionmaker
 
-        from app.database import Base
-        from app.services.agent_settings import resolve_settings
+        from app.core.database import Base
+        from app.services.pipeline.agent_settings import resolve_settings
 
         engine = create_engine(f"sqlite:///{tmp_path}/s.db")
         Base.metadata.create_all(bind=engine)
@@ -264,9 +264,9 @@ class TestGateIsRetried:
         from sqlalchemy import create_engine
         from sqlalchemy.orm import sessionmaker
 
-        from app import security
-        from app.database import Base
-        from app.services import automerge
+        from app.core import security
+        from app.core.database import Base
+        from app.services.pipeline import automerge
 
         engine = create_engine(
             f"sqlite:///{tmp_path}/sweep.db",
@@ -299,7 +299,8 @@ class TestGateIsRetried:
     async def test_a_pr_held_on_unknown_mergeability_merges_on_the_next_sweep(
         self, approved_repo, monkeypatch
     ):
-        from app.services import automerge, github_pr
+        from app.services.integrations import github_pr
+        from app.services.pipeline import automerge
 
         # First read: GitHub is still computing. Second: it has an answer.
         answers = [
@@ -337,7 +338,8 @@ class TestGateIsRetried:
         self, approved_repo, monkeypatch
     ):
         """The dangerous default stays off, including on the retry path."""
-        from app.services import automerge, github_pr
+        from app.services.integrations import github_pr
+        from app.services.pipeline import automerge
 
         db = approved_repo()
         try:
@@ -361,7 +363,8 @@ class TestGateIsRetried:
         Repeating the reason every minute would train people to ignore the
         channel. The blocker was already reported when the approval landed.
         """
-        from app.services import automerge, github_pr, review_flow
+        from app.services.integrations import github_pr
+        from app.services.pipeline import automerge, review_flow
 
         async def fake_pr(_t, _r, _n):
             return {"merged": False, "mergeable": False, "head": {"sha": "a1"}}

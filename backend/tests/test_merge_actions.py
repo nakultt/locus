@@ -9,9 +9,9 @@ import pytest
 
 from app import schemas
 from app.schemas import PRAnalysisResult
-from app.services import merge_actions
-from app.services.capabilities import build_readiness
-from app.services.merge_actions import is_forward_transition
+from app.services.pipeline import merge_actions
+from app.services.pipeline.capabilities import build_readiness
+from app.services.pipeline.merge_actions import is_forward_transition
 
 
 class TestForwardOnlyTransitions:

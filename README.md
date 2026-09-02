@@ -37,8 +37,8 @@ what caches versus what is re-derived every round.
 
 ```
 ┌─────────────┐     ┌──────────────────────┐     ┌────────────────────┐
-│  React SPA  │────▶│   FastAPI backend    │────▶│  MoE Model Manager │
-│   (Vite)    │◀────│                      │◀────│  127.0.0.1:8081/v1 │
+│   Next.js   │────▶│   FastAPI backend    │────▶│  MoE Model Manager │
+│  App Router │◀────│                      │◀────│  127.0.0.1:8081/v1 │
 └─────────────┘ SSE │  ┌────────────────┐  │     │  (local GPU)       │
                     │  │  LangChain     │  │     └────────────────────┘
 ┌─────────────┐     │  │  agent + tools │  │
@@ -136,22 +136,26 @@ Each migration is idempotent, so running the whole set is safe.
 Run it:
 
 ```bash
-uv run uvicorn main:app --reload
+uv run main.py
 ```
 
 ### Frontend
 
 ```bash
-npm install && npm run dev
+cd frontend && bun install && bun run dev
+```
+
+Or both halves together, from the repo root:
+
+```bash
+bun install && bun run dev
 ```
 
 ### Checks
 
 ```bash
-cd backend && uv run pytest tests/ -q && uv run ruff check .
-```
-```bash
-npm run build
+cd backend  && uv run pytest tests/ -q && uv run ruff check .
+cd frontend && bun run build   # type-checks and lints as part of the build
 ```
 
 ---
@@ -450,7 +454,7 @@ classifier has no tools bound — it returns a verdict and nothing else.
 
 ### Two modes: who writes the code
 
-Every setting resolves through `app/services/agent_settings.py`, which is the sole arbiter of what
+Every setting resolves through `app/services/pipeline/agent_settings.py`, which is the sole arbiter of what
 a run does. The authoring mode resolves in three layers — **work item → repo → account defaults** —
 most specific wins, and `assisted` is the fallback everywhere.
 
@@ -703,7 +707,7 @@ Worth reading before deploying anywhere real.
 - **The scheduler reads only the primary calendar.** Secondary and shared calendars are ignored, so a conflict on one of those will not be seen.
 - The PR agent has not been run end to end against a live GitHub webhook. Component logic is unit-tested; the Jira and Slack response-shape handling is written against the documented APIs but unverified with real credentials.
 - Gitleaks is optional and not bundled. Install with `go install github.com/zricethezav/gitleaks/v8@latest`; without it, committed-secret detection is skipped.
-- **Multi-instance deployment is guarded but not proven.** The job claim is an atomic conditional UPDATE, and all three sweeps — auto-merge, the Gmail poller and the calendar agent — take Postgres advisory locks (`app/services/locks.py`), so duplicate outward messages are prevented by construction rather than by there being one process. It has not been run multi-instance in anger.
+- **Multi-instance deployment is guarded but not proven.** The job claim is an atomic conditional UPDATE, and all three sweeps — auto-merge, the Gmail poller and the calendar agent — take Postgres advisory locks (`app/core/locks.py`), so duplicate outward messages are prevented by construction rather than by there being one process. It has not been run multi-instance in anger.
 - **Autonomous mode has not been measured on real tickets.** Whether it is any good depends entirely on how well OpenCode does with the brief, and that is the product risk; the phases around it are plumbing. Measure it before promising the mode to anyone.
 - **OpenCode's CLI will move.** `LOCUS_OPENCODE_CMD` is a template for that reason. Pin the exact invocation against your installed version and record which version it was pinned against.
 

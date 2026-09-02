@@ -60,9 +60,9 @@ class TestEndToEnd:
         from sqlalchemy import create_engine
         from sqlalchemy.orm import sessionmaker
 
-        import main
-        from app import models, security
-        from app.database import Base, get_db
+        from app import main, models
+        from app.core import security
+        from app.core.database import Base, get_db
 
         engine = create_engine(
             f"sqlite:///{tmp_path}/wh.db", connect_args={"check_same_thread": False}
@@ -128,9 +128,9 @@ class TestEndToEnd:
         from sqlalchemy import create_engine
         from sqlalchemy.orm import sessionmaker
 
-        import main
-        from app import models, security
-        from app.database import Base, get_db
+        from app import main, models
+        from app.core import security
+        from app.core.database import Base, get_db
 
         engine = create_engine(
             f"sqlite:///{tmp_path}/wh2.db", connect_args={"check_same_thread": False}

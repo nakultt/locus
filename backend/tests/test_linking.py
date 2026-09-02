@@ -1,6 +1,6 @@
 """Ticket-key extraction — the primitive the PR Context Agent rests on."""
 
-from app.services.linking import (
+from app.services.pipeline.linking import (
     extract_from_pr,
     extract_pr_references,
     extract_ticket_keys,

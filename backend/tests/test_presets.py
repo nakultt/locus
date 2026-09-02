@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.services import presets
+from app.services.pipeline import presets
 
 
 class TestContents:
@@ -82,8 +82,8 @@ class TestMatches:
 
 @pytest.fixture
 def client(tmp_path):
-    import main
-    from app.database import Base, get_db
+    from app import main
+    from app.core.database import Base, get_db
 
     engine = create_engine(
         f"sqlite:///{tmp_path}/p.db", connect_args={"check_same_thread": False}

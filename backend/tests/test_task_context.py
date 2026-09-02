@@ -15,7 +15,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import models, schemas
-from app.services import comms_log, context_brief
+from app.services.pipeline import comms_log, context_brief
 
 REPO, OWNER = "acme/widget", 1
 TICKET = "LOC-42"
@@ -23,7 +23,7 @@ TICKET = "LOC-42"
 
 @pytest.fixture
 def db(tmp_path):
-    from app.database import Base
+    from app.core.database import Base
 
     engine = create_engine(
         f"sqlite:///{tmp_path}/t.db", connect_args={"check_same_thread": False}
@@ -197,7 +197,7 @@ class TestIncrementalSlackSearch:
         back too. They are already cached; recording them again would
         duplicate the timeline.
         """
-        from app.services import pr_agent
+        from app.services.pipeline import pr_agent
 
         since = datetime(2026, 8, 14, 12, 0, tzinfo=UTC)
         captured: list[str] = []
@@ -239,7 +239,7 @@ class TestIncrementalSlackSearch:
     async def test_without_a_watermark_nothing_is_filtered(self, monkeypatch):
         """A work item never searched gets a full search, not an incremental
         one from an unknown point."""
-        from app.services import pr_agent
+        from app.services.pipeline import pr_agent
 
         captured: list[str] = []
 

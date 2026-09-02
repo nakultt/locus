@@ -25,8 +25,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import models, schemas
-from app.database import Base
-from app.services import review_flow, work_item
+from app.core.database import Base
+from app.services.pipeline import review_flow, work_item
 
 OWNER = 1
 REPO = "acme/api"
