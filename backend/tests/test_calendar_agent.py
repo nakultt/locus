@@ -15,12 +15,12 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import models, schemas
-from app.services import calendar_agent
+from app.services.scheduling import calendar_agent
 
 
 @pytest.fixture
 def db(tmp_path):
-    from app.database import Base
+    from app.core.database import Base
 
     engine = create_engine(
         f"sqlite:///{tmp_path}/c.db", connect_args={"check_same_thread": False}
@@ -228,8 +228,8 @@ class TestLoadProposal:
 
 @pytest.fixture
 def client(tmp_path):
-    import main
-    from app.database import Base, get_db
+    from app import main
+    from app.core.database import Base, get_db
 
     engine = create_engine(
         f"sqlite:///{tmp_path}/api.db", connect_args={"check_same_thread": False}
@@ -287,8 +287,8 @@ class TestApi:
         assert client.get("/api/schedule/proposals").json() == []
 
     def test_another_users_proposal_is_404_not_403(self, client):
-        import main
-        from app.database import get_db
+        from app import main
+        from app.core.database import get_db
 
         session = next(main.app.dependency_overrides[get_db]())
         session.add(models.ScheduleProposalRecord(
@@ -306,8 +306,8 @@ class TestApi:
 
     def test_dismissing_marks_rather_than_deletes(self, client):
         """Deleted, the next sweep would simply propose it again."""
-        import main
-        from app.database import get_db
+        from app import main
+        from app.core.database import get_db
 
         session = next(main.app.dependency_overrides[get_db]())
         user_id = session.query(models.User).first().id

@@ -19,10 +19,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app import models, schemas
-from app.database import get_db
-from app.dependencies import get_current_user, get_integration_configs
-from app.services import authoring, context_brief, report_sync, task_board
-from app.services.agent_settings import resolve_settings
+from app.core.database import get_db
+from app.core.dependencies import get_current_user, get_integration_configs
+from app.services.authoring import authoring
+from app.services.pipeline import context_brief, report_sync, task_board
+from app.services.pipeline.agent_settings import resolve_settings
 
 router = APIRouter()
 

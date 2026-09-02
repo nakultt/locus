@@ -19,8 +19,8 @@ from app.schemas import (
     ReviewFinding,
     ReviewPriority,
 )
-from app.services import pr_agent
-from app.services.security_scan import _extract_json_array, run_code_review
+from app.services.pipeline import pr_agent
+from app.services.pipeline.security_scan import _extract_json_array, run_code_review
 
 
 class FakeResponse:
@@ -66,8 +66,8 @@ class TestRunCodeReview:
            "description": "Slack asked for abc; the diff does not add it."}
         ]"""
 
-        with patch("app.services.security_scan.get_llm"), \
-             patch("app.services.security_scan.ChatPromptTemplate") as tpl:
+        with patch("app.services.pipeline.security_scan.get_llm"), \
+             patch("app.services.pipeline.security_scan.ChatPromptTemplate") as tpl:
             tpl.from_template.return_value.__or__ = lambda *_: fake_llm(payload)
             findings, error = await run_code_review("diff")
 
@@ -81,8 +81,8 @@ class TestRunCodeReview:
     async def test_unknown_priority_falls_back_to_p2(self):
         payload = '[{"priority": "urgent", "title": "X", "file_path": "a.py"}]'
 
-        with patch("app.services.security_scan.get_llm"), \
-             patch("app.services.security_scan.ChatPromptTemplate") as tpl:
+        with patch("app.services.pipeline.security_scan.get_llm"), \
+             patch("app.services.pipeline.security_scan.ChatPromptTemplate") as tpl:
             tpl.from_template.return_value.__or__ = lambda *_: fake_llm(payload)
             findings, error = await run_code_review("diff")
 
@@ -91,8 +91,8 @@ class TestRunCodeReview:
 
     @pytest.mark.asyncio
     async def test_clean_diff_returns_nothing(self):
-        with patch("app.services.security_scan.get_llm"), \
-             patch("app.services.security_scan.ChatPromptTemplate") as tpl:
+        with patch("app.services.pipeline.security_scan.get_llm"), \
+             patch("app.services.pipeline.security_scan.ChatPromptTemplate") as tpl:
             tpl.from_template.return_value.__or__ = lambda *_: fake_llm("[]")
             findings, error = await run_code_review("diff")
 
@@ -100,8 +100,8 @@ class TestRunCodeReview:
 
     @pytest.mark.asyncio
     async def test_unparseable_output_is_reported_not_raised(self):
-        with patch("app.services.security_scan.get_llm"), \
-             patch("app.services.security_scan.ChatPromptTemplate") as tpl:
+        with patch("app.services.pipeline.security_scan.get_llm"), \
+             patch("app.services.pipeline.security_scan.ChatPromptTemplate") as tpl:
             tpl.from_template.return_value.__or__ = lambda *_: fake_llm("no idea")
             findings, error = await run_code_review("diff")
 

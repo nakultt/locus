@@ -13,12 +13,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import models
-from app.services import authoring, task_board
+from app.services.authoring import authoring
+from app.services.pipeline import task_board
 
 
 @pytest.fixture
 def db(tmp_path):
-    from app.database import Base
+    from app.core.database import Base
 
     engine = create_engine(
         f"sqlite:///{tmp_path}/d.db", connect_args={"check_same_thread": False}
@@ -314,9 +315,8 @@ def _card(key: str, *, repo: str | None = "acme/api"):
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    import main
-    from app import schemas
-    from app.database import Base, get_db
+    from app import main, schemas
+    from app.core.database import Base, get_db
 
     engine = create_engine(
         f"sqlite:///{tmp_path}/a.db", connect_args={"check_same_thread": False}
@@ -369,8 +369,8 @@ class TestAuthorEndpoint:
         assert "unset" in response.json()["detail"]
 
     def test_a_handed_back_item_is_409_carrying_the_reason(self, client, monkeypatch):
-        import main
-        from app.database import get_db
+        from app import main
+        from app.core.database import get_db
 
         _go_autonomous(client)
         session = next(main.app.dependency_overrides[get_db]())
@@ -391,8 +391,8 @@ class TestAuthorEndpoint:
         assert response.status_code == 503
 
     def test_the_throughput_cap_is_429(self, client, monkeypatch):
-        import main
-        from app.database import get_db
+        from app import main
+        from app.core.database import get_db
 
         _go_autonomous(client)
         monkeypatch.setattr(authoring, "get_driver", lambda *a, **k: _StubDriver())

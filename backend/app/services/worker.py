@@ -21,7 +21,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import or_
 
 from app import models, schemas
-from app.database import SessionLocal
+from app.core.database import SessionLocal
 
 logger = logging.getLogger(__name__)
 
@@ -199,8 +199,8 @@ async def merge_gate_loop() -> None:
     since the approval webhook fires within a second of the click -- would sit
     open forever.
     """
-    from app.services.automerge import SWEEP_INTERVAL_SECONDS, sweep_once
-    from app.services.locks import MERGE_SWEEP_LOCK, advisory_lock
+    from app.core.locks import MERGE_SWEEP_LOCK, advisory_lock
+    from app.services.pipeline.automerge import SWEEP_INTERVAL_SECONDS, sweep_once
 
     logger.info("Auto-merge sweeper started")
 
@@ -234,9 +234,9 @@ async def qa_email_loop() -> None:
     looking for queued work, while this one should touch the Gmail API only
     every few minutes.
     """
-    from app.services.locks import QA_POLL_LOCK, advisory_lock
-    from app.services.qa_email_poller import POLL_INTERVAL_SECONDS as EMAIL_INTERVAL
-    from app.services.qa_email_poller import poll_once
+    from app.core.locks import QA_POLL_LOCK, advisory_lock
+    from app.services.pipeline.qa_email_poller import POLL_INTERVAL_SECONDS as EMAIL_INTERVAL
+    from app.services.pipeline.qa_email_poller import poll_once
 
     logger.info("QA email poller started")
 
@@ -275,8 +275,8 @@ async def calendar_agent_loop() -> None:
     visible to everyone invited, which is why the default is a plan waiting in
     the UI and `POST /schedule/apply` executing it unchanged.
     """
-    from app.services.calendar_agent import SWEEP_INTERVAL_MINUTES, sweep_once
-    from app.services.locks import CALENDAR_LOCK, advisory_lock
+    from app.core.locks import CALENDAR_LOCK, advisory_lock
+    from app.services.scheduling.calendar_agent import SWEEP_INTERVAL_MINUTES, sweep_once
 
     logger.info("Calendar agent started")
 

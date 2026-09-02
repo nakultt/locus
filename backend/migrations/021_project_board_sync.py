@@ -41,7 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from sqlalchemy import inspect, text  # noqa: E402
 
 from app import models  # noqa: E402,F401  (imported so create_all sees the tables)
-from app.database import Base, engine  # noqa: E402
+from app.core.database import Base, engine  # noqa: E402
 
 # (table, column, DDL type). The boolean is NOT NULL with a default matching the
 # model: the resolver treats a present row as a deliberate choice, so it must

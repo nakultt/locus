@@ -17,8 +17,8 @@ def client(tmp_path):
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 
-    import main
-    from app.database import Base, get_db
+    from app import main
+    from app.core.database import Base, get_db
 
     engine = create_engine(
         f"sqlite:///{tmp_path}/dl.db", connect_args={"check_same_thread": False}
@@ -101,8 +101,8 @@ class TestDeadlines:
         assert client.get("/api/schedule/deadlines").json() == []
 
     def test_deleting_someone_elses_deadline_is_a_404(self, client):
-        import main
-        from app.database import get_db
+        from app import main
+        from app.core.database import get_db
 
         created = client.post("/api/schedule/deadlines", json={
             "key": "MINE", "title": "Private", "due_at": future(),

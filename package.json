@@ -6,11 +6,11 @@
   "workspaces": ["frontend"],
   "scripts": {
     "dev": "bun scripts/dev.ts",
-    "dev:frontend": "bun --cwd frontend run dev",
-    "dev:backend": "cd backend && uv run uvicorn main:app --reload",
-    "build": "bun --cwd frontend run build",
-    "lint": "bun --cwd frontend run lint",
-    "typecheck": "bun --cwd frontend run typecheck",
+    "dev:frontend": "cd frontend && bun run dev",
+    "dev:backend": "cd backend && uv run main.py",
+    "build": "cd frontend && bun run build",
+    "lint": "cd frontend && bun run lint",
+    "typecheck": "cd frontend && bun run typecheck",
     "test:backend": "cd backend && uv run pytest tests/ -q",
     "lint:backend": "cd backend && uv run ruff check ."
   },

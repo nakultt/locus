@@ -26,7 +26,7 @@ type Service = {
 const SERVICES: Service[] = [
   {
     name: "backend",
-    cmd: ["uv", "run", "uvicorn", "main:app", "--reload", "--port", "8000"],
+    cmd: ["uv", "run", "main.py"],
     cwd: `${ROOT}backend`,
   },
   {
