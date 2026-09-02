@@ -18,7 +18,7 @@ import httpx
 import pytest
 
 from app import schemas
-from app.services import assigned
+from app.services.pipeline import assigned
 
 JIRA_CONFIG = {
     "api_key": "token",

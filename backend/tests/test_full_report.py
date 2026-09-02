@@ -14,7 +14,7 @@ that drops them reads as a clean run.
 from datetime import UTC, datetime, timedelta
 
 from app import models, schemas
-from app.services import full_report
+from app.services.pipeline import full_report
 
 
 def _result(**kw):

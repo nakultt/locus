@@ -24,8 +24,8 @@ def client(tmp_path):
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 
-    import main
-    from app.database import Base, get_db
+    from app import main
+    from app.core.database import Base, get_db
     from app.routers import webhooks
 
     engine = create_engine(
@@ -129,8 +129,8 @@ def test_unauthenticated_registration_is_rejected(client):
 
 def test_a_user_only_sees_their_own_repos(client):
     """Registrations are scoped to the owner."""
-    import main
-    from app.database import get_db
+    from app import main
+    from app.core.database import get_db
 
     client.post("/webhooks/repos", json={"repo": "acme/api"})
 

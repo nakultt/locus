@@ -16,13 +16,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import models, schemas
-from app.services import availability, interruption
-from app.services import scheduler as scheduler_module
+from app.services.scheduling import availability, interruption
+from app.services.scheduling import scheduler as scheduler_module
 
 
 @pytest.fixture
 def db(tmp_path):
-    from app.database import Base
+    from app.core.database import Base
 
     engine = create_engine(
         f"sqlite:///{tmp_path}/i.db", connect_args={"check_same_thread": False}
@@ -171,7 +171,7 @@ class TestUnreadableCalendar:
             raise RuntimeError("token expired")
 
         monkeypatch.setattr(
-            "app.dependencies.get_integration_configs", explode
+            "app.core.dependencies.get_integration_configs", explode
         )
 
         status = await availability.for_user(db, user, settings())
@@ -251,7 +251,7 @@ class TestImportance:
             async def ainvoke(self, prompt):
                 return Response()
 
-        monkeypatch.setattr("app.services.llm.get_llm", lambda **kw: LLM())
+        monkeypatch.setattr("app.services.chat.llm.get_llm", lambda **kw: LLM())
 
         importance, _ = await interruption.classify("hey")
         assert importance == "routine"
@@ -261,7 +261,7 @@ class TestImportance:
         def explode(**kwargs):
             raise RuntimeError("no model loaded")
 
-        monkeypatch.setattr("app.services.llm.get_llm", explode)
+        monkeypatch.setattr("app.services.chat.llm.get_llm", explode)
 
         importance, reason = await interruption.classify("hey")
         assert importance == "routine"

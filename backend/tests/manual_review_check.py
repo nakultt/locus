@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.services.security_scan import run_code_review  # noqa: E402
+from app.services.pipeline.security_scan import run_code_review  # noqa: E402
 
 # The actual diff from shadowyay/joyyy#1.
 DIFF = """--- a/test2.html

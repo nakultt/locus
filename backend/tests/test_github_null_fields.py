@@ -9,7 +9,7 @@ subscriptable" before the guard was added.
 
 from unittest.mock import patch
 
-from app.services import github, linear
+from app.services.integrations import github, linear
 
 
 class TestListReposDescription:

@@ -17,7 +17,8 @@ enough to pull a card back.
 
 import pytest
 
-from app.services import agent_settings, project_board
+from app.services.integrations import project_board
+from app.services.pipeline import agent_settings
 
 REPO = "acme/widget"
 TOKEN = "gho_test"

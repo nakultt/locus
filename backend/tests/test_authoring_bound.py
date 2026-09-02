@@ -12,13 +12,14 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import models, schemas
-from app.services import authoring, authoring_flow, review_flow
-from app.services.agent_settings import resolve_settings
+from app.services.authoring import authoring, authoring_flow
+from app.services.pipeline import review_flow
+from app.services.pipeline.agent_settings import resolve_settings
 
 
 @pytest.fixture
 def db(tmp_path):
-    from app.database import Base
+    from app.core.database import Base
 
     engine = create_engine(
         f"sqlite:///{tmp_path}/d.db", connect_args={"check_same_thread": False}
@@ -160,7 +161,7 @@ class TestHandBackPersistsFirst:
             raise RuntimeError("Slack is down")
 
         monkeypatch.setattr(
-            "app.services.review_flow.post_review_notification", explode
+            "app.services.pipeline.review_flow.post_review_notification", explode
         )
 
         await authoring_flow._hand_back(
@@ -186,7 +187,7 @@ class TestHandBackPersistsFirst:
             return True
 
         monkeypatch.setattr(
-            "app.services.review_flow.post_review_notification", capture
+            "app.services.pipeline.review_flow.post_review_notification", capture
         )
 
         for _ in range(2):
@@ -209,7 +210,7 @@ class TestHandBackPersistsFirst:
             return False
 
         monkeypatch.setattr(
-            "app.services.review_flow.post_review_notification", refuse
+            "app.services.pipeline.review_flow.post_review_notification", refuse
         )
 
         await authoring_flow._hand_back(
@@ -272,7 +273,7 @@ class TestMaybeRetry:
             return True
 
         monkeypatch.setattr(
-            "app.services.review_flow.post_review_notification", capture
+            "app.services.pipeline.review_flow.post_review_notification", capture
         )
         monkeypatch.setattr(authoring, "MAX_OPEN_AUTONOMOUS_PRS", 1)
         monkeypatch.setattr(authoring, "get_driver", lambda *a, **k: _Driver([]))
@@ -300,7 +301,7 @@ class TestMaybeRetry:
             return True
 
         monkeypatch.setattr(
-            "app.services.review_flow.post_review_notification", capture
+            "app.services.pipeline.review_flow.post_review_notification", capture
         )
         monkeypatch.setattr(authoring, "get_driver", lambda *a, **k: _Driver([]))
 

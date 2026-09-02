@@ -19,7 +19,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import models, schemas
-from app.services import issue_links, task_board
+from app.services.integrations import issue_links
+from app.services.pipeline import task_board
 
 REPO, OWNER = "acme/widget", 1
 KEY = f"{REPO}#42"
@@ -27,7 +28,7 @@ KEY = f"{REPO}#42"
 
 @pytest.fixture
 def db(tmp_path):
-    from app.database import Base
+    from app.core.database import Base
 
     engine = create_engine(
         f"sqlite:///{tmp_path}/t.db", connect_args={"check_same_thread": False}

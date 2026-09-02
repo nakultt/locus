@@ -18,14 +18,14 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import models, schemas
-from app.services import comms_log, worklist
+from app.services.pipeline import comms_log, worklist
 
 REPO, OWNER = "acme/widget", 1
 
 
 @pytest.fixture
 def db(tmp_path):
-    from app.database import Base
+    from app.core.database import Base
 
     engine = create_engine(
         f"sqlite:///{tmp_path}/w.db", connect_args={"check_same_thread": False}

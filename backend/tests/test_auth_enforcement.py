@@ -23,8 +23,8 @@ def app_client(tmp_path):
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 
-    import main
-    from app.database import Base, get_db
+    from app import main
+    from app.core.database import Base, get_db
 
     engine = create_engine(
         f"sqlite:///{tmp_path}/auth.db", connect_args={"check_same_thread": False}
@@ -166,7 +166,7 @@ class TestCredentialIsolation:
         cannot see each other's tokens. With the previous module-level dict,
         whichever task wrote last won for both.
         """
-        from app.services.github import _github_config, get_github_tools
+        from app.services.integrations.github import _github_config, get_github_tools
 
         async def act(token: str, delay: float) -> str:
             get_github_tools(token=token)
@@ -182,7 +182,7 @@ class TestCredentialIsolation:
         assert bob_token == "ghp_BOB"
 
     def test_unset_credentials_read_as_empty(self):
-        from app.services.credential_context import CredentialProxy
+        from app.core.credential_context import CredentialProxy
 
         proxy = CredentialProxy("test")
         assert proxy.get("anything") is None
@@ -191,7 +191,7 @@ class TestCredentialIsolation:
 
     def test_proxy_never_renders_values(self):
         """A leaked repr in a log would defeat encryption at rest."""
-        from app.services.credential_context import CredentialProxy
+        from app.core.credential_context import CredentialProxy
 
         proxy = CredentialProxy("test")
         proxy.set({"token": "ghp_supersecret"})
@@ -216,7 +216,7 @@ class TestRequiredSecrets:
         # process starts and both the repo root and backend/ hold a .env.
         with tempfile.TemporaryDirectory() as empty:
             return subprocess.run(
-                [sys.executable, "-c", "import app.security"],
+                [sys.executable, "-c", "import app.core.security"],
                 env=env,
                 capture_output=True,
                 text=True,

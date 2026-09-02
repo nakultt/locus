@@ -22,13 +22,14 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from app import crud, models
-from app.database import get_db
-from app.dependencies import get_integration_configs
-from app.services import availability as availability_service
-from app.services import comms_log, interruption, report_sync
-from app.services.agent_settings import resolve_settings
-from app.services.qa_feedback import handle_qa_reply
-from app.services.review_flow import post_review_notification
+from app.core.database import get_db
+from app.core.dependencies import get_integration_configs
+from app.services.pipeline import comms_log, report_sync
+from app.services.pipeline.agent_settings import resolve_settings
+from app.services.pipeline.qa_feedback import handle_qa_reply
+from app.services.pipeline.review_flow import post_review_notification
+from app.services.scheduling import availability as availability_service
+from app.services.scheduling import interruption
 
 logger = logging.getLogger(__name__)
 
@@ -373,8 +374,8 @@ def _free_slots(db, user, settings, availability, importance: str) -> list:
 
     try:
         from app.routers.schedule import events_from_raw
-        from app.services import calendar as calendar_service
-        from app.services.scheduler import find_free_slot
+        from app.services.integrations import calendar as calendar_service
+        from app.services.scheduling.scheduler import find_free_slot
 
         configs = get_integration_configs(db, user.id)
         if "calendar" not in configs:

@@ -17,14 +17,14 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import models, schemas
-from app.services import report_sync
+from app.services.pipeline import report_sync
 
 REPO, PR, OWNER = "acme/widget", 7, 1
 
 
 @pytest.fixture
 def db(tmp_path):
-    from app.database import Base
+    from app.core.database import Base
 
     engine = create_engine(
         f"sqlite:///{tmp_path}/r.db", connect_args={"check_same_thread": False}
@@ -104,7 +104,7 @@ class TestRefresh:
             return "https://docs.google.com/document/d/doc-abc/edit"
 
         monkeypatch.setattr(
-            "app.services.pr_agent.export_to_google_doc", fake_export
+            "app.services.pipeline.pr_agent.export_to_google_doc", fake_export
         )
 
         url = await report_sync.refresh(
@@ -130,7 +130,7 @@ class TestRefresh:
             return "u"
 
         monkeypatch.setattr(
-            "app.services.pr_agent.export_to_google_doc", fake_export
+            "app.services.pipeline.pr_agent.export_to_google_doc", fake_export
         )
 
         url = await report_sync.refresh(
@@ -154,7 +154,7 @@ class TestRefresh:
             raise RuntimeError("Docs is down")
 
         monkeypatch.setattr(
-            "app.services.pr_agent.export_to_google_doc", boom
+            "app.services.pipeline.pr_agent.export_to_google_doc", boom
         )
 
         url = await report_sync.refresh(
@@ -193,7 +193,7 @@ class TestRefresh:
             return "u"
 
         monkeypatch.setattr(
-            "app.services.pr_agent.export_to_google_doc", fake_export
+            "app.services.pipeline.pr_agent.export_to_google_doc", fake_export
         )
 
         url = await report_sync.refresh(
@@ -409,7 +409,7 @@ class TestEnsureForTicket:
             return "doc-new"
 
         monkeypatch.setattr(
-            "app.services.pr_agent.create_google_doc", fake_create
+            "app.services.pipeline.pr_agent.create_google_doc", fake_create
         )
 
         url = await report_sync.ensure_for_ticket(
@@ -438,7 +438,7 @@ class TestEnsureForTicket:
             return f"doc-{len(calls)}"
 
         monkeypatch.setattr(
-            "app.services.pr_agent.create_google_doc", fake_create
+            "app.services.pipeline.pr_agent.create_google_doc", fake_create
         )
         configs = {"docs": {"access_token": "t"}}
 
@@ -467,7 +467,7 @@ class TestEnsureForTicket:
             raise AssertionError("should not create a second document")
 
         monkeypatch.setattr(
-            "app.services.pr_agent.create_google_doc", fake_create
+            "app.services.pipeline.pr_agent.create_google_doc", fake_create
         )
 
         url = await report_sync.ensure_for_ticket(
@@ -498,7 +498,7 @@ class TestEnsureForTicket:
             raise RuntimeError("Google Docs token could not be refreshed")
 
         monkeypatch.setattr(
-            "app.services.pr_agent.create_google_doc", fake_create
+            "app.services.pipeline.pr_agent.create_google_doc", fake_create
         )
 
         assert await report_sync.ensure_for_ticket(
@@ -546,7 +546,7 @@ class TestTheRetryKeepsTheWholeHistory:
         db.commit()
 
     def test_the_first_attempts_messages_survive_the_retrys_render(self, db):
-        from app.services import comms_log
+        from app.services.pipeline import comms_log
 
         self._rejected_first_attempt(db)
 
@@ -561,7 +561,7 @@ class TestTheRetryKeepsTheWholeHistory:
         assert rejection.inherited is True
 
     def test_the_first_attempt_is_named_in_the_document(self, db):
-        from app.services import full_report, work_item
+        from app.services.pipeline import full_report, work_item
 
         self._rejected_first_attempt(db)
 
@@ -596,7 +596,7 @@ class TestTheRetryKeepsTheWholeHistory:
         assert found.document_id == "doc-shared"
 
     def test_a_pull_request_with_no_siblings_renders_no_such_section(self, db):
-        from app.services import full_report
+        from app.services.pipeline import full_report
 
         text = full_report.render(_result(), prior_reviews=[])
 

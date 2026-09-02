@@ -1,126 +1,39 @@
+#!/usr/bin/env python
 """
-Locus - Enterprise Integration Store
-FastAPI Backend Entry Point
+Run the whole backend: `uv run main.py` from `backend/`.
+
+The application itself lives in `app/main.py`, inside the package, alongside
+everything it imports. This file is only the launcher — it exists so there is
+one obvious command to start the backend, rather than a uvicorn invocation with
+a module path people have to remember correctly.
+
+The four background loops (`worker_loop`, `qa_email_loop`, `merge_gate_loop`,
+`calendar_agent_loop`) start with the app's lifespan, so this is the full
+backend and not just the HTTP surface.
+
+`uvicorn` is given the import string rather than the imported app object:
+`reload=True` needs a path it can re-import in a fresh process, and passing the
+object silently disables reloading.
 """
 
-import asyncio
 import os
-from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-
-from app.database import Base, engine
-from app.routers import (
-    auth,
-    chat,
-    conversations,
-    google_oauth,
-    linear_oauth,
-    schedule,
-    settings,
-    slack_events,
-    tasks,
-    webhooks,
-)
-from app.services.worker import (
-    calendar_agent_loop,
-    merge_gate_loop,
-    qa_email_loop,
-    worker_loop,
-)
+import uvicorn
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Create tables and start the background PR worker."""
-    Base.metadata.create_all(bind=engine)
+def main() -> None:
+    # Defaults match the frontend's NEXT_PUBLIC_API_URL and the CORS regex in
+    # app/main.py. PORT is read because that is what Render and Heroku set.
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "8000"))
 
-    tasks = [
-        asyncio.create_task(worker_loop()),
-        asyncio.create_task(qa_email_loop()),
-        asyncio.create_task(merge_gate_loop()),
-        asyncio.create_task(calendar_agent_loop()),
-    ]
-    try:
-        yield
-    finally:
-        for task in tasks:
-            task.cancel()
-        for task in tasks:
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+    # Reload is a development convenience and is wrong in production, where it
+    # would run a file watcher over the whole tree and restart the background
+    # loops on any write. Off unless asked for.
+    reload = os.getenv("RELOAD", "true").lower() in {"1", "true", "yes"}
 
-
-app = FastAPI(
-    title="Locus",
-    description="Enterprise Integration Store - Connect your tools, command with chat",
-    version="1.0.0",
-    lifespan=lifespan,
-)
-
-# CORS Configuration
-# NOTE:
-# - When allow_credentials=True, we CANNOT use allow_origins=["*"].
-# - Browsers will reject such responses and FastAPI/Starlette will raise at startup.
-#
-# Production origins are listed explicitly; extra ones can be added via
-# CORS_ORIGINS (comma-separated).
-allowed_origins = [
-    "https://locus-gamma.vercel.app",
-]
-
-_extra_origins = os.getenv("CORS_ORIGINS", "")
-allowed_origins.extend(
-    origin.strip() for origin in _extra_origins.split(",") if origin.strip()
-)
-
-# Any localhost port, for development. Vite picks the next free port when its
-# default is taken, so a fixed list means CORS silently breaks whenever that
-# happens. A regex covers every dev port without loosening production, which
-# still only matches the explicit origins above.
-LOCALHOST_ORIGIN_PATTERN = r"http://(localhost|127\.0\.0\.1):\d+"
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_origin_regex=LOCALHOST_ORIGIN_PATTERN,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Include Routers
-app.include_router(auth.router, prefix="/auth", tags=["Authentication"])
-app.include_router(google_oauth.router, prefix="/auth", tags=["Google OAuth"])
-app.include_router(linear_oauth.router, prefix="/auth", tags=["Linear OAuth"])
-app.include_router(chat.router, prefix="/api", tags=["Chat"])
-app.include_router(conversations.router, prefix="/api", tags=["Conversations"])
-app.include_router(settings.router, prefix="/api/settings", tags=["Settings"])
-app.include_router(schedule.router, prefix="/api/schedule", tags=["Scheduler"])
-app.include_router(tasks.router, prefix="/tasks", tags=["Tasks"])
-app.include_router(webhooks.router, prefix="/webhooks", tags=["Webhooks"])
-app.include_router(slack_events.router, prefix="/webhooks", tags=["Webhooks"])
-
-
-@app.get("/", tags=["Health"])
-async def health_check() -> dict[str, str]:
-    """Health check endpoint."""
-    return {"status": "healthy", "service": "Locus API"}
-
-
-@app.get("/health", tags=["Health"])
-async def detailed_health() -> dict[str, str]:
-    """Detailed health check for Render."""
-    return {
-        "status": "healthy",
-        "service": "Locus API",
-        "version": "1.0.0",
-    }
+    uvicorn.run("app.main:app", host=host, port=port, reload=reload)
 
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    main()

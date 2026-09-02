@@ -19,13 +19,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import models
-from app.services import task_board
-from app.services.agent_settings import normalize_mode, resolve_settings
+from app.services.pipeline import task_board
+from app.services.pipeline.agent_settings import normalize_mode, resolve_settings
 
 
 @pytest.fixture
 def db(tmp_path):
-    from app.database import Base
+    from app.core.database import Base
 
     engine = create_engine(
         f"sqlite:///{tmp_path}/d.db", connect_args={"check_same_thread": False}
@@ -271,9 +271,8 @@ def _card(key: str, title: str = "A ticket"):
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    import main
-    from app import schemas
-    from app.database import Base, get_db
+    from app import main, schemas
+    from app.core.database import Base, get_db
 
     engine = create_engine(
         f"sqlite:///{tmp_path}/api.db", connect_args={"check_same_thread": False}
@@ -372,8 +371,8 @@ class TestModeApi:
             json={"authoring_mode": "autonomous"},
         )
 
-        import main
-        from app.database import get_db
+        from app import main
+        from app.core.database import get_db
 
         session = next(main.app.dependency_overrides[get_db]())
         row = session.query(models.WorkItemSettings).first()
