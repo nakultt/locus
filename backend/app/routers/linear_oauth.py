@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app import crud
 from app.database import get_db
+from app.frontend_links import integrations_url
 
 router = APIRouter()
 
@@ -22,7 +23,6 @@ router = APIRouter()
 LINEAR_CLIENT_ID = os.getenv("LINEAR_CLIENT_ID", "")
 LINEAR_CLIENT_SECRET = os.getenv("LINEAR_CLIENT_SECRET", "")
 LINEAR_REDIRECT_URI = os.getenv("LINEAR_REDIRECT_URI", "http://localhost:8000/auth/linear/callback")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
 # OAuth URLs
 LINEAR_AUTH_URL = "https://linear.app/oauth/authorize"
@@ -98,18 +98,18 @@ async def linear_oauth_callback(
     # Handle errors from Linear
     if error:
         return RedirectResponse(
-            url=f"{FRONTEND_URL}/integrations/integrations-page?error={error}"
+            url=integrations_url(error=error)
         )
     
     if not code or not state:
         return RedirectResponse(
-            url=f"{FRONTEND_URL}/integrations/integrations-page?error=missing_params"
+            url=integrations_url(error="missing_params")
         )
     
     # Validate state
     if state not in _oauth_states:
         return RedirectResponse(
-            url=f"{FRONTEND_URL}/integrations/integrations-page?error=invalid_state"
+            url=integrations_url(error="invalid_state")
         )
     
     state_data = _oauth_states.pop(state)
@@ -119,7 +119,7 @@ async def linear_oauth_callback(
     created_at = datetime.fromisoformat(state_data["created_at"])
     if datetime.utcnow() - created_at > timedelta(minutes=10):
         return RedirectResponse(
-            url=f"{FRONTEND_URL}/integrations/integrations-page?error=state_expired"
+            url=integrations_url(error="state_expired")
         )
     
     # Exchange code for tokens
@@ -142,7 +142,7 @@ async def linear_oauth_callback(
             if response.status_code != 200:
                 error_detail = response.json().get("error_description", "Token exchange failed")
                 return RedirectResponse(
-                    url=f"{FRONTEND_URL}/integrations/integrations-page?error={error_detail}"
+                    url=integrations_url(error=error_detail)
                 )
             
             tokens = response.json()
@@ -150,7 +150,7 @@ async def linear_oauth_callback(
     except Exception as e:
         print(f"Linear OAuth error: {e}")
         return RedirectResponse(
-            url=f"{FRONTEND_URL}/integrations/integrations-page?error=token_exchange_failed"
+            url=integrations_url(error="token_exchange_failed")
         )
     
     # Store tokens as credentials
@@ -166,7 +166,7 @@ async def linear_oauth_callback(
     user = crud.get_user_by_id(db, user_id)
     if not user:
         return RedirectResponse(
-            url=f"{FRONTEND_URL}/integrations/integrations-page?error=user_not_found"
+            url=integrations_url(error="user_not_found")
         )
     
     # Store Linear integration
@@ -188,12 +188,12 @@ async def linear_oauth_callback(
     except Exception as e:
         print(f"Error storing Linear integration: {e}")
         return RedirectResponse(
-            url=f"{FRONTEND_URL}/integrations/integrations-page?error=storage_failed"
+            url=integrations_url(error="storage_failed")
         )
     
     # Redirect back to frontend with success
     return RedirectResponse(
-        url=f"{FRONTEND_URL}/integrations/integrations-page?success=linear_connected&service=linear"
+        url=integrations_url(success="linear_connected", service="linear")
     )
 
 

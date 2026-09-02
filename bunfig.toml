@@ -1,0 +1,21 @@
+# Bun configuration for the Locus workspace.
+#
+# Lives at the repo root because `workspaces: ["frontend"]` in package.json
+# makes the root lockfile authoritative. A second bunfig inside frontend/ would
+# be read only when Bun is invoked from that directory, so the two would apply
+# different install settings depending on where you stood.
+
+[install]
+# Reproducible installs: resolve strictly from bun.lock, and fail rather than
+# silently re-resolving when package.json and the lockfile disagree. CI sets
+# `--frozen-lockfile` explicitly; this makes local installs behave the same.
+exact = true
+
+[install.cache]
+disable = false
+
+[test]
+# `bun test` is the runner for anything added under frontend/src/**/*.test.ts.
+# There are no frontend tests yet — `bun run build` (which type-checks) is the
+# gate.
+root = "./frontend/src"

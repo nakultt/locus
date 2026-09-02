@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app import crud
 from app.database import get_db
+from app.frontend_links import integrations_url
 
 router = APIRouter()
 
@@ -22,7 +23,6 @@ router = APIRouter()
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8000/auth/google/callback")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
 # OAuth URLs
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -150,18 +150,18 @@ async def google_oauth_callback(
     # Handle errors from Google
     if error:
         return RedirectResponse(
-            url=f"{FRONTEND_URL}/integrations/integrations-page?error={error}"
+            url=integrations_url(error=error)
         )
     
     if not code or not state:
         return RedirectResponse(
-            url=f"{FRONTEND_URL}/integrations/integrations-page?error=missing_params"
+            url=integrations_url(error="missing_params")
         )
     
     # Validate state
     if state not in _oauth_states:
         return RedirectResponse(
-            url=f"{FRONTEND_URL}/integrations/integrations-page?error=invalid_state"
+            url=integrations_url(error="invalid_state")
         )
     
     state_data = _oauth_states.pop(state)
@@ -172,7 +172,7 @@ async def google_oauth_callback(
     created_at = datetime.fromisoformat(state_data["created_at"])
     if datetime.utcnow() - created_at > timedelta(minutes=10):
         return RedirectResponse(
-            url=f"{FRONTEND_URL}/integrations/integrations-page?error=state_expired"
+            url=integrations_url(error="state_expired")
         )
     
     # Exchange code for tokens
@@ -192,14 +192,14 @@ async def google_oauth_callback(
             if response.status_code != 200:
                 error_detail = response.json().get("error_description", "Token exchange failed")
                 return RedirectResponse(
-                    url=f"{FRONTEND_URL}/integrations/integrations-page?error={error_detail}"
+                    url=integrations_url(error=error_detail)
                 )
             
             tokens = response.json()
             
     except Exception:
         return RedirectResponse(
-            url=f"{FRONTEND_URL}/integrations/integrations-page?error=token_exchange_failed"
+            url=integrations_url(error="token_exchange_failed")
         )
     
     # Store tokens as credentials
@@ -216,7 +216,7 @@ async def google_oauth_callback(
     user = crud.get_user_by_id(db, user_id)
     if not user:
         return RedirectResponse(
-            url=f"{FRONTEND_URL}/integrations/integrations-page?error=user_not_found"
+            url=integrations_url(error="user_not_found")
         )
     
     # Store credentials for all Google services if user requested "google"
@@ -244,7 +244,7 @@ async def google_oauth_callback(
     
     # Redirect back to frontend with success
     return RedirectResponse(
-        url=f"{FRONTEND_URL}/integrations/integrations-page?success=google_connected&service={service}"
+        url=integrations_url(success="google_connected", service=service)
     )
 
 
