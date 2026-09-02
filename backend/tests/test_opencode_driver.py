@@ -15,9 +15,9 @@ from pathlib import Path
 
 import pytest
 
-from app.services import opencode_driver as driver
-from app.services import workspace as ws
-from app.services.authoring import AuthoringRequest
+from app.services.authoring import opencode_driver as driver
+from app.services.authoring import workspace as ws
+from app.services.authoring.authoring import AuthoringRequest
 
 
 def git(args: list[str], cwd: Path) -> str:
@@ -467,7 +467,7 @@ def opened_pr(number: int = 42):
 
 @pytest.fixture
 def github(monkeypatch):
-    from app.services import github_pr
+    from app.services.integrations import github_pr
 
     async def default_branch(token, repo):
         return "main"

@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from app.services import google_auth
+from app.services.integrations import google_auth
 
 
 def _creds(*, age_seconds: int = 0, lifetime: int = 3600, refresh="r"):

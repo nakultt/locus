@@ -25,30 +25,53 @@ API and is unproven. Measure autonomous mode on real tickets before promising it
 `feature/from-py` exists and has historically carried the work, but the two branches are now
 identical. Treat `main` as authoritative.
 
+## Layout
+
+Two stacks, one per directory, and nothing belonging to either at the root:
+
+```
+backend/    FastAPI, dependencies managed with uv
+frontend/   Next.js (App Router), dependencies managed with Bun
+scripts/    Bun scripts that span both halves
+```
+
+The root `package.json` declares `frontend` as a Bun workspace, so the lockfile
+(`bun.lock`) and `bunfig.toml` live at the root and `bun install` is run from there. A second
+lockfile inside `frontend/` would drift from it.
+
 ## Commands
+
+Everything at once, from the repo root — the two halves are useless apart, and starting only
+one produces a UI that loads and then reports every request as a network error:
+
+```bash
+bun install     # once, from the root; installs the frontend workspace
+bun run dev     # scripts/dev.ts: uv run main.py + next dev; either dying takes both down
+```
 
 Backend (from `backend/`, dependencies managed with [uv](https://docs.astral.sh/uv/)):
 
 ```bash
 uv sync --extra security          # --extra security installs Semgrep
-uv run uvicorn main:app --reload
+uv run main.py                    # the whole backend: HTTP surface + the four loops
 uv run pytest tests/ -q
 uv run pytest tests/test_linking.py -q          # single file
 uv run pytest tests/test_linking.py::test_name  # single test
 uv run ruff check .
 ```
 
-Frontend (from the repo root):
+Frontend (from `frontend/`, dependencies managed with [Bun](https://bun.sh)):
 
 ```bash
-npm install
-npm run dev
-npm run build   # tsc -b && vite build
-npm run lint
+bun run dev        # bun --bun next dev --turbopack
+bun run build      # next build — type-checks and lints before bundling
+bun run lint
+bun run typecheck  # tsc --noEmit, without a build
 ```
 
-There is no frontend test runner. `npm run build` is the check — it type-checks via `tsc -b`
-before bundling.
+There is no frontend test runner. `bun run build` is the check — Next type-checks and lints
+as part of it, so a type error or a lint error fails the build rather than reaching a page.
+`bun test` is configured (rooted at `frontend/src`) for when tests are added.
 
 `SECRET_KEY` and `ENCRYPTION_KEY` in `backend/.env` are mandatory; the app refuses to start
 without them. `ENCRYPTION_KEY` must never change once set — rotating it makes every stored
@@ -56,11 +79,76 @@ credential permanently undecryptable.
 
 ## Architecture
 
-React SPA (Vite) → FastAPI backend → local OpenAI-compatible model server. PostgreSQL holds
+Next.js App Router (client-rendered) → FastAPI backend → local OpenAI-compatible model
+server. PostgreSQL holds
 users, conversations, PR jobs, and Fernet-encrypted integration credentials. See README.md
 for the full diagram, API table, and per-integration setup.
 
-**Inference is local and loopback-bound.** `app/services/llm.py` targets `MOE_BASE_URL`
+### Where things live
+
+`backend/app/` is grouped by what a module is for. It was 60 flat modules under `services/`,
+which is where you look for something you cannot name:
+
+```
+main.py                 launcher: `uv run main.py` starts the whole backend
+app/main.py             the FastAPI app — uvicorn target is app.main:app
+app/core/               infrastructure: database, security, dependencies, locks,
+                        datetimes, credential_context, frontend_links
+app/models.py           SQLAlchemy models
+app/schemas.py          Pydantic schemas
+app/crud.py
+app/routers/            HTTP surface
+app/services/
+    integrations/       third-party API clients (GitHub, Jira, Slack, Google, Linear…)
+    pipeline/           analysis → review round trip → QA → reporting
+    authoring/          autonomous code writing (driver, worktree checks, bounds)
+    scheduling/         the calendar agent
+    chat/               the chat agent, its planner and the LLM client
+    worker.py           the four background loops — starts everything above it
+    integration_health.py   written by all of them
+```
+
+`worker.py` and `integration_health.py` stay at the top of `services/` deliberately: one
+starts every group below it and the other is written by all of them, so filing either under a
+group would misrepresent what depends on what.
+
+Note `app/services/authoring/authoring.py` — the package and one of its modules share a name.
+`from app.services.authoring import authoring` is the module; `from
+app.services.authoring.authoring import AuthoringRequest` is a symbol inside it. Both are
+valid and they mean different things.
+
+`frontend/src/` is grouped the same way — by feature, not by kind:
+
+```
+src/app/                App Router. Route files only; each one renders a view.
+                        (app)/ is a route group — it wraps the signed-in routes
+                        in the auth guard and shell without appearing in any URL.
+src/components/ui/      shared primitives
+src/components/layout/  the application shell
+src/features/<name>/    everything belonging to one feature
+src/lib/                api client, datetime, utils
+```
+
+### What the move to Next changed
+
+Three things did not survive a like-for-like port, and each fails silently if reverted:
+
+**The theme is resolved by an inline script in `<head>`, not an effect.** It ran as a
+top-level statement in `main.tsx`, before React mounted. A `useEffect` runs after hydration —
+long enough to paint light and snap to dark on every load. `suppressHydrationWarning` on
+`<html>` is required because that script edits the element the server rendered.
+
+**`AuthContext` reads storage on mount, behind `isHydrated`, not in a `useState`
+initializer.** Next runs the initializer on the server, where there is no storage, so the
+first client render disagreed with the server's markup and the guard bounced signed-in users
+to `/login`. The same flag holds the persist effect back — without it that effect fires with
+the pre-hydration `null` and erases the session being restored.
+
+**`globals.css` names its source tree with `@source`.** The Vite plugin took its root from the
+project directory; the PostCSS plugin does not. Without it every utility is pruned and the app
+renders unstyled.
+
+**Inference is local and loopback-bound.** `app/services/chat/llm.py` targets `MOE_BASE_URL`
 (default `http://127.0.0.1:8081/v1`). The backend must run on the machine with the GPU — a
 remotely hosted backend cannot reach that address. The server holds one model at a time, so
 chat returns `503` with a remediation hint when none is loaded rather than an opaque
@@ -72,11 +160,11 @@ was removed in 1.0. Task events are emitted from the graph stream, and a tool th
 becomes a failed task rather than an aborted run, so a request touching five integrations
 keeps the four that succeeded. `tests/test_agent_migration.py` pins this message contract.
 
-**Four background loops** start in `main.py`'s lifespan: `worker_loop` (PR analysis jobs),
+**Four background loops** start in `app/main.py`'s lifespan: `worker_loop` (PR analysis jobs),
 `qa_email_loop` (Gmail polling for QA replies), `merge_gate_loop` (re-evaluating held merges) and
 `calendar_agent_loop` (sweeping enabled calendars for conflicts). Jobs are persisted rather than
 held in `BackgroundTasks`, which would lose queued work on restart. Each sweep takes a Postgres
-advisory lock (`app/services/locks.py`), because a sweep matches rows rather than claiming them and
+advisory lock (`app/core/locks.py`), because a sweep matches rows rather than claiming them and
 every one of these loops ends in a message to a person.
 
 ### Invariants worth knowing before you change things
@@ -85,7 +173,7 @@ These are deliberate and each has a failure mode behind it. Preserve them.
 
 **Credentials live in ContextVars, never module globals.** Tool objects are module
 singletons, so a module-level credential dict let concurrent users overwrite each other's
-tokens — one user's agent could post to another user's Slack. `app/services/credential_context.py`
+tokens — one user's agent could post to another user's Slack. `app/core/credential_context.py`
 rebinds each service's module-level name to a `CredentialProxy` over a `ContextVar`. Tool
 bodies still call `_github_config.get("token")` unchanged. When adding an integration, follow
 the existing `get_<service>_tools()` factory pattern rather than reading credentials at import
@@ -275,7 +363,7 @@ holding work open is only safe for a team whose QA loop replies. `tests/test_qa_
 workflows have exactly one useful trigger — an item closing — so a ticket sat in `Todo`
 through the branch, the review round trip and the QA thread, and then jumped to `Done`. The
 half the board could never show is the half this pipeline automates.
-`app/services/project_board.py` writes the card. A board's columns are not columns: they are
+`app/services/integrations/project_board.py` writes the card. A board's columns are not columns: they are
 the options of a single-select field named `Status`, so the project, the field and its options
 are all discovered from the issue at call time rather than configured — renaming a column
 cannot break a stored id, because none is stored. Note `options` takes no `first:` argument
@@ -321,7 +409,7 @@ reviewer has already reached. A review event runs no analysis of its own, so it 
 completed run's report via `_latest_doc_url`. `tests/test_report_delivery.py` pins both halves.
 
 **PR agent settings resolve in exactly one place.** Every setting exists both on the repo
-registration and on the account-wide defaults. `app/services/agent_settings.py` is the sole
+registration and on the account-wide defaults. `app/services/pipeline/agent_settings.py` is the sole
 arbiter of which wins — a repo value that is set wins, blank or unset falls back — so the
 worker, the API, and the UI preview cannot disagree about what a run will do. Read effective
 settings through it rather than reaching into either source directly. Defaults are stored one
@@ -335,7 +423,7 @@ keyed to a pull request. `InterruptionEvent` is a second table rather than an ex
 somebody pinged you in a channel, which belongs to no pull request — so reusing it would mean
 inventing a sentinel repo that the next reader takes for real. `communication_events` stores what was searched
 for, what came back, and what was actually sent, per PR, across both loops.
-`app/services/comms_log.py` is the only writer. Two rules there: logging never fails the work
+`app/services/pipeline/comms_log.py` is the only writer. Two rules there: logging never fails the work
 it describes (every helper swallows its own errors — a message that was genuinely sent must
 not be reported as failed because the record could not be written), and search *queries* are
 stored even when nothing matched, because a search that found nothing is otherwise
@@ -509,7 +597,7 @@ conversations, and a task stuck on round five is the signal worth surfacing.
 **The review loop accumulates state GitHub does not keep.** GitHub reports each review as an
 isolated event; nothing in any payload says "this PR is on its third round". `PRReview` holds
 the current state and round number, `PRReviewRound` is the append-only history, and
-`app/services/review_flow.py` is the only thing that writes either. Three rules there are
+`app/services/pipeline/review_flow.py` is the only thing that writes either. Three rules there are
 deliberate:
 
 - **A push to a pull request someone has already looked at goes back to the reviewer.** All
@@ -598,11 +686,11 @@ refused, so a misconfigured status cannot drag a team's board backwards. Unrecog
 pass through, since custom workflows are common.
 
 **Timestamps are stored as UTC instants and displayed in IST.** The two halves are
-separate and both matter. Postgres sessions are pinned to UTC in `app/database.py` rather
+separate and both matter. Postgres sessions are pinned to UTC in `app/core/database.py` rather
 than inheriting the server's zone — a session that inherits it serialized the same row as
 `+05:30` on a developer's machine and `+00:00` in production, both naming the same instant,
 with the difference invisible until something compared or cached them. Display is applied
-once, in `src/lib/datetime.ts`, which passes an explicit `timeZone` so every viewer reads the
+once, in `frontend/src/lib/datetime.ts`, which passes an explicit `timeZone` so every viewer reads the
 same wall clock regardless of where their browser thinks it is. `toLocaleString(undefined, …)`
 is what that replaced: these are shared events people discuss with each other, and "the build
 broke at 3" has to mean one moment. `parseInstant` reads a timestamp with no offset as UTC,
@@ -726,11 +814,16 @@ per-file ignores for bare excepts (`E722`) — a blanket "never let a third-part
 agent" guard that predates the config. Don't add new bare excepts in other modules to match;
 the existing ones are grandfathered, not a pattern to follow.
 
-`vite` is aliased to `rolldown-vite` through `package.json` `overrides`. Frontend UI follows
-shadcn conventions (`components.json`) over Radix primitives with Tailwind v4.
+Frontend UI follows shadcn conventions over Radix primitives with Tailwind v4. `components.json`
+is gone with the Vite build — the shadcn CLI configured for a Vite project would write to paths
+that no longer exist, so primitives under `src/components/ui/` are maintained by hand.
 
-CORS allows any localhost port by regex, because Vite picks the next free port when its
-default is taken and a fixed list breaks silently when that happens. Production origins stay
+Every component is a client component. There is no server-side data fetching: the session is a
+JWT in browser storage and the API is a separate origin, so a page that tried to render on the
+server would have neither a token nor a reachable backend.
+
+CORS allows any localhost port by regex, because Next picks the next free port when 3000
+is taken and a fixed list breaks silently when that happens. Production origins stay
 explicit.
 
 `.gitattributes` declares `*.svg text`, so SVGs must be committed with LF. A CRLF-stored blob
@@ -743,13 +836,13 @@ gets rewritten on every checkout and shows as modified in a fresh clone.
 - Tests do not cover live calls to GitHub, Jira, or Slack. Response-shape handling for those
   is written against the documented APIs.
 - Multi-instance deployment is guarded but not proven. The job claim is an atomic conditional
-  UPDATE, and the two sweeps take Postgres advisory locks (`app/services/locks.py`), so
+  UPDATE, and the two sweeps take Postgres advisory locks (`app/core/locks.py`), so
   duplicate outward messages are prevented by construction rather than by there being one
   process. It has not been run multi-instance in anger.
 - Gitleaks is optional and not bundled, so committed-secret detection is skipped when it is
   absent.
 
 **README.md's "Known limitations" is stale on one point:** it says repo registration is
-API-only with no UI. `src/pages/tasks.tsx` now calls `registerRepo`/`unregisterRepo`, so
+API-only with no UI. `frontend/src/features/tasks/tasks-view.tsx` now calls `registerRepo`/`unregisterRepo`, so
 that gap is closed. Verify against the code before repeating a limitation from either
 document.

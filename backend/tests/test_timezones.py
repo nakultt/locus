@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from app.services import datetimes
+from app.core import datetimes
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -111,7 +111,7 @@ class TestMeetUsesTheUsersZone:
     """
 
     def test_a_meeting_is_booked_in_ist_not_utc(self, monkeypatch):
-        from app.services import google_meet
+        from app.services.integrations import google_meet
 
         google_meet._meet_config.set({"timezone": "Asia/Kolkata"})
 
@@ -122,7 +122,7 @@ class TestMeetUsesTheUsersZone:
 
     def test_the_payload_declares_the_real_zone(self, monkeypatch):
         """It used to hardcode "UTC" onto a time that was not UTC."""
-        from app.services import google_meet
+        from app.services.integrations import google_meet
 
         google_meet._meet_config.set({"timezone": "Asia/Kolkata"})
 
@@ -135,7 +135,7 @@ class TestMeetUsesTheUsersZone:
 
     def test_an_unparseable_time_falls_back_in_the_users_zone(self):
         """The fallback must not silently land at the server's offset."""
-        from app.services import google_meet
+        from app.services.integrations import google_meet
 
         google_meet._meet_config.set({"timezone": "Asia/Kolkata"})
 
@@ -156,7 +156,7 @@ class TestStoredTimestampsAreInstants:
         from sqlalchemy.orm import sessionmaker
 
         from app import models
-        from app.database import Base
+        from app.core.database import Base
 
         engine = create_engine(f"sqlite:///{tmp_path}/tz.db")
         Base.metadata.create_all(bind=engine)

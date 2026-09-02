@@ -20,30 +20,30 @@ from urllib.parse import parse_qs
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
-from app import crud, models, schemas, security
-from app.database import SessionLocal, get_db
-from app.dependencies import get_current_user, get_integration_configs
-from app.services import (
-    authoring_flow,
+from app import crud, models, schemas
+from app.core import security
+from app.core.database import SessionLocal, get_db
+from app.core.dependencies import get_current_user, get_integration_configs
+from app.services.authoring import authoring_flow
+from app.services.integrations import github_pr, project_board
+from app.services.integrations.google_docs_context import extract_document_id
+from app.services.pipeline import (
     automerge,
     comms_log,
     context_brief,
     finding_diff,
-    github_pr,
     presets,
-    project_board,
     report_sync,
     review_flow,
     suppression,
     work_item,
     worklist,
 )
-from app.services.agent_settings import resolve_settings
-from app.services.capabilities import build_readiness
-from app.services.google_docs_context import extract_document_id
-from app.services.merge_actions import run_merge_actions
-from app.services.pr_agent import analyze_pull_request
-from app.services.security_scan import gitleaks_available, semgrep_available
+from app.services.pipeline.agent_settings import resolve_settings
+from app.services.pipeline.capabilities import build_readiness
+from app.services.pipeline.merge_actions import run_merge_actions
+from app.services.pipeline.pr_agent import analyze_pull_request
+from app.services.pipeline.security_scan import gitleaks_available, semgrep_available
 
 logger = logging.getLogger(__name__)
 

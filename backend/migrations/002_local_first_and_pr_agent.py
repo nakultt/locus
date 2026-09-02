@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from sqlalchemy import inspect, text  # noqa: E402
 
 from app import models  # noqa: E402,F401  (imported so create_all sees the tables)
-from app.database import Base, engine  # noqa: E402
+from app.core.database import Base, engine  # noqa: E402
 
 
 def column_exists(table: str, column: str) -> bool:

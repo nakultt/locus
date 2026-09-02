@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.services.merge_actions import post_qa_thread
+from app.services.pipeline.merge_actions import post_qa_thread
 
 
 class FakeResponse:
@@ -51,7 +51,7 @@ class TestPostQaThread:
         config = {"credentials": {"bot_token": "xoxb-x"}}
         payload = {"ok": True, "ts": "1786638974.393459", "channel": "C09WEB123"}
 
-        with patch("app.services.merge_actions.httpx.AsyncClient",
+        with patch("app.services.pipeline.merge_actions.httpx.AsyncClient",
                    return_value=fake_client(payload)):
             ts, channel_id, text = await post_qa_thread(
                 config, "#web", result, "brief"
@@ -68,7 +68,7 @@ class TestPostQaThread:
         """Callers unpack three values; a failure must not raise on unpack."""
         config = {"credentials": {"bot_token": "xoxb-x"}}
 
-        with patch("app.services.merge_actions.httpx.AsyncClient",
+        with patch("app.services.pipeline.merge_actions.httpx.AsyncClient",
                    return_value=fake_client({"ok": False, "error": "not_in_channel"})):
             ts, channel_id, text = await post_qa_thread(config, "#web", result, "b")
 
@@ -94,7 +94,7 @@ class TestReplyMatching:
         from sqlalchemy.orm import sessionmaker
 
         from app import models
-        from app.database import Base
+        from app.core.database import Base
 
         engine = create_engine(
             f"sqlite:///{tmp_path}/qa.db", connect_args={"check_same_thread": False}

@@ -10,8 +10,7 @@ bookings, nothing outside working hours, and hard-fixed events left alone.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from app.schemas import EventClass, ScheduledEvent
-from app.services.datetimes import (
+from app.core.datetimes import (
     is_workday,
     next_working_slot,
     parse_datetime,
@@ -20,7 +19,8 @@ from app.services.datetimes import (
     to_google_datetime,
     within_working_hours,
 )
-from app.services.scheduler import (
+from app.schemas import EventClass, ScheduledEvent
+from app.services.scheduling.scheduler import (
     SchedulingContext,
     classify_event,
     find_conflicts,

@@ -14,8 +14,8 @@ learns to skim it.
 """
 
 from app import models, schemas
-from app.services.merge_actions import _qa_email_text
-from app.services.review_flow import format_review_notification
+from app.services.pipeline.merge_actions import _qa_email_text
+from app.services.pipeline.review_flow import format_review_notification
 
 
 def _result(doc_url: str | None = None) -> schemas.PRAnalysisResult:
@@ -65,7 +65,7 @@ class TestQANotifications:
     def test_slack_post_carries_the_report_link(self):
         import asyncio
 
-        from app.services.merge_actions import post_qa_thread
+        from app.services.pipeline.merge_actions import post_qa_thread
 
         # No bot token, so it returns without posting -- the text is still
         # built and returned, which is the part under test.
@@ -78,7 +78,7 @@ class TestQANotifications:
     def test_slack_post_omits_the_link_without_a_report(self):
         import asyncio
 
-        from app.services.merge_actions import post_qa_thread
+        from app.services.pipeline.merge_actions import post_qa_thread
 
         _, _, text = asyncio.run(post_qa_thread({}, "#qa", _result(), "Check"))
 

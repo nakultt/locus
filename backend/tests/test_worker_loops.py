@@ -124,9 +124,9 @@ class TestSweepLoopsSurviveFailures:
             calls["n"] += 1
             raise RuntimeError("GitHub is down")
 
-        monkeypatch.setattr("app.services.automerge.sweep_once", explode)
+        monkeypatch.setattr("app.services.pipeline.automerge.sweep_once", explode)
         monkeypatch.setattr(
-            "app.services.automerge.SWEEP_INTERVAL_SECONDS", 0.01
+            "app.services.pipeline.automerge.SWEEP_INTERVAL_SECONDS", 0.01
         )
 
         await run_briefly(worker.merge_gate_loop)
@@ -141,9 +141,9 @@ class TestSweepLoopsSurviveFailures:
             calls["n"] += 1
             raise RuntimeError("Gmail is down")
 
-        monkeypatch.setattr("app.services.qa_email_poller.poll_once", explode)
+        monkeypatch.setattr("app.services.pipeline.qa_email_poller.poll_once", explode)
         monkeypatch.setattr(
-            "app.services.qa_email_poller.POLL_INTERVAL_SECONDS", 0.01
+            "app.services.pipeline.qa_email_poller.POLL_INTERVAL_SECONDS", 0.01
         )
 
         await run_briefly(worker.qa_email_loop)
@@ -173,11 +173,11 @@ class TestAdvisoryLockGating:
         def taken(_key):
             yield False  # Another instance holds it.
 
-        monkeypatch.setattr("app.services.automerge.sweep_once", sweep)
+        monkeypatch.setattr("app.services.pipeline.automerge.sweep_once", sweep)
         monkeypatch.setattr(
-            "app.services.automerge.SWEEP_INTERVAL_SECONDS", 0.01
+            "app.services.pipeline.automerge.SWEEP_INTERVAL_SECONDS", 0.01
         )
-        monkeypatch.setattr("app.services.locks.advisory_lock", taken)
+        monkeypatch.setattr("app.core.locks.advisory_lock", taken)
 
         await run_briefly(worker.merge_gate_loop)
 
@@ -197,11 +197,11 @@ class TestAdvisoryLockGating:
         def taken(_key):
             yield False
 
-        monkeypatch.setattr("app.services.qa_email_poller.poll_once", poll)
+        monkeypatch.setattr("app.services.pipeline.qa_email_poller.poll_once", poll)
         monkeypatch.setattr(
-            "app.services.qa_email_poller.POLL_INTERVAL_SECONDS", 0.01
+            "app.services.pipeline.qa_email_poller.POLL_INTERVAL_SECONDS", 0.01
         )
-        monkeypatch.setattr("app.services.locks.advisory_lock", taken)
+        monkeypatch.setattr("app.core.locks.advisory_lock", taken)
 
         await run_briefly(worker.qa_email_loop)
 
@@ -216,9 +216,9 @@ class TestAdvisoryLockGating:
             ran["n"] += 1
             return 0
 
-        monkeypatch.setattr("app.services.automerge.sweep_once", sweep)
+        monkeypatch.setattr("app.services.pipeline.automerge.sweep_once", sweep)
         monkeypatch.setattr(
-            "app.services.automerge.SWEEP_INTERVAL_SECONDS", 0.01
+            "app.services.pipeline.automerge.SWEEP_INTERVAL_SECONDS", 0.01
         )
 
         await run_briefly(worker.merge_gate_loop)
@@ -234,7 +234,7 @@ class TestLockOnSQLite:
         construction. Failing closed there would stop the loops running at all
         locally, which is a worse outcome than the duplication it guards.
         """
-        from app.services import locks
+        from app.core import locks
 
         with locks.advisory_lock(locks.MERGE_SWEEP_LOCK) as held:
             assert held is True
