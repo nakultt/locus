@@ -62,8 +62,10 @@ def _item(key, *, source=schemas.TaskSource.jira, title="Retry the gate"):
 
 async def _build(db, items, *, owner=OWNER, monkeypatch=None):
     """Build a board with the assigned lookup stubbed out."""
-    async def fake_fetch(configs):
-        return items, []
+    async def fake_fetch(configs, *, done=False):
+        # The completed-work query is a second call to the same function.
+        # These cases are about the open board, so it answers with nothing.
+        return ([], []) if done else (items, [])
 
     monkeypatch.setattr(task_board, "fetch_assigned", fake_fetch)
     return await task_board.build(db, owner_id=owner, integration_configs={})
@@ -449,8 +451,8 @@ class TestSourceDegradation:
     @pytest.mark.asyncio
     async def test_a_dead_source_is_reported_not_hidden(self, db, monkeypatch):
         """"Nothing assigned" and "Jira is down" must not look identical."""
-        async def fake_fetch(configs):
-            return [_item("LOC-1")], ["jira"]
+        async def fake_fetch(configs, *, done=False):
+            return ([], []) if done else ([_item("LOC-1")], ["jira"])
 
         monkeypatch.setattr(task_board, "fetch_assigned", fake_fetch)
         board = await task_board.build(
