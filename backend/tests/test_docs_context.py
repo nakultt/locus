@@ -6,7 +6,7 @@ flag a diff that contradicts the spec rather than judging code in isolation.
 """
 
 from app.schemas import RelatedDocument
-from app.services.google_docs_context import _extract_text, format_for_prompt
+from app.services.integrations.google_docs_context import _extract_text, format_for_prompt
 
 
 class TestTextExtraction:

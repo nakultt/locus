@@ -15,8 +15,8 @@ from sqlalchemy.orm import sessionmaker
 
 @pytest.fixture
 def client(tmp_path):
-    import main
-    from app.database import Base, get_db
+    from app import main
+    from app.core.database import Base, get_db
 
     engine = create_engine(
         f"sqlite:///{tmp_path}/reg.db", connect_args={"check_same_thread": False}

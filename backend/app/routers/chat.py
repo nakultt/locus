@@ -11,10 +11,10 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app import crud, models, schemas
-from app.database import get_db
-from app.dependencies import get_current_user, get_integration_configs
-from app.services.agent import process_chat_message, process_chat_message_streaming
-from app.services.llm import check_llm_available
+from app.core.database import get_db
+from app.core.dependencies import get_current_user, get_integration_configs
+from app.services.chat.agent import process_chat_message, process_chat_message_streaming
+from app.services.chat.llm import check_llm_available
 
 logger = logging.getLogger(__name__)
 

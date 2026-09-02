@@ -15,14 +15,14 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import models
-from app.services import agent_settings, comms_log
+from app.services.pipeline import agent_settings, comms_log
 
 REPO, PR, OWNER = "acme/widget", 42, 1
 
 
 @pytest.fixture
 def db(tmp_path):
-    from app.database import Base
+    from app.core.database import Base
 
     engine = create_engine(
         f"sqlite:///{tmp_path}/c.db", connect_args={"check_same_thread": False}

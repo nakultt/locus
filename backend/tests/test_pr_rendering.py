@@ -16,7 +16,7 @@ from app.schemas import (
     SecurityFinding,
     SecuritySeverity,
 )
-from app.services.pr_agent import render_pr_comment, render_slack_summary
+from app.services.pipeline.pr_agent import render_pr_comment, render_slack_summary
 
 
 def make_context(**overrides) -> PRContext:
@@ -167,7 +167,7 @@ class TestPipelineStages:
         import asyncio
         from unittest.mock import AsyncMock, patch
 
-        from app.services import pr_agent
+        from app.services.pipeline import pr_agent
 
         pr = {
             "title": "Fix timeouts", "user": {"login": "x"},
@@ -203,7 +203,7 @@ class TestPipelineStages:
         import asyncio
         from unittest.mock import AsyncMock, patch
 
-        from app.services import pr_agent
+        from app.services.pipeline import pr_agent
 
         pr = {
             "title": "t", "user": {"login": "x"}, "html_url": "u",

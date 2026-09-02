@@ -19,14 +19,14 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import models, schemas
-from app.services import task_board
+from app.services.pipeline import task_board
 
 REPO, OWNER = "acme/widget", 1
 
 
 @pytest.fixture
 def db(tmp_path):
-    from app.database import Base
+    from app.core.database import Base
 
     engine = create_engine(
         f"sqlite:///{tmp_path}/t.db", connect_args={"check_same_thread": False}
@@ -474,7 +474,7 @@ class TestAuthoringStage:
     """
 
     def test_the_step_is_absent_on_an_assisted_task(self, db):
-        from app.services.task_board import _build_stages
+        from app.services.pipeline.task_board import _build_stages
 
         stages = _build_stages(
             schemas.TaskStage.assigned, False, [], [], autonomous=False
@@ -483,7 +483,7 @@ class TestAuthoringStage:
         assert not any(s.stage is schemas.TaskStage.authoring for s in stages)
 
     def test_the_step_is_rendered_on_an_autonomous_task(self, db):
-        from app.services.task_board import _build_stages
+        from app.services.pipeline.task_board import _build_stages
 
         stages = _build_stages(
             schemas.TaskStage.assigned, False, [], [], autonomous=True
@@ -496,7 +496,7 @@ class TestAuthoringStage:
         Deriving the step from the current stage as well is what makes this
         impossible, rather than merely unlikely.
         """
-        from app.services.task_board import _build_stages
+        from app.services.pipeline.task_board import _build_stages
 
         stages = _build_stages(
             schemas.TaskStage.authoring, False, [], [], autonomous=False
@@ -510,7 +510,7 @@ class TestAuthoringStage:
         letting it win would walk a reviewed card back to "Locus is writing it"
         on every refresh.
         """
-        from app.services.task_board import _derive_stage
+        from app.services.pipeline.task_board import _derive_stage
 
         stage, _ = _derive_stage(
             [], None, False, has_pr=False, has_branch=True, has_attempt=True
@@ -519,7 +519,7 @@ class TestAuthoringStage:
         assert stage is schemas.TaskStage.branch_created
 
     def test_an_attempt_ranks_below_every_pull_request_stage(self, db):
-        from app.services.task_board import _derive_stage
+        from app.services.pipeline.task_board import _derive_stage
 
         stage, _ = _derive_stage(
             [], None, False, has_pr=True, has_branch=False, has_attempt=True
@@ -532,7 +532,7 @@ class TestAuthoringStage:
         A ticket the agent is actively writing has not "not started", which is
         what `assigned` claims.
         """
-        from app.services.task_board import _derive_stage
+        from app.services.pipeline.task_board import _derive_stage
 
         stage, _ = _derive_stage(
             [], None, False, has_pr=False, has_branch=False, has_attempt=True
@@ -541,7 +541,7 @@ class TestAuthoringStage:
         assert stage is schemas.TaskStage.authoring
 
     def test_the_step_counts_the_attempts(self, db):
-        from app.services.task_board import _build_stages
+        from app.services.pipeline.task_board import _build_stages
 
         stages = _build_stages(
             schemas.TaskStage.authoring, False, [], [], autonomous=True,

@@ -14,8 +14,8 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
 from app import crud
-from app.database import get_db
-from app.frontend_links import integrations_url
+from app.core.database import get_db
+from app.core.frontend_links import integrations_url
 
 router = APIRouter()
 

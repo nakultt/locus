@@ -14,13 +14,13 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app import models, schemas
-from app.database import get_db
-from app.dependencies import get_current_user, get_integration_configs
-from app.services import availability as availability_service
-from app.services import calendar as calendar_service
-from app.services import calendar_agent
-from app.services.datetimes import parse_datetime, resolve_timezone
-from app.services.scheduler import (
+from app.core.database import get_db
+from app.core.datetimes import parse_datetime, resolve_timezone
+from app.core.dependencies import get_current_user, get_integration_configs
+from app.services.integrations import calendar as calendar_service
+from app.services.scheduling import availability as availability_service
+from app.services.scheduling import calendar_agent
+from app.services.scheduling.scheduler import (
     SchedulingContext,
     find_conflicts,
     plan_for_deadline,
