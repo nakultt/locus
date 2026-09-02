@@ -12,8 +12,8 @@ from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 
-from app.services import agent as agent_module
-from app.services.agent import (
+from app.services.chat import agent as agent_module
+from app.services.chat.agent import (
     MAX_AGENT_ITERATIONS,
     create_agent_executor,
     extract_actions,
@@ -135,7 +135,7 @@ class TestToolErrorHandling:
 class TestStreaming:
     @pytest.mark.asyncio
     async def test_emits_full_task_lifecycle(self, monkeypatch):
-        from app.services.task_planner import PlannedTask, TaskPlan
+        from app.services.chat.task_planner import PlannedTask, TaskPlan
 
         monkeypatch.setattr(
             agent_module, "get_llm",
@@ -195,7 +195,7 @@ class TestConversationHistory:
     """
 
     def test_prior_turns_precede_current_message(self):
-        from app.services.agent import build_message_history
+        from app.services.chat.agent import build_message_history
 
         messages = build_message_history(
             [("user", "read latest messages in slack"),
@@ -208,7 +208,7 @@ class TestConversationHistory:
         assert messages[-1].content == "#web"
 
     def test_history_is_capped(self):
-        from app.services.agent import MAX_HISTORY_MESSAGES, build_message_history
+        from app.services.chat.agent import MAX_HISTORY_MESSAGES, build_message_history
 
         long_history = [
             ("user" if i % 2 == 0 else "assistant", f"m{i}") for i in range(60)
@@ -218,12 +218,12 @@ class TestConversationHistory:
         assert len(messages) == MAX_HISTORY_MESSAGES + 1
 
     def test_no_history_yields_single_message(self):
-        from app.services.agent import build_message_history
+        from app.services.chat.agent import build_message_history
 
         assert len(build_message_history(None, "hi")) == 1
 
     def test_blank_turns_are_skipped(self):
-        from app.services.agent import build_message_history
+        from app.services.chat.agent import build_message_history
 
         messages = build_message_history([("user", ""), ("user", "real")], "now")
         assert len(messages) == 2

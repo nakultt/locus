@@ -19,7 +19,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import models, schemas
-from app.services import issue_links, task_board
+from app.services.integrations import issue_links
+from app.services.pipeline import task_board
 
 REPO, OWNER = "acme/widget", 1
 KEY = f"{REPO}#42"
@@ -27,7 +28,7 @@ KEY = f"{REPO}#42"
 
 @pytest.fixture
 def db(tmp_path):
-    from app.database import Base
+    from app.core.database import Base
 
     engine = create_engine(
         f"sqlite:///{tmp_path}/t.db", connect_args={"check_same_thread": False}
@@ -358,8 +359,8 @@ async def test_board_shows_a_branch_only_issue_as_started(db, monkeypatch):
     The whole point, end to end: an issue with a linked branch and no pull
     request reports that work has begun.
     """
-    async def fake_assigned(configs):
-        return [_issue()], []
+    async def fake_assigned(configs, *, done=False):
+        return ([], []) if done else ([_issue()], [])
 
     async def fake_links(token, items):
         return {KEY: schemas.IssueLinks(
@@ -382,8 +383,8 @@ async def test_board_shows_a_branch_only_issue_as_started(db, monkeypatch):
 @pytest.mark.asyncio
 async def test_board_renders_a_linked_pr_locus_has_never_analyzed(db, monkeypatch):
     """A PR attached in the panel moments ago still belongs on the card."""
-    async def fake_assigned(configs):
-        return [_issue()], []
+    async def fake_assigned(configs, *, done=False):
+        return ([], []) if done else ([_issue()], [])
 
     async def fake_links(token, items):
         return {KEY: schemas.IssueLinks(pull_requests=[
@@ -414,8 +415,8 @@ async def test_a_links_failure_does_not_blank_the_board(db, monkeypatch):
     A board that blanks because one call failed is the one wrong answer -- the
     same rule `assigned.py` follows.
     """
-    async def fake_assigned(configs):
-        return [_issue()], []
+    async def fake_assigned(configs, *, done=False):
+        return ([], []) if done else ([_issue()], [])
 
     async def fake_links(token, items):
         return {}

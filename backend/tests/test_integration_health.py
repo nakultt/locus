@@ -21,7 +21,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import models
-from app.database import Base
+from app.core.database import Base
 from app.services import integration_health
 
 OWNER = 1
@@ -144,7 +144,7 @@ class TestQAPollerRecordsHealth:
     @pytest.mark.asyncio
     async def test_a_gmail_failure_is_recorded(self, db, monkeypatch):
         from app import crud
-        from app.services import qa_email_poller
+        from app.services.pipeline import qa_email_poller
 
         db.add(models.QAThread(
             repo="acme/api", pr_number=7, pr_url="u", slack_channel="#qa",
@@ -185,7 +185,7 @@ class TestQAPollerRecordsHealth:
     @pytest.mark.asyncio
     async def test_a_working_poll_records_success(self, db, monkeypatch):
         from app import crud
-        from app.services import qa_email_poller
+        from app.services.pipeline import qa_email_poller
 
         db.add(models.QAThread(
             repo="acme/api", pr_number=7, pr_url="u", slack_channel="#qa",

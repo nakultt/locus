@@ -29,8 +29,8 @@ from app.schemas import (
     SecuritySeverity,
     SuggestedFix,
 )
-from app.services import security_scan
-from app.services.pr_agent import (
+from app.services.pipeline import security_scan
+from app.services.pipeline.pr_agent import (
     _fix_candidates,
     build_inline_comments,
     render_pr_comment,
@@ -343,7 +343,7 @@ class TestDiffLinePositions:
 
     @pytest.mark.asyncio
     async def test_added_and_context_lines_are_commentable(self, monkeypatch):
-        from app.services import github_pr
+        from app.services.integrations import github_pr
 
         async def fake_diff(_t, _r, _n):
             return self.DIFF
@@ -357,7 +357,7 @@ class TestDiffLinePositions:
     @pytest.mark.asyncio
     async def test_deleted_lines_are_not_commentable(self, monkeypatch):
         """A removed line exists only on the left; there is nothing to anchor to."""
-        from app.services import github_pr
+        from app.services.integrations import github_pr
 
         diff = (
             "--- a/a.py\n"

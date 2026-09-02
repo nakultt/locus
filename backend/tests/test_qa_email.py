@@ -8,7 +8,7 @@ boilerplate instead of the tester's answer.
 
 import base64
 
-from app.services.qa_email_poller import _header, _plain_text, strip_quoted_reply
+from app.services.pipeline.qa_email_poller import _header, _plain_text, strip_quoted_reply
 
 
 def encode(text: str) -> str:

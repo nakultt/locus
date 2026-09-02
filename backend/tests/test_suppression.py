@@ -22,8 +22,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import models, schemas
-from app.database import Base
-from app.services import suppression
+from app.core.database import Base
+from app.services.pipeline import suppression
 
 OWNER = 1
 REPO = "acme/api"
@@ -263,7 +263,7 @@ class TestDisclosure:
         A scanner that quietly stops mentioning things is worse than one that
         never mentioned them: the silence reads as a clean run.
         """
-        from app.services.pr_agent import render_pr_comment
+        from app.services.pipeline.pr_agent import render_pr_comment
 
         result = result_with(review("Real problem"))
         result.suppressed_count = 2
@@ -273,7 +273,7 @@ class TestDisclosure:
         assert "2 finding(s) hidden" in out
 
     def test_a_run_with_nothing_hidden_says_nothing(self):
-        from app.services.pr_agent import render_pr_comment
+        from app.services.pipeline.pr_agent import render_pr_comment
 
         out = render_pr_comment(result_with(review("Real problem")))
 

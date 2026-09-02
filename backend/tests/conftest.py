@@ -1,7 +1,7 @@
 """
 Shared test configuration.
 
-SECRET_KEY and ENCRYPTION_KEY are required at import time -- app.security
+SECRET_KEY and ENCRYPTION_KEY are required at import time -- app.core.security
 raises rather than falling back, because a generated encryption key silently
 destroys stored credentials and a default JWT secret lets anyone forge a
 token. Tests supply throwaway values before any app module is imported.

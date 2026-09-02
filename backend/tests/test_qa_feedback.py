@@ -12,7 +12,7 @@ import time
 import pytest
 
 from app.routers.slack_events import verify_slack_signature
-from app.services.qa_feedback import Verdict, handle_qa_reply
+from app.services.pipeline.qa_feedback import Verdict, handle_qa_reply
 
 SECRET = "s3cret"
 BODY = b'{"type":"event_callback"}'
@@ -64,7 +64,7 @@ class TestReplyRouting:
             async def fake(_text):
                 return verdict, reason
             monkeypatch.setattr(
-                "app.services.qa_feedback.classify_reply", fake
+                "app.services.pipeline.qa_feedback.classify_reply", fake
             )
         return _stub
 
@@ -99,7 +99,7 @@ class TestReplyRouting:
             notified["channel"] = channel
             return True
 
-        monkeypatch.setattr("app.services.qa_feedback.notify_pr_author", fake_notify)
+        monkeypatch.setattr("app.services.pipeline.qa_feedback.notify_pr_author", fake_notify)
         stub_classifier(Verdict.UNCLEAR, "mixed signals")
 
         outcome = await handle_qa_reply(
@@ -124,8 +124,8 @@ class TestReplyRouting:
         async def fake_gh(_token, _repo, number, _reason):
             return True, f"Reopened #{number}"
 
-        monkeypatch.setattr("app.services.qa_feedback.reopen_jira_ticket", fake_jira)
-        monkeypatch.setattr("app.services.qa_feedback.reopen_github_issue", fake_gh)
+        monkeypatch.setattr("app.services.pipeline.qa_feedback.reopen_jira_ticket", fake_jira)
+        monkeypatch.setattr("app.services.pipeline.qa_feedback.reopen_github_issue", fake_gh)
         stub_classifier(Verdict.BROKEN, "timeout still occurs")
 
         outcome = await handle_qa_reply(
@@ -158,7 +158,7 @@ class TestCloseOnSignoff:
             async def fake(_text):
                 return verdict, reason
             monkeypatch.setattr(
-                "app.services.qa_feedback.classify_reply", fake
+                "app.services.pipeline.qa_feedback.classify_reply", fake
             )
         return _stub
 
@@ -175,10 +175,10 @@ class TestCloseOnSignoff:
             return True, f"Closed #{number}"
 
         monkeypatch.setattr(
-            "app.services.qa_feedback.transition_jira_ticket", fake_jira
+            "app.services.pipeline.qa_feedback.transition_jira_ticket", fake_jira
         )
         monkeypatch.setattr(
-            "app.services.qa_feedback.close_github_issue", fake_gh
+            "app.services.pipeline.qa_feedback.close_github_issue", fake_gh
         )
         return calls
 
@@ -232,7 +232,7 @@ class TestCloseOnSignoff:
             return True, f"{key} reopened"
 
         monkeypatch.setattr(
-            "app.services.qa_feedback.reopen_jira_ticket", fake_reopen_jira
+            "app.services.pipeline.qa_feedback.reopen_jira_ticket", fake_reopen_jira
         )
         stub_classifier(Verdict.BROKEN)
 
@@ -268,7 +268,7 @@ class TestCloseOnSignoff:
             raise RuntimeError("Jira is down")
 
         monkeypatch.setattr(
-            "app.services.qa_feedback.transition_jira_ticket", boom
+            "app.services.pipeline.qa_feedback.transition_jira_ticket", boom
         )
         stub_classifier(Verdict.WORKS)
 

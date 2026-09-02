@@ -10,9 +10,10 @@ modifying another account by changing an integer.
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app import crud, models, schemas, security
-from app.database import get_db
-from app.dependencies import get_current_user
+from app import crud, models, schemas
+from app.core import security
+from app.core.database import get_db
+from app.core.dependencies import get_current_user
 
 router = APIRouter()
 
