@@ -32,7 +32,13 @@ from sqlalchemy.orm import Session
 
 from app import models, schemas
 from app.services.integrations import issue_links
-from app.services.pipeline import assigned, comms_log, review_flow, worklist
+from app.services.pipeline import (
+    assigned,
+    comms_log,
+    report_sync,
+    review_flow,
+    worklist,
+)
 from app.services.pipeline.agent_settings import resolve_settings
 
 logger = logging.getLogger(__name__)
@@ -429,6 +435,12 @@ async def build(
     """
     items, unavailable = await fetch_assigned(integration_configs)
 
+    # Every report document this owner has, in one query, so the per-card
+    # resolution below is a dict lookup rather than a round trip each.
+    docs_by_ticket, docs_by_pr = report_sync.document_urls_for(
+        db, owner_id=owner_id
+    )
+
     # Work that finished recently, rendered in its own section.
     #
     # Both source queries above ask only for unfinished work, so a ticket
@@ -595,6 +607,16 @@ async def build(
                 title=meta.title if meta else None,
             ))
 
+        # The report link, resolved the way `find_report` resolves it: by
+        # ticket first, then by any pull request on this work item. Read from
+        # the two maps loaded once above rather than queried per card.
+        doc_url = docs_by_ticket.get(item.key)
+        if doc_url is None:
+            for pr in pull_requests:
+                doc_url = docs_by_pr.get((pr.repo, pr.pr_number))
+                if doc_url:
+                    break
+
         cards.append(schemas.TaskCard(
             key=item.key,
             source=item.source,
@@ -614,6 +636,7 @@ async def build(
             ),
             pull_requests=pull_requests,
             linked_branches=branches,
+            doc_url=doc_url,
             items=task.items if task else [],
             needs_you=task.needs_you if task else False,
             blocked_reason=_blocked_reason(task.items) if task else None,

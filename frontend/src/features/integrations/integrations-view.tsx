@@ -1,505 +1,412 @@
 "use client";
 
-import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
-import { Check, X, Loader2, Link2, Unlink } from "lucide-react";
-import { useState, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
+import Image from "next/image";
+import {
+  ArrowUpRight,
+  Check,
+  Link2,
+  Plug,
+  ShieldCheck,
+  Unlink,
+} from "lucide-react";
 import { useAuth } from "@/features/auth/auth-context";
 import {
-  listIntegrations,
   connectIntegration,
   disconnectIntegration,
+  listIntegrations,
   type Integration,
 } from "@/lib/api";
+import {
+  ALL_ENTRIES,
+  CATALOG,
+  type CatalogEntry,
+  type CatalogGroup,
+} from "@/features/integrations/catalog";
+import { PageHeader, PageShell } from "@/components/layout/app-shell";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Field, Input } from "@/components/ui/form";
+import { ConfirmDialog, Dialog } from "@/components/ui/overlay";
+import { Notice, Panel, Skeleton } from "@/components/ui/surface";
+import { useToast } from "@/components/ui/toast";
 
-// Supported integrations with their configs
-const INTEGRATIONS = [
-  {
-    id: "slack",
-    title: "Slack",
-    description: "Team communication and collaboration hub.",
-    color: "text-purple-600",
-    logo: "/slack.svg",
-    authType: "api_key" as const,
-    fields: [
-      { name: "api_key", label: "Bot Token", placeholder: "xoxb-..." },
-      {
-        name: "user_token",
-        label: "User Token (optional)",
-        placeholder: "xoxp-...",
-        isCredential: true,
-        optional: true,
-        help: "Enables searching Slack history. Bot tokens cannot call search.messages.",
-      },
-    ],
-  },
-  {
-    id: "jira",
-    title: "Jira",
-    description: "Atlassian issue tracking and project management.",
-    color: "text-blue-600",
-    logo:"/jira.svg" ,
-    authType: "api_key" as const,
-    fields: [
-      { name: "api_key", label: "API Token", placeholder: "Your API token" },
-      {
-        name: "email",
-        label: "Email",
-        placeholder: "you@company.com",
-        isCredential: true,
-      },
-      {
-        name: "url",
-        label: "Jira URL",
-        placeholder: "https://company.atlassian.net",
-        isCredential: true,
-      },
-      {
-        name: "default_project_key",
-        label: "Default Project Key (optional)",
-        placeholder: "KAN",
-        isCredential: true,
-        optional: true,
-        help: "Where new tickets go when you don't name a project. Without it the assistant has to look your projects up first.",
-      },
-    ],
-  },
-  {
-    id: "notion",
-    title: "Notion",
-    description: "All-in-one workspace for notes and projects.",
-    color: "text-gray-900",
-    logo: "/notion.png",
-    authType: "api_key" as const,
-    fields: [
-      {
-        name: "api_key",
-        label: "Integration Token",
-        placeholder: "secret_...",
-      },
-    ],
-  },
-  {
-    id: "gmail",
-    title: "Gmail",
-    description: "Email management and automation.",
-    color: "text-red-500",
-    logo: "/gmail.svg",
-    authType: "oauth" as const,
-    oauthProvider: "google",
-    fields: [],
-  },
-  {
-    id: "calendar",
-    title: "Google Calendar",
-    description: "Scheduling and calendar management.",
-    color: "text-green-600",
-    logo:"/calendar.svg" ,
-    authType: "oauth" as const,
-    oauthProvider: "google",
-    fields: [],
-  },
-  {
-    id: "docs",
-    title: "Google Docs",
-    description: "Create and edit documents collaboratively.",
-    color: "text-blue-600",
-    logo: "/docs.svg",
-    authType: "oauth" as const,
-    oauthProvider: "google",
-    fields: [],
-  },
-  {
-    id: "sheets",
-    title: "Google Sheets",
-    description: "Spreadsheet creation and data management.",
-    color: "text-green-600",
-    logo: "/sheets.svg",
-    authType: "oauth" as const,
-    oauthProvider: "google",
-    fields: [],
-  },
-  {
-    id: "slides",
-    title: "Google Slides",
-    description: "Create stunning presentations.",
-    color: "text-yellow-600",
-    logo: "/slides.svg",
-    authType: "oauth" as const,
-    oauthProvider: "google",
-    fields: [],
-  },
-  {
-    id: "drive",
-    title: "Google Drive",
-    description: "Cloud file storage and sharing.",
-    color: "text-blue-500",
-    logo: "/drive.svg",
-    authType: "oauth" as const,
-    oauthProvider: "google",
-    fields: [],
-  },
-  {
-    id: "forms",
-    title: "Google Forms",
-    description: "Create surveys and collect responses.",
-    color: "text-purple-600",
-    logo: "/forms.svg",
-    authType: "oauth" as const,
-    oauthProvider: "google",
-    fields: [],
-  },
-  {
-    id: "meet",
-    title: "Google Meet",
-    description: "Video meetings and conferencing.",
-    color: "text-green-500",
-    logo: "/meet.svg",
-    authType: "oauth" as const,
-    oauthProvider: "google",
-    fields: [],
-  },
-  {
-    id: "github",
-    title: "GitHub",
-    description: "Code hosting and version control.",
-    color: "text-gray-900",
-    logo: "/github.svg",
-    authType: "api_key" as const,
-    fields: [
-      {
-        name: "api_key",
-        label: "Personal Access Token",
-        placeholder: "ghp_...",
-      },
-    ],
-  },
-  {
-    id: "linear",
-    title: "Linear",
-    description: "Issue tracking and project management.",
-    color: "text-purple-600",
-    logo: "/linear.svg",
-    authType: "oauth" as const,
-    oauthProvider: "linear",
-    fields: [],
-  },
-];
+/**
+ * Connections.
+ *
+ * A list, not a grid of thirteen cards. The grid gave a Google Slides tile the
+ * same visual weight as GitHub — which the pipeline cannot run without — and
+ * spread eight Google services that share a single consent screen across three
+ * rows as though each were a separate decision.
+ *
+ * Grouped instead, with the Google group carrying one action for all eight,
+ * and GitHub marked as required. Scanning a list of names down the left edge is
+ * also simply faster than scanning tiles, which is what someone is doing here.
+ */
 
-// Connect Modal Component
-const ConnectModal = ({
-  integration,
-  onClose,
-  onConnect,
-}: {
-  integration: (typeof INTEGRATIONS)[0];
-  onClose: () => void;
-  onConnect: (apiKey: string, credentials?: Record<string, string>) => void;
-}) => {
-  const [values, setValues] = useState<Record<string, string>>({});
-  const [isLoading, setIsLoading] = useState(false);
+/* ── One service ──────────────────────────────────────────────────────────── */
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsLoading(true);
-
-    const apiKey = values["api_key"] || "";
-    const credentials: Record<string, string> = {};
-
-    integration.fields.forEach((field) => {
-      if (field.isCredential && values[field.name]) {
-        credentials[field.name] = values[field.name];
-      }
-    });
-
-    // Slack needs both tokens side by side: the bot token posts messages, the
-    // user token searches history. Mirror the api_key in so services read one
-    // consistent shape instead of guessing which field holds which token.
-    if (integration.id === "slack" && apiKey) {
-      credentials["bot_token"] = apiKey;
-    }
-
-    await onConnect(
-      apiKey,
-      Object.keys(credentials).length > 0 ? credentials : undefined
-    );
-    setIsLoading(false);
-  };
-
-  return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <div className="bg-card border border-border rounded-xl p-6 w-full max-w-md mx-4">
-        <h3 className="text-lg font-semibold mb-4">
-          Connect {integration.title}
-        </h3>
-        <form onSubmit={handleSubmit} className="space-y-4">
-          {integration.fields.map((field) => (
-            <div key={field.name}>
-              <label className="block text-sm font-medium mb-1">
-                {field.label}
-              </label>
-              <input
-                type="text"
-                placeholder={field.placeholder}
-                value={values[field.name] || ""}
-                onChange={(e) =>
-                  setValues({ ...values, [field.name]: e.target.value })
-                }
-                className="w-full px-3 py-2 border border-border rounded-lg bg-background focus:outline-none focus:ring-2 focus:ring-primary"
-                required={!("optional" in field && field.optional)}
-              />
-              {"help" in field && field.help ? (
-                <p className="mt-1 text-xs text-muted-foreground">{field.help}</p>
-              ) : null}
-            </div>
-          ))}
-          <div className="flex gap-3 pt-4">
-            <Button
-              type="button"
-              variant="secondary"
-              onClick={onClose}
-              className="flex-1"
-            >
-              Cancel
-            </Button>
-            <Button type="submit" disabled={isLoading} className="flex-1">
-              {isLoading ? (
-                <Loader2 className="animate-spin mr-2" size={16} />
-              ) : null}
-              Connect
-            </Button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-};
-
-// Integration Card Component
-const IntegrationCard = ({
-  config,
-  isConnected,
-  isLoading,
+function ConnectionRow({
+  entry,
+  connected,
+  busy,
   onConnect,
   onDisconnect,
 }: {
-  config: (typeof INTEGRATIONS)[0];
-  isConnected: boolean;
-  isLoading: boolean;
+  entry: CatalogEntry;
+  connected: boolean;
+  busy: boolean;
   onConnect: () => void;
   onDisconnect: () => void;
-}) => (
-  <Card className="p-6">
-    <div className="relative">
-    <div className="mb-4">
-  <img
-    src={config.logo}
-    alt={config.title}
-    className="h-10 w-10"
-  />
-     </div>
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-3 px-5 py-4 transition-colors hover:bg-surface-2/50">
+      {/* The logo sits on a neutral plate. Several of these SVGs are near-white
+          and vanish against the surface in dark mode without one. */}
+      <span className="flex size-10 shrink-0 items-center justify-center rounded-md border border-line bg-surface">
+        <Image
+          src={entry.logo}
+          alt=""
+          width={22}
+          height={22}
+          // Straight from /public, not through the optimizer: these are our own
+          // SVGs, and the image route refuses SVG unless `dangerouslyAllowSVG`
+          // is set — which would relax it for every image, to optimize files
+          // that are already a few hundred bytes.
+          unoptimized
+          className="size-[22px] object-contain"
+        />
+      </span>
 
-
-      <div className="space-y-2 pb-6">
-        <div className="flex items-center gap-2">
-          <h3 className="text-base font-medium">{config.title}</h3>
-          {isConnected && (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium text-green-700 bg-green-100 rounded-full">
-              <Check size={12} /> Connected
-            </span>
+      <div className="min-w-0 flex-1 basis-64">
+        <div className="flex flex-wrap items-center gap-2">
+          <h3 className="text-h3 text-ink">{entry.title}</h3>
+          {entry.required && (
+            <Badge tone="outline">Required</Badge>
+          )}
+          {connected && (
+            <Badge tone="success">
+              <Check aria-hidden />
+              Connected
+            </Badge>
           )}
         </div>
-        <p className="text-muted-foreground text-sm">{config.description}</p>
+        <p className="mt-1 text-sm leading-relaxed text-muted">
+          {entry.description}
+        </p>
       </div>
 
-      <div className="flex gap-3 border-t border-dashed pt-6">
-        {isConnected ? (
+      <div className="ml-auto shrink-0">
+        {connected ? (
           <Button
-            variant="destructive"
+            variant="danger-ghost"
             size="sm"
             onClick={onDisconnect}
-            disabled={isLoading}
-            className="gap-1"
+            loading={busy}
           >
-            {isLoading ? (
-              <Loader2 className="animate-spin" size={14} />
-            ) : (
-              <Unlink size={14} />
-            )}
+            {!busy && <Unlink aria-hidden />}
             Disconnect
           </Button>
         ) : (
-          <Button
-            variant="default"
-            size="sm"
-            onClick={onConnect}
-            disabled={isLoading}
-            className="gap-1"
-          >
-            {isLoading ? (
-              <Loader2 className="animate-spin" size={14} />
-            ) : (
-              <Link2 size={14} />
-            )}
+          <Button variant="secondary" size="sm" onClick={onConnect} loading={busy}>
+            {!busy && <Link2 aria-hidden />}
             Connect
           </Button>
         )}
       </div>
     </div>
-  </Card>
-);
+  );
+}
 
-// OAuth Connect Modal Component
-const OAuthConnectModal = ({
-  integration,
-  onClose,
+/* ── A group ──────────────────────────────────────────────────────────────── */
+
+function ConnectionGroup({
+  group,
+  connectedServices,
+  busyService,
   onConnect,
+  onDisconnect,
+  onConnectGoogle,
 }: {
-  integration: (typeof INTEGRATIONS)[0];
-  onClose: () => void;
-  onConnect: () => void;
-}) => {
-  const isLinear = integration.oauthProvider === "linear";
-  
+  group: CatalogGroup;
+  connectedServices: Set<string>;
+  busyService: string | null;
+  onConnect: (entry: CatalogEntry) => void;
+  onDisconnect: (entry: CatalogEntry) => void;
+  onConnectGoogle: () => void;
+}) {
+  const connectedCount = group.entries.filter((e) =>
+    connectedServices.has(e.id)
+  ).length;
+  const allConnected = connectedCount === group.entries.length;
+
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <div className="bg-card border border-border rounded-xl p-6 w-full max-w-md mx-4">
-        <h3 className="text-lg font-semibold mb-4">
-          Connect {integration.title}
-        </h3>
-        <p className="text-muted-foreground mb-6">
-          Connect your {isLinear ? "Linear" : "Google"} account to enable{" "}
-          {integration.title.toLowerCase()} automation.
-        </p>
-        <div className="flex gap-3">
-          <Button
-            type="button"
-            variant="secondary"
-            onClick={onClose}
-            className="flex-1"
-          >
-            Cancel
-          </Button>
-          <Button onClick={onConnect} className="flex-1 gap-2">
-            {isLinear ? (
-              <svg className="w-4 h-4" viewBox="0 0 100 100" fill="none">
-                <path d="M1.22541 61.5228c-.2225-.9485.19998-1.9403.91585-2.5013l56.94814-46.5844c.7159-.5853 1.7472-.5853 2.4631 0l11.3082 9.2509c.9579.7837.9579 2.2278 0 3.0115L16.1571 71.2839c-.5609.4589-1.2857.6279-1.9694.459l-12.9623-10.2201z" fill="currentColor"/>
-                <path d="M22.6225 97.2546c-.9485.2224-1.9403-.2-2.5013-.9159L.870605 39.395c-.585303-.7159-.585303-1.7471 0-2.4631l9.250895-11.3082c.78373-.9579 2.2278-.9579 3.0115 0l46.5848 56.9473c.4589.5608.6279 1.2857.459 1.9693l-10.2201 12.9623c-.2224.9485-1.2-.2204-1.9159.7159l-26.4191-3.0132z" fill="currentColor"/>
-                <path d="M74.4814 98.5693c-2.2631.1765-4.1251-1.6854-3.9486-3.9486l2.8242-36.2213c.1328-1.7014 1.2953-3.1427 2.8986-3.5949l23.4168-6.6004c2.1958-.619 4.3282 1.0842 4.0178 3.3127l-5.0893 36.5542c-.231 1.66-1.4628 3.018-3.1018 3.4215l-21.0177 5.0768z" fill="currentColor"/>
-              </svg>
-            ) : (
-              <svg className="w-4 h-4" viewBox="0 0 24 24">
-                <path
-                  fill="currentColor"
-                  d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
-                />
-                <path
-                  fill="currentColor"
-                  d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
-                />
-                <path
-                  fill="currentColor"
-                  d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"
-                />
-                <path
-                  fill="currentColor"
-                  d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
-                />
-              </svg>
+    <section className="space-y-3">
+      <div>
+        {/* The count and the action sit on the title's own line rather than
+            wrapping below a two-line description, which is where they landed
+            when all three shared one flex container. */}
+        <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2">
+          <h2 className="text-h2 text-ink">{group.title}</h2>
+          <div className="flex shrink-0 items-center gap-3">
+            <span className="tabular text-xs text-subtle">
+              {connectedCount} of {group.entries.length}
+            </span>
+          {/* One consent grants every Google scope, so the action belongs to
+              the group. Offering it per service implied eight separate round
+              trips through Google's screen. */}
+            {group.sharedOAuth === "google" && !allConnected && (
+              <Button size="sm" onClick={onConnectGoogle}>
+                <ShieldCheck aria-hidden />
+                {connectedCount > 0 ? "Reconnect Google" : "Connect all"}
+              </Button>
             )}
-            Sign in with {isLinear ? "Linear" : "Google"}
-          </Button>
+          </div>
         </div>
+        <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-muted">
+          {group.description}
+        </p>
       </div>
-    </div>
+
+      <Panel className="divide-y divide-line overflow-hidden">
+        {group.entries.map((entry) => (
+          <ConnectionRow
+            key={entry.id}
+            entry={entry}
+            connected={connectedServices.has(entry.id)}
+            busy={busyService === entry.id}
+            onConnect={() => onConnect(entry)}
+            onDisconnect={() => onDisconnect(entry)}
+          />
+        ))}
+      </Panel>
+    </section>
   );
-};
+}
 
+/* ── Credential dialog ────────────────────────────────────────────────────── */
 
-// Main Component
-export default function IntegrationsSection() {
-  const { user } = useAuth();
-  const [connectedServices, setConnectedServices] = useState<Set<string>>(
-    new Set()
-  );
-  const [loadingService, setLoadingService] = useState<string | null>(null);
-  const [modalIntegration, setModalIntegration] = useState<
-    (typeof INTEGRATIONS)[0] | null
-  >(null);
-  const [isLoadingList, setIsLoadingList] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+function CredentialDialog({
+  entry,
+  onClose,
+  onSubmit,
+}: {
+  entry: CatalogEntry;
+  onClose: () => void;
+  onSubmit: (apiKey: string, credentials?: Record<string, string>) => Promise<void>;
+}) {
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
 
-  // API Base URL
-  const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
 
-  // Handle OAuth callback URL parameters
-  useEffect(() => {
-    const urlParams = new URLSearchParams(window.location.search);
-    const success = urlParams.get("success");
-    const errorParam = urlParams.get("error");
-    const service = urlParams.get("service");
-
-    if (success === "google_connected" || success === "linear_connected") {
-      setSuccessMessage(
-        `Successfully connected ${service || (success === "linear_connected" ? "Linear" : "Google services")}!`
-      );
-      // Refresh integrations list
-      if (user?.id) {
-        listIntegrations().then((result) => {
-          const connected = new Set(
-            result.integrations.map((i: Integration) => i.service_name)
-          );
-          setConnectedServices(connected);
-        });
+    const apiKey = values["api_key"] ?? "";
+    const credentials: Record<string, string> = {};
+    for (const field of entry.fields) {
+      if (field.isCredential && values[field.name]) {
+        credentials[field.name] = values[field.name];
       }
-      // Clear URL parameters
-      window.history.replaceState({}, "", window.location.pathname);
-    } else if (errorParam) {
-      setError(`OAuth error: ${errorParam.replace(/_/g, " ")}`);
-      window.history.replaceState({}, "", window.location.pathname);
     }
-  }, [user?.id]);
 
-  // Fetch connected integrations on mount
-  useEffect(() => {
-    const fetchIntegrations = async () => {
-      if (!user?.id) {
-        setIsLoadingList(false);
-        return;
-      }
+    // Slack needs both tokens side by side: the bot token posts messages, the
+    // user token searches history. Mirror the api_key in so services read one
+    // consistent shape instead of guessing which field holds which token.
+    if (entry.id === "slack" && apiKey) credentials["bot_token"] = apiKey;
 
-      try {
-        const result = await listIntegrations();
-        const connected = new Set(
-          result.integrations.map((i: Integration) => i.service_name)
-        );
-        setConnectedServices(connected);
-      } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Failed to load integrations"
-        );
-      } finally {
-        setIsLoadingList(false);
-      }
-    };
-
-    fetchIntegrations();
-  }, [user?.id]);
-
-  // Handle click on connect button - route to modal or OAuth
-  const handleConnectClick = (config: (typeof INTEGRATIONS)[0]) => {
-    setModalIntegration(config);
+    try {
+      await onSubmit(
+        apiKey,
+        Object.keys(credentials).length > 0 ? credentials : undefined
+      );
+    } finally {
+      setBusy(false);
+    }
   };
 
-  // Handle OAuth redirect
-  const handleOAuthConnect = (config: (typeof INTEGRATIONS)[0]) => {
+  const missingRequired = entry.fields.some(
+    (f) => !f.optional && !values[f.name]?.trim()
+  );
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title={`Connect ${entry.title}`}
+      description={entry.description}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose} type="button">
+            Cancel
+          </Button>
+          <Button
+            type="submit"
+            form="connect-form"
+            loading={busy}
+            disabled={missingRequired}
+          >
+            Connect
+          </Button>
+        </>
+      }
+    >
+      <form id="connect-form" onSubmit={submit} className="space-y-4">
+        {entry.fields.map((field, i) => (
+          <Field
+            key={field.name}
+            htmlFor={`f-${field.name}`}
+            label={
+              <>
+                {field.label}
+                {field.optional && (
+                  <span className="ml-1.5 font-normal text-subtle">optional</span>
+                )}
+              </>
+            }
+            hint={field.help}
+            required={!field.optional}
+          >
+            <Input
+              id={`f-${field.name}`}
+              data-autofocus={i === 0 ? "" : undefined}
+              // Tokens are passwords. Pasting one into a plain text field
+              // leaves it legible on screen for as long as the dialog is open.
+              type={field.secret ? "password" : "text"}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder={field.placeholder}
+              value={values[field.name] ?? ""}
+              onChange={(e) =>
+                setValues((v) => ({ ...v, [field.name]: e.target.value }))
+              }
+              required={!field.optional}
+            />
+          </Field>
+        ))}
+
+        <Notice tone="info" icon={<ShieldCheck aria-hidden />}>
+          Credentials are encrypted at rest and bound to your account for the
+          duration of a single request — never held in shared module state.
+        </Notice>
+      </form>
+    </Dialog>
+  );
+}
+
+/* ── OAuth dialog ─────────────────────────────────────────────────────────── */
+
+function OAuthDialog({
+  title,
+  provider,
+  scopeNote,
+  onClose,
+  onConfirm,
+}: {
+  title: string;
+  provider: "google" | "linear";
+  scopeNote?: string;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const name = provider === "linear" ? "Linear" : "Google";
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title={`Connect ${title}`}
+      description={`You will be taken to ${name} to approve access, then returned here.`}
+      size="sm"
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose} type="button">
+            Cancel
+          </Button>
+          <Button data-autofocus onClick={onConfirm}>
+            Continue to {name}
+            <ArrowUpRight aria-hidden />
+          </Button>
+        </>
+      }
+    >
+      {scopeNote && (
+        <Notice tone="info" icon={<ShieldCheck aria-hidden />}>
+          {scopeNote}
+        </Notice>
+      )}
+    </Dialog>
+  );
+}
+
+/* ── Page ─────────────────────────────────────────────────────────────────── */
+
+export default function IntegrationsView() {
+  const { user } = useAuth();
+  const toast = useToast();
+
+  const [connected, setConnected] = useState<Set<string>>(new Set());
+  const [loading, setLoading] = useState(true);
+  const [busyService, setBusyService] = useState<string | null>(null);
+  const [credentialFor, setCredentialFor] = useState<CatalogEntry | null>(null);
+  const [oauthFor, setOauthFor] = useState<
+    { title: string; provider: "google" | "linear"; note?: string } | null
+  >(null);
+  const [disconnectFor, setDisconnectFor] = useState<CatalogEntry | null>(null);
+
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+  const refresh = useCallback(async () => {
     if (!user?.id) {
-      setError("Please log in first");
+      setLoading(false);
       return;
     }
+    try {
+      const result = await listIntegrations();
+      setConnected(
+        new Set((result?.integrations ?? []).map((i: Integration) => i.service_name))
+      );
+    } catch (err) {
+      toast.error(
+        "Could not load your connections",
+        err instanceof Error ? err.message : undefined
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, [user?.id, toast]);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  // The OAuth round trip returns here with its outcome in the query string.
+  // Reported as a toast and then stripped from the URL, so a refresh does not
+  // re-announce a connection made ten minutes ago.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const success = params.get("success");
+    const error = params.get("error");
+    const service = params.get("service");
+    if (!success && !error) return;
+
+    if (success) {
+      toast.success(
+        `${service || (success === "linear_connected" ? "Linear" : "Google")} connected`,
+        success === "google_connected"
+          ? "Every Google service below is now available."
+          : undefined
+      );
+      refresh();
+    } else if (error) {
+      toast.error("Could not complete the connection", error.replace(/_/g, " "));
+    }
+    window.history.replaceState({}, "", window.location.pathname);
+  }, [toast, refresh]);
+
+  const startOAuth = (provider: "google" | "linear") => {
+    if (!user?.id) return;
     const target =
-      config.oauthProvider === "linear"
+      provider === "linear"
         ? `${apiBaseUrl}/auth/linear?user_id=${user.id}`
         : // "google" rather than the individual card id: one consent screen
           // grants every Google scope anyway, so connecting Gmail should light
@@ -512,132 +419,170 @@ export default function IntegrationsSection() {
      * a 302 to Google or Linear, and the consent screen returns to the
      * backend's callback, which finally redirects back here. `router.push`
      * cannot start that chain — it would look for a Next route of this name.
-     * The rule cannot see that the base is external.
      */
-    // eslint-disable-next-line @next/next/no-location-assign-relative-destination
     window.location.href = target;
   };
 
-  const handleConnect = async (
+  const handleConnect = (entry: CatalogEntry) => {
+    if (entry.authType === "oauth") {
+      setOauthFor({
+        title: entry.title,
+        provider: entry.oauthProvider ?? "google",
+        note:
+          entry.oauthProvider === "google"
+            ? "One consent grants every Google service — Gmail, Calendar, Docs, Drive, Sheets, Slides, Forms and Meet."
+            : undefined,
+      });
+      return;
+    }
+    setCredentialFor(entry);
+  };
+
+  const submitCredentials = async (
     apiKey: string,
     credentials?: Record<string, string>
   ) => {
-    if (!user?.id || !modalIntegration) return;
-
-    setLoadingService(modalIntegration.id);
+    if (!user?.id || !credentialFor) return;
+    setBusyService(credentialFor.id);
     try {
-      await connectIntegration(
-        modalIntegration.id,
-        apiKey,
-        credentials
-      );
-      setConnectedServices((prev) => new Set([...prev, modalIntegration.id]));
-      setModalIntegration(null);
+      await connectIntegration(credentialFor.id, apiKey, credentials);
+      setConnected((prev) => new Set([...prev, credentialFor.id]));
+      toast.success(`${credentialFor.title} connected`);
+      setCredentialFor(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to connect");
+      toast.error(
+        `Could not connect ${credentialFor.title}`,
+        err instanceof Error ? err.message : undefined
+      );
     } finally {
-      setLoadingService(null);
+      setBusyService(null);
     }
   };
 
-  const handleDisconnect = async (serviceId: string) => {
-    if (!user?.id) return;
-
-    setLoadingService(serviceId);
+  const confirmDisconnect = async () => {
+    if (!user?.id || !disconnectFor) return;
+    const entry = disconnectFor;
+    setDisconnectFor(null);
+    setBusyService(entry.id);
     try {
-      await disconnectIntegration(serviceId);
-      setConnectedServices((prev) => {
+      await disconnectIntegration(entry.id);
+      setConnected((prev) => {
         const next = new Set(prev);
-        next.delete(serviceId);
+        next.delete(entry.id);
         return next;
       });
+      toast.success(`${entry.title} disconnected`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to disconnect");
+      toast.error(
+        `Could not disconnect ${entry.title}`,
+        err instanceof Error ? err.message : undefined
+      );
     } finally {
-      setLoadingService(null);
+      setBusyService(null);
     }
   };
 
+  const total = ALL_ENTRIES.length;
+  const githubConnected = connected.has("github");
+
   return (
-    <section>
-      <div className="py-12">
-        <div className="mx-auto max-w-5xl px-6">
-          <div className="text-center mb-12">
-            <h2 className="text-3xl font-semibold md:text-4xl">
-              Your Integrations
-            </h2>
-            <p className="text-muted-foreground mt-4">
-              Connect your tools to enable AI-powered automation.
-            </p>
-          </div>
+    <PageShell>
+      <PageHeader
+        title="Connections"
+        description="Locus reads and writes through your own credentials. Nothing here is required except GitHub — every other connection widens what a run can see or say."
+        actions={
+          !loading && (
+            <span className="tabular inline-flex items-center gap-2 rounded-pill border border-line bg-surface px-3.5 py-1.5 text-sm text-muted">
+              <Plug className="size-4 text-subtle" aria-hidden />
+              {connected.size} of {total} connected
+            </span>
+          )
+        }
+      />
 
-          {error && (
-            <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700 flex items-center gap-2">
-              <X size={18} />
-              {error}
-              <button
-                onClick={() => setError(null)}
-                className="ml-auto text-sm underline"
-              >
-                Dismiss
-              </button>
-            </div>
-          )}
+      {!loading && !githubConnected && (
+        <Notice
+          tone="warning"
+          className="mt-6"
+          title="GitHub is not connected"
+          icon={<Plug aria-hidden />}
+        >
+          The pipeline reads pull requests and posts its analysis through
+          GitHub. Until it is connected, nothing else on this page has anything
+          to act on.
+        </Notice>
+      )}
 
-          {successMessage && (
-            <div className="mb-6 p-4 bg-green-50 border border-green-200 rounded-lg text-green-700 flex items-center gap-2">
-              <Check size={18} />
-              {successMessage}
-              <button
-                onClick={() => setSuccessMessage(null)}
-                className="ml-auto text-sm underline"
-              >
-                Dismiss
-              </button>
-            </div>
-          )}
-
-          {isLoadingList ? (
-            <div className="flex justify-center py-12">
-              <Loader2
-                className="animate-spin text-muted-foreground"
-                size={32}
+      <div className="mt-8 space-y-10">
+        {loading
+          ? CATALOG.map((group) => (
+              <div key={group.id} className="space-y-3">
+                <Skeleton className="h-6 w-40" />
+                <Panel className="divide-y divide-line">
+                  {group.entries.slice(0, 3).map((e) => (
+                    <div key={e.id} className="flex items-center gap-4 px-5 py-4">
+                      <Skeleton className="size-10 shrink-0" />
+                      <div className="flex-1 space-y-2">
+                        <Skeleton className="h-4 w-32" />
+                        <Skeleton className="h-3 w-full max-w-md" />
+                      </div>
+                      <Skeleton className="h-8 w-24 rounded-pill" />
+                    </div>
+                  ))}
+                </Panel>
+              </div>
+            ))
+          : CATALOG.map((group) => (
+              <ConnectionGroup
+                key={group.id}
+                group={group}
+                connectedServices={connected}
+                busyService={busyService}
+                onConnect={handleConnect}
+                onDisconnect={setDisconnectFor}
+                onConnectGoogle={() =>
+                  setOauthFor({
+                    title: "Google Workspace",
+                    provider: "google",
+                    note: "One consent grants every Google service — Gmail, Calendar, Docs, Drive, Sheets, Slides, Forms and Meet.",
+                  })
+                }
               />
-            </div>
-          ) : (
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {INTEGRATIONS.map((config) => (
-                <IntegrationCard
-                  key={config.id}
-                  config={config}
-                  isConnected={connectedServices.has(config.id)}
-                  isLoading={loadingService === config.id}
-                  onConnect={() => handleConnectClick(config)}
-                  onDisconnect={() => handleDisconnect(config.id)}
-                />
-              ))}
-            </div>
-          )}
-        </div>
+            ))}
       </div>
 
-      {/* Connect Modal - only for API key auth */}
-      {modalIntegration && modalIntegration.authType === "api_key" && (
-        <ConnectModal
-          integration={modalIntegration}
-          onClose={() => setModalIntegration(null)}
-          onConnect={handleConnect}
+      {credentialFor && (
+        <CredentialDialog
+          entry={credentialFor}
+          onClose={() => setCredentialFor(null)}
+          onSubmit={submitCredentials}
         />
       )}
 
-      {/* OAuth Modal - shows sign in button */}
-      {modalIntegration && modalIntegration.authType === "oauth" && (
-        <OAuthConnectModal
-          integration={modalIntegration}
-          onClose={() => setModalIntegration(null)}
-          onConnect={() => handleOAuthConnect(modalIntegration)}
+      {oauthFor && (
+        <OAuthDialog
+          title={oauthFor.title}
+          provider={oauthFor.provider}
+          scopeNote={oauthFor.note}
+          onClose={() => setOauthFor(null)}
+          onConfirm={() => startOAuth(oauthFor.provider)}
         />
       )}
-    </section>
+
+      {/* Names the service rather than saying "this integration". Disconnecting
+          the wrong one is silent until a loop stops working days later. */}
+      <ConfirmDialog
+        open={!!disconnectFor}
+        onClose={() => setDisconnectFor(null)}
+        onConfirm={confirmDisconnect}
+        title={`Disconnect ${disconnectFor?.title ?? ""}?`}
+        description={
+          disconnectFor
+            ? `Locus will stop using your ${disconnectFor.title} credentials immediately. Anything in the pipeline that depends on it is skipped until you reconnect.`
+            : undefined
+        }
+        confirmLabel="Disconnect"
+      />
+    </PageShell>
   );
 }
