@@ -94,6 +94,21 @@
   --info-soft: oklch(0.972 0.016 248);
   --info-border: oklch(0.906 0.032 248);
 
+  /* --- Type on artwork ---------------------------------------------------
+     The landing hero is a painted scene with a fixed palette — it is the one
+     surface in the product whose colours do not flip with the theme, because a
+     picture that inverts is a different picture. Type over it therefore cannot
+     use `ink`/`muted`, which are chosen against the page: it needs a pair
+     chosen against the image. Defined here rather than inline so the hero, the
+     nav floating over it and the eyebrow all quote the same two values.
+
+     They are identical in both themes on purpose. `--on-art-line` is the
+     hairline for a control sitting on the scene, where `--border` would vanish. */
+  --on-art: oklch(0.995 0.004 90);
+  --on-art-muted: oklch(0.928 0.014 84);
+  --on-art-line: oklch(1 0 0 / 0.28);
+  --on-art-fill: oklch(1 0 0 / 0.12);
+
   /* --- Focus -------------------------------------------------------------
      One ring, everywhere, in the accent. Never removed without replacement. */
   --ring: oklch(0.700 0.110 74);
@@ -209,6 +224,11 @@
   --color-info: var(--info);
   --color-info-soft: var(--info-soft);
   --color-info-border: var(--info-border);
+
+  --color-on-art: var(--on-art);
+  --color-on-art-muted: var(--on-art-muted);
+  --color-on-art-line: var(--on-art-line);
+  --color-on-art-fill: var(--on-art-fill);
 
   --color-ring: var(--ring);
 
@@ -367,6 +387,18 @@
     white-space: nowrap;
   }
 
+  /* The same pill, standing on the hero artwork. It cannot inherit `.eyebrow`'s
+     fill and hairline: both are chosen against the page, and a `--surface` chip
+     on a painted sky reads as a sticker. Glass instead — the picture stays
+     visible through it, which is the whole reason it is there. */
+  .eyebrow-art {
+    border-color: var(--on-art-line);
+    background: var(--on-art-fill);
+    color: var(--on-art);
+    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
+  }
+
   /* Wide content — tables, diagrams, long code — scrolls inside its own box.
      The page body must never scroll sideways. */
   .scroll-x {
@@ -419,6 +451,190 @@
     to {
       opacity: 1;
       transform: none;
+    }
+  }
+
+  /* ── The hero scene's ambient motion ───────────────────────────────────
+     CSS animations rather than Framer Motion timelines, because roughly ninety
+     of them run at once: each is a compositor-driven transform loop with no
+     per-frame JavaScript, where ninety motion values would be ninety
+     subscriptions ticking on the main thread every frame.
+
+     Wind is composed, never a single sine. Real wind arrives in gusts, and one
+     sinusoid at one period is the tell that gives away every animated
+     illustration — so a band of foliage is two nested groups, a long slow
+     `gust` outside and a short `sway` inside, and the transforms multiply. Each
+     element then gets its own duration and a *negative* `animation-delay`,
+     which starts it mid-cycle: without that, ninety elements begin at phase
+     zero and the whole forest leans in unison on the first frame.
+
+     `transform-box: fill-box` is mandatory on every one of these. An SVG child
+     takes its transform origin from the viewBox origin by default, so
+     `transform-origin: 50% 100%` without it pivots the tree about the top-left
+     corner of the canvas and swings it across the sky. */
+  .hs-anim {
+    transform-box: fill-box;
+    will-change: transform;
+  }
+
+  /* Foliage and trees pivot at the base, the way anything rooted does. */
+  .hs-sway {
+    transform-box: fill-box;
+    transform-origin: 50% 100%;
+    animation: hs-sway var(--hs-dur, 6s) ease-in-out infinite;
+    animation-delay: var(--hs-delay, 0s);
+  }
+  .hs-gust {
+    transform-box: fill-box;
+    transform-origin: 50% 100%;
+    animation: hs-gust var(--hs-dur, 21s) ease-in-out infinite;
+    animation-delay: var(--hs-delay, 0s);
+  }
+
+  @keyframes hs-sway {
+    0%,
+    100% {
+      transform: rotate(calc(var(--hs-amp, 0.5deg) * -1));
+    }
+    50% {
+      transform: rotate(var(--hs-amp, 0.5deg));
+    }
+  }
+
+  /* The gust adds a lean and a shift, so the band travels as well as tilts —
+     foliage that only rotates reads as a windscreen wiper. */
+  @keyframes hs-gust {
+    0%,
+    100% {
+      transform: rotate(0deg) translateX(0);
+    }
+    38% {
+      transform: rotate(var(--hs-amp, 0.9deg)) translateX(var(--hs-shift, 5px));
+    }
+    62% {
+      transform: rotate(calc(var(--hs-amp, 0.9deg) * 0.45))
+        translateX(calc(var(--hs-shift, 5px) * 0.4));
+    }
+  }
+
+  /* Air: mist banks and cloud strata, which only ever travel sideways. */
+  .hs-drift {
+    transform-box: fill-box;
+    animation: hs-drift var(--hs-dur, 60s) ease-in-out infinite;
+    animation-delay: var(--hs-delay, 0s);
+    will-change: transform, opacity;
+  }
+  @keyframes hs-drift {
+    0%,
+    100% {
+      transform: translateX(0);
+      opacity: var(--hs-o1, 0.5);
+    }
+    50% {
+      transform: translateX(var(--hs-dx, 60px));
+      opacity: var(--hs-o2, 0.75);
+    }
+  }
+
+  /* Pollen and insects over the water at dusk. They rise, wander sideways, and
+     fade at both ends so nothing ever pops into existence. */
+  .hs-mote {
+    transform-box: fill-box;
+    animation: hs-mote var(--hs-dur, 18s) linear infinite;
+    animation-delay: var(--hs-delay, 0s);
+    will-change: transform, opacity;
+  }
+  @keyframes hs-mote {
+    0% {
+      transform: translate(0, 0);
+      opacity: 0;
+    }
+    14% {
+      opacity: var(--hs-o, 0.7);
+    }
+    50% {
+      transform: translate(var(--hs-dx, 26px), calc(var(--hs-dy, -150px) * 0.5));
+    }
+    86% {
+      opacity: var(--hs-o, 0.7);
+    }
+    100% {
+      transform: translate(calc(var(--hs-dx, 26px) * -0.6), var(--hs-dy, -150px));
+      opacity: 0;
+    }
+  }
+
+  /* A handful of leaves, falling. Rotation and lateral drift on the same
+     timeline is what makes one read as tumbling rather than dropping. */
+  .hs-leaf {
+    transform-box: fill-box;
+    animation: hs-leaf var(--hs-dur, 22s) linear infinite;
+    animation-delay: var(--hs-delay, 0s);
+    will-change: transform, opacity;
+  }
+  @keyframes hs-leaf {
+    0% {
+      transform: translate(0, 0) rotate(0deg);
+      opacity: 0;
+    }
+    10% {
+      opacity: 0.9;
+    }
+    35% {
+      transform: translate(var(--hs-dx, 60px), calc(var(--hs-dy, 340px) * 0.32))
+        rotate(140deg);
+    }
+    70% {
+      transform: translate(calc(var(--hs-dx, 60px) * -0.5), calc(var(--hs-dy, 340px) * 0.7))
+        rotate(280deg);
+    }
+    92% {
+      opacity: 0.7;
+    }
+    100% {
+      transform: translate(var(--hs-dx, 60px), var(--hs-dy, 340px)) rotate(430deg);
+      opacity: 0;
+    }
+  }
+
+  /* Rings spreading on the pond. Each ripple origin emits several of these on
+     staggered negative delays, which is what makes one continuous train of
+     rings out of a single keyframe — the alternative is one ring per origin,
+     which reads as a pulse rather than as something having landed in the
+     water. The stroke is `non-scaling`, so a ring that has grown twentyfold
+     is still a hairline instead of a hoop. */
+  .hs-ring {
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: hs-ring var(--hs-dur, 5s) ease-out infinite;
+    animation-delay: var(--hs-delay, 0s);
+  }
+  @keyframes hs-ring {
+    0% {
+      transform: scale(0.04);
+      opacity: 0;
+    }
+    14% {
+      opacity: var(--hs-o, 0.55);
+    }
+    100% {
+      transform: scale(1);
+      opacity: 0;
+    }
+  }
+
+  /* Light on water. Opacity only — a glint that moves is a boat. */
+  .hs-glint {
+    animation: hs-glint var(--hs-dur, 7s) ease-in-out infinite;
+    animation-delay: var(--hs-delay, 0s);
+  }
+  @keyframes hs-glint {
+    0%,
+    100% {
+      opacity: var(--hs-o1, 0.18);
+    }
+    50% {
+      opacity: var(--hs-o2, 0.62);
     }
   }
 
