@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/features/auth/auth-context";
 import { AppShell } from "@/components/layout/app-shell";
+import { LogoMark } from "@/components/ui/logo";
 
 /**
  * The signed-in half of the application.
@@ -31,10 +32,18 @@ export default function AppLayout({
   // Covers both "still reading storage" and the frame after the redirect is
   // queued but before it lands. Rendering the shell there would flash the
   // signed-in chrome at someone who is not signed in.
+  //
+  // The mark rather than the word "Loading…": this frame is measured in
+  // milliseconds on a warm load, and a word appearing and vanishing that fast
+  // reads as a flicker where a held brand mark reads as the app opening.
   if (isLoading || !isAuthenticated) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <div className="animate-pulse text-muted-foreground">Loading...</div>
+      <div
+        className="flex min-h-dvh items-center justify-center bg-bg"
+        role="status"
+        aria-label="Loading Locus"
+      >
+        <LogoMark className="size-9 animate-pulse text-subtle" />
       </div>
     );
   }

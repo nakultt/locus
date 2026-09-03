@@ -1,91 +1,108 @@
-import { ExternalLink } from "lucide-react";
+"use client";
+
+import { ArrowDownLeft, ArrowUpRight, ExternalLink, Search } from "lucide-react";
 import type { CommunicationEvent, WorklistItem } from "@/lib/api";
+import { Badge, Dot } from "@/components/ui/badge";
 import {
   CHANNEL_LABEL,
-  DIRECTION_GLYPH,
-  KIND_STYLE,
-  LOOP_STYLE,
+  KIND,
+  LOOP,
   ageLabel,
   timeOf,
 } from "./shared";
+import { cn } from "@/lib/utils";
 
 /**
  * One message, shown with its actual text.
  *
- * The body is rendered verbatim in a monospace block rather than summarized.
+ * The body is rendered verbatim in a monospace block rather than summarised.
  * A summary answers the easy questions; "what exactly did the bot say to my
  * team" is the one people actually ask, and only the real text answers it.
+ *
+ * The direction is an icon in a tinted well rather than an arrow glyph in a
+ * span — searched, sent and received are the three things a reader sorts this
+ * log by, and at a glance colour and shape do that faster than ↗ and ↙, which
+ * are easy to confuse and were rendering at 10px.
  */
-export const MessageRow = ({ event }: { event: CommunicationEvent }) => {
-  const dir = DIRECTION_GLYPH[event.direction];
-  const loop = LOOP_STYLE[event.loop];
+
+const DIRECTION = {
+  searched: { icon: Search, well: "bg-surface-2 text-subtle", verb: "Searched" },
+  sent: { icon: ArrowUpRight, well: "bg-info-soft text-info", verb: "Sent via" },
+  received: {
+    icon: ArrowDownLeft,
+    well: "bg-success-soft text-success",
+    verb: "From",
+  },
+} as const;
+
+export function MessageRow({ event }: { event: CommunicationEvent }) {
+  const dir = DIRECTION[event.direction];
+  const Icon = dir.icon;
+  const loop = LOOP[event.loop];
 
   return (
-    <div className="flex gap-2.5">
-      <span className={`mt-0.5 shrink-0 text-sm ${dir.tone}`} title={event.direction}>
-        {dir.glyph}
+    <div className="flex gap-3">
+      <span
+        className={cn(
+          "flex size-7 shrink-0 items-center justify-center rounded-pill",
+          dir.well
+        )}
+        aria-hidden
+      >
+        <Icon className="size-3.5" />
       </span>
 
       <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className={`rounded px-1.5 py-0.5 text-[10px] ${loop.className}`}>
-            {loop.label}
-          </span>
-          <span className="text-[11px] font-medium text-foreground">
-            {event.direction === "searched"
-              ? `Searched ${CHANNEL_LABEL[event.channel]}`
-              : event.direction === "sent"
-                ? `Sent via ${CHANNEL_LABEL[event.channel]}`
-                : `From ${CHANNEL_LABEL[event.channel]}`}
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <Badge tone={loop.tone}>{loop.label}</Badge>
+          <span className="text-sm font-medium text-ink">
+            {dir.verb} {CHANNEL_LABEL[event.channel]}
           </span>
           {event.participant && (
-            <span className="text-[11px] text-muted-foreground">
-              {event.direction === "sent" ? "to" : ""} {event.participant}
+            <span className="text-sm text-muted">
+              {event.direction === "sent" ? "to " : ""}
+              {event.participant}
             </span>
           )}
           {event.target && event.target !== event.participant && (
-            <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
-              {event.target}
-            </span>
+            <Badge tone="neutral">{event.target}</Badge>
           )}
-          {event.outcome && (
-            <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
-              {event.outcome}
-            </span>
-          )}
+          {event.outcome && <Badge tone="neutral">{event.outcome}</Badge>}
+
           {/* Reused context, not discussion about this PR. Labelled rather
               than hidden: the reviewer was given it, so the timeline would be
               misleading without it — and misleading with it, unmarked. */}
           {event.inherited && (
-            <span
-              className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-700 dark:text-amber-400"
+            <Badge
+              tone="warning"
               title="Found earlier on this work item and reused as context for this pull request"
             >
               earlier on this task
-            </span>
+            </Badge>
           )}
-          {!event.succeeded && (
-            <span className="rounded bg-red-500/10 px-1.5 py-0.5 text-[10px] text-red-600 dark:text-red-400">
-              not delivered
-            </span>
-          )}
-          <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
+
+          {/* A message nobody received looks exactly like one nobody answered,
+              so a failed send says so. */}
+          {!event.succeeded && <Badge tone="danger">not delivered</Badge>}
+
+          <span className="ml-auto shrink-0 text-xs text-subtle">
             {timeOf(event.created_at)}
           </span>
         </div>
 
         {event.query && (
-          <p className="mt-1 font-mono text-[11px] text-muted-foreground">
-            query: {event.query}
+          <p className="mt-1.5 font-mono text-xs text-muted">
+            <span className="text-subtle">query </span>
+            {event.query}
           </p>
         )}
 
         {event.subject && (
-          <p className="mt-1 text-[11px] font-medium text-foreground">{event.subject}</p>
+          <p className="mt-1.5 text-sm font-medium text-ink">{event.subject}</p>
         )}
 
         {event.body && (
-          <pre className="mt-1 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted/50 p-2 font-mono text-[11px] leading-relaxed text-foreground">
+          <pre className="mt-2 max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-md border border-line bg-surface-2 p-3 font-mono text-xs leading-relaxed text-ink">
             {event.body}
           </pre>
         )}
@@ -95,47 +112,49 @@ export const MessageRow = ({ event }: { event: CommunicationEvent }) => {
             href={event.permalink}
             target="_blank"
             rel="noreferrer"
-            className="mt-1 inline-flex items-center gap-1 text-[11px] text-blue-600 hover:underline dark:text-blue-400"
+            className="mt-2 inline-flex items-center gap-1.5 text-xs text-accent-strong underline-offset-2 hover:underline"
           >
-            Open in {CHANNEL_LABEL[event.channel]} <ExternalLink size={10} />
+            Open in {CHANNEL_LABEL[event.channel]}
+            <ExternalLink className="size-3" aria-hidden />
           </a>
         )}
       </div>
     </div>
   );
-};
+}
 
 /** One thing waiting on you, with the words that prompted it. */
-export const WorklistItemRow = ({ item }: { item: WorklistItem }) => {
-  const style = KIND_STYLE[item.kind];
+export function WorklistItemRow({ item }: { item: WorklistItem }) {
+  const kind = KIND[item.kind];
 
   return (
-    <div className="flex gap-2">
-      <span className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${style.dot}`} />
+    <div className="flex gap-3">
+      <span className="mt-1.5">
+        <Dot tone={kind.tone} />
+      </span>
+
       <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-baseline gap-x-2">
-          <span className={`text-xs font-medium ${style.className}`}>
-            {item.headline}
-          </span>
-          <span className="text-[11px] text-muted-foreground">
+        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+          <span className="text-sm font-medium text-ink">{item.headline}</span>
+          <span className="font-mono text-xs text-muted">
             {item.repo}#{item.pr_number}
           </span>
           {item.round_number > 1 && (
-            <span className="rounded bg-muted px-1.5 text-[10px] text-muted-foreground">
-              round {item.round_number}
-            </span>
+            <Badge tone="neutral">round {item.round_number}</Badge>
           )}
-          <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
+          <span className="tabular ml-auto shrink-0 text-xs text-subtle">
             {ageLabel(item.age_hours)}
           </span>
         </div>
 
-        {/* Checklist for scanning. */}
         {item.detail.length > 0 && (
-          <ul className="mt-1 space-y-0.5">
+          <ul className="mt-1.5 space-y-1">
             {item.detail.map((d, i) => (
-              <li key={i} className="text-[11px] text-muted-foreground">
-                • {d}
+              <li key={i} className="flex gap-2 text-sm text-muted">
+                <span className="text-subtle" aria-hidden>
+                  •
+                </span>
+                {d}
               </li>
             ))}
           </ul>
@@ -145,7 +164,7 @@ export const WorklistItemRow = ({ item }: { item: WorklistItem }) => {
         {item.quotes.map((q, i) => (
           <pre
             key={i}
-            className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/50 p-1.5 font-mono text-[11px] text-foreground"
+            className="mt-2 max-h-32 overflow-y-auto whitespace-pre-wrap break-words rounded-md border border-line bg-surface p-3 font-mono text-xs leading-relaxed text-ink"
           >
             {q}
           </pre>
@@ -156,12 +175,13 @@ export const WorklistItemRow = ({ item }: { item: WorklistItem }) => {
             href={item.pr_url}
             target="_blank"
             rel="noreferrer"
-            className="mt-1 inline-flex items-center gap-1 text-[11px] text-blue-600 hover:underline dark:text-blue-400"
+            className="mt-2 inline-flex items-center gap-1.5 text-xs text-accent-strong underline-offset-2 hover:underline"
           >
-            Open PR <ExternalLink size={10} />
+            Open pull request
+            <ExternalLink className="size-3" aria-hidden />
           </a>
         )}
       </div>
     </div>
   );
-};
+}
