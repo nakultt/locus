@@ -288,6 +288,15 @@ function ProfileTab() {
   );
 }
 
+/**
+ * The provider's own label, so the panel names OpenAI rather than "moe-local"
+ * when a hosted backend is configured.
+ */
+function providerLabel(llm: LLMStatus): string {
+  const active = llm.providers?.find((p) => p.active);
+  return active?.label ?? llm.provider ?? "—";
+}
+
 /* ── System ───────────────────────────────────────────────────────────────── */
 
 function SystemTab() {
@@ -329,12 +338,16 @@ function SystemTab() {
   return (
     <div className="space-y-10">
       {/* ── Local model ─────────────────────────────────────────────────── */}
-      <Section title="Local model server">
+      <Section title="Model backend">
         <Panel>
           <PanelHeader
             icon={<Cpu aria-hidden />}
             title="Inference"
-            description="Every model that reads your code automatically runs here, over loopback."
+            description={
+              llm && llm.is_local === false
+                ? "Analysis runs on a hosted provider — diffs and discussion leave this machine."
+                : "Every model that reads your code automatically runs here, over loopback."
+            }
             actions={
               <IconButton
                 label="Check again"
@@ -368,9 +381,20 @@ function SystemTab() {
                 {llm?.base_url && (
                   <dl className="mt-4 divide-y divide-line border-t border-line">
                     {[
+                      ["Provider", providerLabel(llm)],
                       ["Endpoint", llm.base_url],
                       ["Fast model", llm.fast_model],
                       ["Smart model", llm.smart_model],
+                      ...(llm.api_key_env
+                        ? [
+                            [
+                              "API key",
+                              `${llm.api_key_env} ${
+                                llm.api_key_configured ? "(set)" : "(missing)"
+                              }`,
+                            ] as [string, string],
+                          ]
+                        : []),
                     ].map(([label, value]) => (
                       <div
                         key={label}
@@ -385,12 +409,56 @@ function SystemTab() {
                   </dl>
                 )}
 
-                {!llm?.available && (
-                  <p className="mt-4 text-sm leading-relaxed text-muted">
-                    Open MoE Model Manager and load a text model. No API key is
-                    required — the server holds one model at a time, and chat
-                    reports this rather than failing with a connection error.
-                  </p>
+                {!llm?.available &&
+                  (llm?.is_local === false ? (
+                    <p className="mt-4 text-sm leading-relaxed text-muted">
+                      Set {llm.api_key_env ?? "the provider's API key"} in{" "}
+                      <code className="font-mono text-xs">backend/.env</code> and
+                      restart the backend, or set{" "}
+                      <code className="font-mono text-xs">LLM_PROVIDER=local</code>{" "}
+                      to go back to MoE Model Manager.
+                    </p>
+                  ) : (
+                    <p className="mt-4 text-sm leading-relaxed text-muted">
+                      Open MoE Model Manager and load a text model. No API key is
+                      required — the server holds one model at a time, and chat
+                      reports this rather than failing with a connection error.
+                    </p>
+                  ))}
+
+                {llm?.providers && llm.providers.length > 0 && (
+                  <div className="mt-6 border-t border-line pt-4">
+                    <p className="text-sm text-muted">
+                      Set <code className="font-mono text-xs">LLM_PROVIDER</code> in{" "}
+                      <code className="font-mono text-xs">backend/.env</code> to switch.
+                      A hosted provider sends every diff, Slack thread and ticket the
+                      analysis reads to a third party, on every push.
+                    </p>
+                    <ul className="mt-3 space-y-2">
+                      {llm.providers.map((p) => (
+                        <li
+                          key={p.id}
+                          className="flex items-baseline justify-between gap-4"
+                        >
+                          <span className="flex min-w-0 items-baseline gap-2">
+                            <code className="font-mono text-xs text-ink">{p.id}</code>
+                            <span className="truncate text-sm text-muted">
+                              {p.label}
+                            </span>
+                          </span>
+                          <span className="shrink-0 text-xs text-muted">
+                            {p.active
+                              ? "active"
+                              : p.is_local
+                                ? "available"
+                                : p.api_key_configured
+                                  ? `${p.api_key_env} set`
+                                  : `needs ${p.api_key_env}`}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
                 )}
               </>
             )}

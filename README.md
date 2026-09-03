@@ -75,7 +75,16 @@ accurate version:
 > runs when you hand it a ticket, on a model you choose.**
 
 The security scanner, the code reviewer, the QA classifier and the review-asks summarizer all run
-on `MOE_BASE_URL` over loopback, on every push, unprompted. That is unchanged.
+on `MOE_BASE_URL` over loopback, on every push, unprompted. That is the default and it is unchanged.
+
+If you would rather use a hosted model, set `LLM_PROVIDER` to `openai`, `anthropic` or `gemini`
+and supply that provider's key (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`). Locus
+then sends *those same automatic passes* — every diff, Slack thread and ticket they read — to that
+provider, so the sentence above stops being true for your install. Settings → System names the
+active provider for exactly that reason. Keys are read from `backend/.env` only: they are
+environment configuration rather than per-user data, no endpoint returns one, and the status
+surface reports only whether one is set. `anthropic` needs `uv sync --extra hosted`; OpenAI and
+Gemini speak the OpenAI wire format and need nothing extra.
 
 The authoring agent is different. A local 35B model writing production code against a real ticket
 is the weakest link in the whole mode, so **OpenCode runs on its own configured model**, which is

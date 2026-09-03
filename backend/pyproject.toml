@@ -56,6 +56,13 @@ security = [
     "semgrep>=1.60.0",
 ]
 
+# Hosted model providers. OpenAI and Gemini speak the OpenAI wire format and
+# need nothing beyond langchain-openai, which is already a core dependency;
+# Anthropic does not, so LLM_PROVIDER=anthropic needs this extra.
+hosted = [
+    "langchain-anthropic>=1.2.0",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",
