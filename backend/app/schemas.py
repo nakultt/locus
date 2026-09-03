@@ -49,14 +49,34 @@ class UserLogin(BaseModel):
     remember_me: bool = Field(False, description="Keep user logged in for 30 days")
 
 
+class LLMProviderOption(BaseModel):
+    """One backend Locus can be pointed at, and whether it is ready to use."""
+    id: str
+    label: str
+    is_local: bool
+    active: bool
+    api_key_env: str = Field("", description="Env var holding the key; empty for local")
+    api_key_configured: bool
+    fast_model: str
+    smart_model: str
+
+
 class LLMStatus(BaseModel):
-    """Status of the local model backend."""
-    available: bool = Field(..., description="Whether a text model is loaded and ready")
+    """Status of the configured model backend."""
+    available: bool = Field(..., description="Whether the backend can serve a request")
     message: str = Field(..., description="Human-readable status or remediation hint")
     provider: str | None = None
+    is_local: bool = True
     base_url: str | None = None
     fast_model: str | None = None
     smart_model: str | None = None
+    api_key_env: str | None = Field(
+        None, description="Env var the key is read from; null for the local backend"
+    )
+    api_key_configured: bool = Field(
+        True, description="Whether a key is set. The key itself is never returned."
+    )
+    providers: list[LLMProviderOption] = Field(default_factory=list)
 
 
 # ============== Integration Schemas ==============
