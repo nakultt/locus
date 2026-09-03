@@ -54,7 +54,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   };
 
   return (
-    <div className="flex min-h-dvh flex-col bg-bg">
+    /* `h-dvh`, not `min-h-dvh`.
+       Every page here scrolls its own content — `PageShell` and the chat
+       transcript both own an `overflow-y-auto` region — and that only works if
+       something above them is actually bounded. With a *minimum* height the
+       shell grew past the viewport instead, so the document scrolled: in chat
+       the conversation rail and its header slid up under the application bar
+       while the transcript sat still. An exact viewport height gives `flex-1`
+       a real size to divide. */
+    <div className="flex h-dvh flex-col overflow-hidden bg-bg">
       <header className="sticky top-0 z-30 border-b border-line/80 bg-bg/85 backdrop-blur-xl">
         <div className="mx-auto flex h-16 max-w-[92rem] items-center gap-3 px-4 sm:px-6 lg:px-8">
           {/* Brand. Links to Work rather than to `/`: for someone signed in,

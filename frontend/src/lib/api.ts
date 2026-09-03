@@ -1172,6 +1172,16 @@ export interface TaskCard {
    */
   linked_branches: LinkedBranch[];
 
+  /**
+   * The work item's written record, when one exists.
+   *
+   * This is the link handed to the senior dev and the testing team, so it is
+   * on the card rather than only in the detail response -- it is the thing
+   * someone opens the board to fetch. Null until a document exists; the board
+   * never creates one.
+   */
+  doc_url?: string | null;
+
   items: WorklistItem[];
   needs_you: boolean;
   blocked_reason?: string | null;

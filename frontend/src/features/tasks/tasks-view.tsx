@@ -38,6 +38,7 @@ import { useToast } from "@/components/ui/toast";
 import { TaskRow } from "./task-row";
 import { TaskSheet } from "./task-sheet";
 import { JobRow } from "./runs";
+import { GettingStarted } from "./getting-started";
 
 /**
  * The work board.
@@ -179,8 +180,6 @@ export default function TasksView() {
     );
   }, [board, filter, query]);
 
-  const githubMissing = summary && !summary.github_connected;
-
   if (loading && !board) {
     return (
       <PageShell>
@@ -219,23 +218,11 @@ export default function TasksView() {
         }
       />
 
-      {/* GitHub is the one connection the pipeline cannot run without, so its
-          absence is stated here rather than only on the connections page. */}
-      {githubMissing && (
-        <Notice
-          tone="warning"
-          className="mt-6"
-          icon={<Plug aria-hidden />}
-          title="GitHub is not connected"
-          action={
-            <Button asChild size="sm" variant="secondary">
-              <Link href="/integrations">Connect</Link>
-            </Button>
-          }
-        >
-          Nothing can be analysed until Locus can read your pull requests.
-        </Notice>
-      )}
+      {/* What to do first, while anything is still missing. A new account
+          otherwise lands on "Nothing is assigned to you", which is true and
+          gives no indication that GitHub has to be connected before any of
+          this works. */}
+      <GettingStarted summary={summary} board={board} />
 
       {/* A source that did not answer is said out loud. "Nothing assigned" and
           "Jira did not respond" mean very different things to someone deciding

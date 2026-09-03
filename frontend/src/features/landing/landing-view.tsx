@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { motion, useReducedMotion, useScroll, useSpring } from "framer-motion";
 import {
   ArrowRight,
   CheckCircle2,
@@ -16,6 +17,10 @@ import {
   X,
 } from "lucide-react";
 import { useAuth } from "@/features/auth/auth-context";
+import { HeroBackdrop } from "@/features/landing/hero-backdrop";
+import { HeroDemo } from "@/features/landing/hero-demo";
+import { ToolMarquee } from "@/features/landing/marquee";
+import { Reveal, RevealGroup, RevealItem, RevealWords } from "@/features/landing/motion";
 import { Button } from "@/components/ui/button";
 import { LogoMark, Wordmark } from "@/components/ui/logo";
 import { cn } from "@/lib/utils";
@@ -23,16 +28,19 @@ import { cn } from "@/lib/utils";
 /**
  * The front door.
  *
- * Built to the reference material's proportions rather than to a template: a
- * floating pill nav over the content, an eyebrow chip, a display headline at a
- * size the rest of the product never uses, one primary action, and a soft
- * horizon behind all of it. What it replaces was an animated grid, three blurred
- * colour blobs and a headline that said "Your AI-Powered Productivity Hub",
- * which describes nothing and could sit on any product.
+ * Built to the reference material's proportions: a floating pill nav over the
+ * content, an eyebrow chip, a display headline at a size the rest of the
+ * product never uses, one primary action, and a soft horizon behind all of it.
  *
- * The copy here is the same claim the repository's own documentation makes:
- * this runs the stretch between a ticket landing on someone and the testing
- * team signing off. That is specific, and it is what the product does.
+ * The motion is deliberately load-bearing rather than decorative. The hero runs
+ * the actual pipeline — nine stages advancing on a timer, writing a log as they
+ * go — because a page whose job is explaining what a product does should show
+ * it doing that. Everything else (words rising into the headline, sections
+ * arriving on scroll, the tool row travelling) is quiet by comparison, so the
+ * one thing that moves for a *reason* is the thing you look at.
+ *
+ * Every animated component reads `useReducedMotion` and renders its final state
+ * when it is set. There is no "reduced" variant that still moves.
  */
 
 const SECTIONS = [
@@ -50,7 +58,7 @@ const PIPELINE = [
   {
     icon: ShieldCheck,
     title: "Two passes, never conflated",
-    body: "Scanner rules produce confirmed findings. The model produces possible ones, labelled as such. A guess has never been presented as a vulnerability, because one that is wrong costs the team's trust permanently.",
+    body: "Scanner rules produce confirmed findings. The model produces possible ones, labelled as such. A guess is never presented as a vulnerability, because one that is wrong costs a team's trust permanently.",
   },
   {
     icon: GitPullRequest,
@@ -86,6 +94,16 @@ export default function LandingView() {
   const { isAuthenticated, isLoading } = useAuth();
   const [menuOpen, setMenuOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
+  const still = useReducedMotion();
+
+  // A reading-progress hairline across the top. Springed rather than bound
+  // straight to scroll, so a flick of the wheel does not make it twitch.
+  const { scrollYProgress } = useScroll();
+  const progress = useSpring(scrollYProgress, {
+    stiffness: 180,
+    damping: 30,
+    restDelta: 0.001,
+  });
 
   // The bar earns its border only once there is something behind it. Over the
   // hero it floats; on the page it separates.
@@ -106,11 +124,21 @@ export default function LandingView() {
 
   return (
     <div className="min-h-dvh bg-bg">
+      {!still && (
+        <motion.div
+          aria-hidden
+          style={{ scaleX: progress }}
+          className="fixed inset-x-0 top-0 z-50 h-0.5 origin-left bg-accent"
+        />
+      )}
+
       {/* ── Nav ───────────────────────────────────────────────────────────── */}
       <header
         className={cn(
           "sticky top-0 z-40 transition-colors duration-[--dur]",
-          scrolled ? "border-b border-line bg-bg/85 backdrop-blur-xl" : "border-b border-transparent"
+          scrolled
+            ? "border-b border-line bg-bg/85 backdrop-blur-xl"
+            : "border-b border-transparent"
         )}
       >
         <div className="mx-auto flex h-18 max-w-[80rem] items-center gap-4 px-5 sm:px-8">
@@ -179,35 +207,45 @@ export default function LandingView() {
       </header>
 
       {/* ── Hero ──────────────────────────────────────────────────────────── */}
-      <section className="relative overflow-hidden px-5 pb-24 pt-10 sm:px-8 sm:pb-32 sm:pt-16">
-        <Horizon />
+      <section className="relative overflow-hidden px-5 pb-20 pt-10 sm:px-8 sm:pt-16">
+        <HeroBackdrop />
 
-        <div className="relative mx-auto max-w-4xl text-center">
-          <span className="eyebrow animate-in-up">
+        <div className="relative z-10 mx-auto max-w-4xl text-center">
+          <motion.span
+            className="eyebrow"
+            initial={still ? false : { opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.5, ease: [0.32, 0.72, 0, 1] }}
+          >
             <span className="size-1.5 rounded-pill bg-accent" aria-hidden />
             Ticket to sign-off, without the coordination
-          </span>
+          </motion.span>
 
-          <h1
-            className="mt-7 text-balance text-[clamp(2.75rem,7.5vw,5rem)] font-normal leading-[1.02] tracking-[-0.035em] text-ink animate-in-up"
-            style={{ animationDelay: "60ms" }}
-          >
-            <span className="text-muted">The work between</span>
-            <br className="hidden sm:block" /> writing it and shipping it
+          <h1 className="mt-7 text-balance text-[clamp(2.75rem,7.5vw,5rem)] font-normal leading-[1.02] tracking-[-0.035em] text-ink">
+            <RevealWords text="The work between" className="block text-muted" />
+            <RevealWords
+              text="writing it and shipping it"
+              className="block"
+              delay={0.18}
+            />
           </h1>
 
-          <p
-            className="mx-auto mt-6 max-w-xl text-pretty text-body leading-relaxed text-muted animate-in-up sm:text-lg"
-            style={{ animationDelay: "120ms" }}
+          <motion.p
+            className="mx-auto mt-6 max-w-xl text-pretty text-body leading-relaxed text-muted sm:text-lg"
+            initial={still ? false : { opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.6, delay: 0.5, ease: [0.32, 0.72, 0, 1] }}
           >
             A ticket lands on you. Somewhere after that come the context, the
             security pass, the review rounds, the QA thread and the board. Locus
             runs all of it, and shows you every step it took.
-          </p>
+          </motion.p>
 
-          <div
-            className="mt-9 flex flex-col items-center justify-center gap-3 animate-in-up sm:flex-row"
-            style={{ animationDelay: "180ms" }}
+          <motion.div
+            className="mt-9 flex flex-col items-center justify-center gap-3 sm:flex-row"
+            initial={still ? false : { opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.6, delay: 0.62, ease: [0.32, 0.72, 0, 1] }}
           >
             {/* The reference CTA: a pill whose leading icon sits in its own
                 filled circle. It gives the primary action a shape nothing else
@@ -225,30 +263,35 @@ export default function LandingView() {
             <Button asChild variant="secondary" size="xl" className="w-full sm:w-auto">
               <a href="#pipeline">See how it works</a>
             </Button>
-          </div>
-
-          <p
-            className="mt-7 text-xs text-subtle animate-in-up"
-            style={{ animationDelay: "240ms" }}
-          >
-            Connects GitHub · Jira · Slack · Linear · Google Workspace
-          </p>
+          </motion.div>
         </div>
 
-        {/* The product itself, cropped. A screenshot of the board says more
-            about what this is than any illustration would. */}
-        <div
-          className="relative mx-auto mt-16 max-w-5xl animate-in-up"
-          style={{ animationDelay: "300ms" }}
+        {/* The product, running. Not a screenshot — the same nine stages the
+            board renders, advancing on a timer. */}
+        <motion.div
+          className="relative z-10 mx-auto mt-16 max-w-4xl"
+          initial={still ? false : { opacity: 0, y: 28 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.85, delay: 0.75, ease: [0.32, 0.72, 0, 1] }}
         >
-          <BoardPreview />
+          <HeroDemo />
+        </motion.div>
+      </section>
+
+      {/* ── Tools ─────────────────────────────────────────────────────────── */}
+      <section className="border-y border-line bg-surface-2/40 py-10">
+        <div className="mx-auto max-w-[80rem] px-5 sm:px-8">
+          <p className="mb-6 text-center text-label uppercase text-subtle">
+            Reads and writes through your own accounts
+          </p>
+          <ToolMarquee />
         </div>
       </section>
 
       {/* ── Pipeline ──────────────────────────────────────────────────────── */}
-      <section id="pipeline" className="border-t border-line px-5 py-24 sm:px-8">
+      <section id="pipeline" className="px-5 py-24 sm:px-8">
         <div className="mx-auto max-w-[80rem]">
-          <div className="max-w-2xl">
+          <Reveal className="max-w-2xl">
             <span className="eyebrow">
               <Sparkles className="size-3.5 text-accent-strong" aria-hidden />
               What actually runs
@@ -256,11 +299,11 @@ export default function LandingView() {
             <h2 className="mt-6 text-balance text-[clamp(2rem,4vw,3rem)] leading-[1.08] tracking-[-0.03em] text-ink">
               Four things happen on every push, whether or not anyone is watching
             </h2>
-          </div>
+          </Reveal>
 
-          <ol className="mt-14 grid gap-x-10 gap-y-12 sm:grid-cols-2">
+          <RevealGroup as="ol" className="mt-14 grid gap-x-10 gap-y-12 sm:grid-cols-2">
             {PIPELINE.map((step, i) => (
-              <li key={step.title} className="flex gap-5">
+              <RevealItem as="li" key={step.title} className="flex gap-5">
                 <span className="flex size-11 shrink-0 items-center justify-center rounded-pill border border-line bg-surface">
                   <step.icon className="size-5 text-accent-strong" aria-hidden />
                 </span>
@@ -273,36 +316,44 @@ export default function LandingView() {
                     {step.body}
                   </p>
                 </div>
-              </li>
+              </RevealItem>
             ))}
-          </ol>
+          </RevealGroup>
         </div>
       </section>
 
       {/* ── Surfaces ──────────────────────────────────────────────────────── */}
-      <section id="surfaces" className="border-t border-line bg-surface-2/50 px-5 py-24 sm:px-8">
+      <section
+        id="surfaces"
+        className="border-t border-line bg-surface-2/50 px-5 py-24 sm:px-8"
+      >
         <div className="mx-auto max-w-[80rem]">
-          <div className="max-w-2xl">
+          <Reveal className="max-w-2xl">
             <span className="eyebrow">Three surfaces</span>
             <h2 className="mt-6 text-balance text-[clamp(2rem,4vw,3rem)] leading-[1.08] tracking-[-0.03em] text-ink">
               A board, a conversation, and a record you can hand to someone
             </h2>
-          </div>
+          </Reveal>
 
-          <div className="mt-14 grid gap-4 md:grid-cols-3">
+          <RevealGroup className="mt-14 grid gap-4 md:grid-cols-3">
             {SURFACES.map((s) => (
-              <div
-                key={s.title}
-                className="rounded-xl border border-line bg-surface p-7 transition-colors hover:border-line-strong"
-              >
-                <span className="flex size-11 items-center justify-center rounded-pill bg-accent-soft">
-                  <s.icon className="size-5 text-accent-strong" aria-hidden />
-                </span>
-                <h3 className="mt-5 text-h2 text-ink">{s.title}</h3>
-                <p className="mt-2 text-sm leading-relaxed text-muted">{s.body}</p>
-              </div>
+              <RevealItem key={s.title}>
+                {/* A hover lift, small enough to read as responsiveness rather
+                    than as the card trying to get your attention. */}
+                <motion.div
+                  whileHover={still ? undefined : { y: -4 }}
+                  transition={{ duration: 0.25, ease: [0.32, 0.72, 0, 1] }}
+                  className="h-full rounded-xl border border-line bg-surface p-7 transition-colors hover:border-line-strong"
+                >
+                  <span className="flex size-11 items-center justify-center rounded-pill bg-accent-soft">
+                    <s.icon className="size-5 text-accent-strong" aria-hidden />
+                  </span>
+                  <h3 className="mt-5 text-h2 text-ink">{s.title}</h3>
+                  <p className="mt-2 text-sm leading-relaxed text-muted">{s.body}</p>
+                </motion.div>
+              </RevealItem>
             ))}
-          </div>
+          </RevealGroup>
         </div>
       </section>
 
@@ -314,7 +365,7 @@ export default function LandingView() {
           a changelog to find out where their code went. */}
       <section id="trust" className="border-t border-line px-5 py-24 sm:px-8">
         <div className="mx-auto grid max-w-[80rem] gap-12 lg:grid-cols-2 lg:gap-20">
-          <div>
+          <Reveal>
             <span className="eyebrow">
               <ShieldCheck className="size-3.5 text-accent-strong" aria-hidden />
               Where the models run
@@ -335,9 +386,9 @@ export default function LandingView() {
               records which model ran, and can withhold your internal discussion
               entirely.
             </p>
-          </div>
+          </Reveal>
 
-          <ul className="space-y-3 self-center">
+          <RevealGroup as="ul" className="space-y-3 self-center">
             {[
               "Credentials are Fernet-encrypted and held per request, never in module state",
               "The agent works in a throwaway git worktree, never your checkout",
@@ -345,7 +396,8 @@ export default function LandingView() {
               "A human commit on the branch ends autonomous mode for that work item",
               "Every message sent and received is recorded verbatim, not summarised",
             ].map((line) => (
-              <li
+              <RevealItem
+                as="li"
                 key={line}
                 className="flex items-start gap-3 rounded-lg border border-line bg-surface px-5 py-4"
               >
@@ -354,15 +406,15 @@ export default function LandingView() {
                   aria-hidden
                 />
                 <span className="text-sm leading-relaxed text-ink">{line}</span>
-              </li>
+              </RevealItem>
             ))}
-          </ul>
+          </RevealGroup>
         </div>
       </section>
 
       {/* ── Close ─────────────────────────────────────────────────────────── */}
       <section className="border-t border-line px-5 py-24 sm:px-8">
-        <div className="mx-auto max-w-2xl text-center">
+        <Reveal className="mx-auto max-w-2xl text-center">
           <h2 className="text-balance text-[clamp(2rem,4.5vw,3.25rem)] leading-[1.06] tracking-[-0.032em] text-ink">
             Start with one repository
           </h2>
@@ -381,7 +433,7 @@ export default function LandingView() {
               <span className="text-body font-medium">{primary.label}</span>
             </Link>
           </div>
-        </div>
+        </Reveal>
       </section>
 
       <footer className="border-t border-line px-5 py-10 sm:px-8">
@@ -395,121 +447,6 @@ export default function LandingView() {
           </p>
         </div>
       </footer>
-    </div>
-  );
-}
-
-/**
- * The soft horizon behind the hero.
- *
- * Two very wide, very diffuse radial fields in the accent and a cool
- * counterpoint, plus the shared grain overlay. Flat colour at this scale reads
- * as an unstyled page; a gradient this soft reads as depth without becoming the
- * blurred-blob background it replaces.
- */
-function Horizon() {
-  return (
-    <div className="grain pointer-events-none absolute inset-x-0 top-0 -z-0 h-[42rem] overflow-hidden" aria-hidden>
-      <div className="absolute left-1/2 top-[-18rem] size-[46rem] -translate-x-1/2 rounded-pill bg-[radial-gradient(circle,var(--accent-soft),transparent_68%)]" />
-      <div className="absolute left-[8%] top-[6rem] size-[30rem] rounded-pill bg-[radial-gradient(circle,var(--info-soft),transparent_70%)] opacity-70" />
-      <div className="absolute right-[4%] top-[2rem] size-[26rem] rounded-pill bg-[radial-gradient(circle,var(--success-soft),transparent_70%)] opacity-60" />
-      <div className="absolute inset-x-0 bottom-0 h-40 bg-gradient-to-b from-transparent to-bg" />
-    </div>
-  );
-}
-
-/**
- * A cropped, non-interactive rendering of the board.
- *
- * Drawn in the real design tokens rather than shipped as a PNG: it stays sharp,
- * it follows the theme, and it cannot go stale the way a screenshot of an
- * earlier version does.
- */
-function BoardPreview() {
-  const rows = [
-    {
-      key: "PROJ-1183",
-      title: "Retry the merge gate when GitHub reports mergeable: null",
-      stage: "In review",
-      tone: "info" as const,
-      needs: true,
-      meta: "round 2 · acme/api#412",
-    },
-    {
-      key: "PROJ-1179",
-      title: "Rotate the Gmail refresh token before the QA sweep",
-      stage: "Testing",
-      tone: "accent" as const,
-      needs: false,
-      meta: "acme/api#409",
-    },
-    {
-      key: "#284",
-      title: "Board card sits in Todo through the whole review round trip",
-      stage: "Branch",
-      tone: "neutral" as const,
-      needs: false,
-      meta: "feat/project-card-sync",
-    },
-  ];
-
-  const toneClass = {
-    info: "border-info-border bg-info-soft text-info",
-    accent: "border-accent/35 bg-accent-soft text-accent-strong",
-    neutral: "border-line bg-surface-2 text-muted",
-  };
-
-  return (
-    <div className="overflow-hidden rounded-xl border border-line bg-surface shadow-md">
-      <div className="flex items-center gap-2 border-b border-line bg-surface-2/60 px-5 py-3.5">
-        <span className="flex gap-1.5" aria-hidden>
-          <span className="size-2.5 rounded-pill bg-line-strong" />
-          <span className="size-2.5 rounded-pill bg-line-strong" />
-          <span className="size-2.5 rounded-pill bg-line-strong" />
-        </span>
-        <span className="ml-2 text-xs font-medium text-muted">Work</span>
-        <span className="ml-auto rounded-pill bg-accent-soft px-2.5 py-0.5 text-xs font-medium text-accent-strong">
-          1 needs you
-        </span>
-      </div>
-
-      <div className="divide-y divide-line">
-        {rows.map((row) => (
-          <div key={row.key} className="flex items-start gap-4 px-5 py-4">
-            <span
-              className={cn(
-                "mt-1 size-2 shrink-0 rounded-pill",
-                row.needs ? "bg-accent" : "bg-line-strong"
-              )}
-              aria-hidden
-            />
-            <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="font-mono text-xs font-medium text-ink">
-                  {row.key}
-                </span>
-                <span
-                  className={cn(
-                    "rounded-pill border px-2 py-0.5 text-xs font-medium",
-                    toneClass[row.tone]
-                  )}
-                >
-                  {row.stage}
-                </span>
-                {row.needs && (
-                  <span className="rounded-pill bg-accent-soft px-2 py-0.5 text-xs font-medium text-accent-strong">
-                    Needs you
-                  </span>
-                )}
-              </div>
-              <p className="mt-1.5 truncate text-sm text-ink">{row.title}</p>
-              <p className="mt-1 truncate font-mono text-xs text-subtle">
-                {row.meta}
-              </p>
-            </div>
-          </div>
-        ))}
-      </div>
     </div>
   );
 }
