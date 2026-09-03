@@ -4,10 +4,11 @@ import { useCallback, useEffect, useState } from "react";
 import {
   AlertTriangle,
   ArrowRight,
-  CalendarClock,
+  CalendarPlus,
+  CalendarX2,
   Check,
-  Loader2,
   Lock,
+  MessageSquareWarning,
   RefreshCw,
   Users,
 } from "lucide-react";
@@ -26,179 +27,202 @@ import {
   type ScheduleMove,
   type ScheduleProposal,
 } from "@/lib/api";
+import { PageHeader, PageShell } from "@/components/layout/app-shell";
+import { Badge, Dot, type DotTone } from "@/components/ui/badge";
+import { Button, IconButton } from "@/components/ui/button";
+import { Field, Input } from "@/components/ui/form";
+import {
+  EmptyState,
+  Kicker,
+  Notice,
+  Panel,
+  Section,
+  Skeleton,
+} from "@/components/ui/surface";
+import { useToast } from "@/components/ui/toast";
 
 /**
- * Adaptive Scheduler.
+ * Calendar.
  *
- * Planning and applying are separate steps. A plan that moves other people's
+ * Planning and applying stay separate steps. A plan that moves other people's
  * meetings sends invite updates to all of them, so it is shown in full and
- * applied only when the user says so.
+ * applied only when the user says so — the button that does it is deliberately
+ * not the same button that produces the plan.
+ *
+ * The composer moved to the top of the page. It was the third panel down,
+ * beneath a conflicts list that is usually empty, which put the only thing
+ * anyone comes here to do below two panels reporting that nothing is wrong.
  */
 
-const CLASS_LABEL: Record<EventClass, { label: string; tone: string }> = {
-  flexible: { label: "flexible", tone: "text-green-600 dark:text-green-400" },
-  soft_fixed: { label: "team meeting", tone: "text-yellow-600 dark:text-yellow-400" },
-  hard_fixed: { label: "fixed", tone: "text-red-600 dark:text-red-400" },
+const CLASS_TONE: Record<EventClass, { label: string; tone: DotTone }> = {
+  flexible: { label: "Flexible", tone: "success" },
+  soft_fixed: { label: "Team meeting", tone: "warning" },
+  hard_fixed: { label: "Fixed", tone: "danger" },
 };
 
 // Always IST, never the browser's zone. A schedule is the one place a wrong
 // offset is both most likely to be acted on and hardest to notice.
-const formatWhen = (iso: string) => formatWithWeekday(iso);
+const when = (iso: string) => formatWithWeekday(iso);
 
-const MoveRow = ({ move }: { move: ScheduleMove }) => {
-  const tone = CLASS_LABEL[move.event_class];
+function MoveRow({ move }: { move: ScheduleMove }) {
+  const cls = CLASS_TONE[move.event_class];
 
   return (
-    <div className="rounded-lg border border-border bg-card px-3 py-2">
-      <div className="flex flex-wrap items-center gap-2 text-sm">
-        <span className="font-medium text-foreground">{move.title}</span>
-        <span className={`text-xs ${tone.tone}`}>{tone.label}</span>
+    <Panel className="p-4">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+        <span className="text-sm font-medium text-ink">{move.title}</span>
+        <span className="inline-flex items-center gap-1.5 text-xs text-muted">
+          <Dot tone={cls.tone} />
+          {cls.label}
+        </span>
         {move.attendee_count > 1 && (
-          <span className="flex items-center gap-1 text-xs text-muted-foreground">
-            <Users size={11} />
+          <span className="inline-flex items-center gap-1.5 text-xs text-muted">
+            <Users className="size-3.5" aria-hidden />
             {move.attendee_count}
           </span>
         )}
       </div>
-      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+
+      <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
         {move.from_start ? (
           <>
-            <span className="line-through">{formatWhen(move.from_start)}</span>
-            <ArrowRight size={11} />
+            <span className="text-subtle line-through">
+              {when(move.from_start)}
+            </span>
+            <ArrowRight className="size-3.5 shrink-0 text-subtle" aria-hidden />
           </>
         ) : (
-          <span className="text-green-600 dark:text-green-400">new block</span>
+          <Badge tone="success">New block</Badge>
         )}
-        <span className="font-medium text-foreground">
-          {formatWhen(move.to_start)}
-        </span>
-        <span>({move.duration_minutes} min)</span>
+        <span className="font-medium text-ink">{when(move.to_start)}</span>
+        <span className="text-muted">{move.duration_minutes} min</span>
       </div>
+
       {move.reason && (
-        <p className="mt-1 text-xs text-muted-foreground">{move.reason}</p>
+        <p className="mt-1.5 text-sm text-muted">{move.reason}</p>
       )}
-    </div>
+    </Panel>
   );
-};
+}
 
 /**
  * Whether you can be reached, reading the same value the Slack reply uses.
  *
  * One source, so the channel and this chip cannot disagree about whether you
- * are in a meeting. Times render through `src/lib/datetime.ts` with its
- * explicit zone, so every viewer reads the same wall clock.
+ * are in a meeting. The type carries a state, a time and nothing else — there
+ * is deliberately no field through which "in a 1:1 with Priya re: restructure"
+ * could reach a channel other people read.
  */
-const AvailabilityChip = ({ availability }: { availability: Availability }) => {
-  const tone = {
-    free: "bg-green-500/10 text-green-600 dark:text-green-400",
-    busy: "bg-orange-500/10 text-orange-600 dark:text-orange-400",
-    focus: "bg-violet-500/10 text-violet-600 dark:text-violet-400",
-    off_hours: "bg-muted text-muted-foreground",
-  }[availability.state];
-
-  const label = {
-    free: "Free",
-    busy: "In a meeting",
-    focus: "Heads-down",
-    off_hours: "Outside working hours",
+function AvailabilityChip({ availability }: { availability: Availability }) {
+  const map = {
+    free: { label: "Free", tone: "success" as DotTone },
+    busy: { label: "In a meeting", tone: "warning" as DotTone },
+    focus: { label: "Heads-down", tone: "info" as DotTone },
+    off_hours: { label: "Outside working hours", tone: "neutral" as DotTone },
   }[availability.state];
 
   return (
-    <span
-      className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${tone}`}
-    >
-      {label}
-      {availability.until && ` until ${formatFull(availability.until)}`}
+    <span className="inline-flex items-center gap-2 rounded-pill border border-line bg-surface px-3 py-1.5 text-sm">
+      <Dot tone={map.tone} pulse={availability.state === "free"} />
+      <span className="font-medium text-ink">{map.label}</span>
+      {availability.until && (
+        <span className="text-muted">until {formatFull(availability.until)}</span>
+      )}
     </span>
   );
-};
+}
 
 /**
  * How Locus judged an interruption, in plain words.
  *
  * Two of the three are deterministic facts. The third is a model's opinion and
- * is worded to read as the weaker claim it is.
+ * is worded — and toned — to read as the weaker claim it is.
  */
-const IMPORTANCE_CAPTION: Record<string, string> = {
-  reviewer: "your reviewer, mid-round",
-  worklist: "names work blocked on you",
-  classifier: "judged important",
+const IMPORTANCE: Record<string, { caption: string; tone: DotTone }> = {
+  reviewer: { caption: "your reviewer, mid-round", tone: "danger" },
+  worklist: { caption: "names work blocked on you", tone: "danger" },
+  classifier: { caption: "judged important", tone: "warning" },
 };
 
-/** Who reached you while you were busy, and what Locus said back. */
-const InterruptionsStrip = ({
-  interruptions,
-}: {
-  interruptions: InterruptionEntry[];
-}) => (
-  <div className="mb-6 rounded-xl border border-border bg-card p-4">
-    <h2 className="text-sm font-semibold text-foreground">
-      Reached you while you were busy
-    </h2>
-    <ul className="mt-2 space-y-2">
-      {interruptions.map((entry) => (
-        <li key={entry.id} className="rounded-lg border border-border p-2.5">
-          <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
-            <span className="font-medium text-foreground">
-              {entry.participant ?? "Someone"}
-            </span>
-            <span className="rounded bg-muted px-1.5 py-0.5 text-muted-foreground">
-              {entry.availability_state}
-            </span>
-            {entry.importance === "important" && (
-              <span className="rounded bg-orange-500/10 px-1.5 py-0.5 text-orange-600 dark:text-orange-400">
-                {IMPORTANCE_CAPTION[entry.importance_source] ?? "important"}
-              </span>
-            )}
-            {!entry.replied && (
-              <span
-                title="Already answered in this thread today, or the send failed"
-                className="rounded bg-muted px-1.5 py-0.5 text-muted-foreground"
-              >
-                no reply sent
-              </span>
-            )}
-            {entry.occurred_at && (
-              <span className="ml-auto text-muted-foreground">
-                {formatFull(entry.occurred_at)}
-              </span>
-            )}
-          </div>
-          {entry.excerpt && (
-            <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
-              {entry.excerpt}
-            </p>
-          )}
-          {/* Stored as sent, not reconstructed — a reconstruction drifts from
-              what the channel actually saw. */}
-          {entry.reply_body && (
-            <p className="mt-1 text-xs text-foreground">
-              Locus replied: {entry.reply_body}
-            </p>
-          )}
-        </li>
-      ))}
-    </ul>
-  </div>
-);
+function Interruptions({ entries }: { entries: InterruptionEntry[] }) {
+  return (
+    <Section
+      title="Reached you while you were busy"
+      description="Locus replied with your state and when you are next free — never with what you were doing."
+    >
+      <Panel className="divide-y divide-line">
+        {entries.map((entry) => {
+          const importance =
+            entry.importance === "important"
+              ? IMPORTANCE[entry.importance_source]
+              : null;
 
-export default function SchedulerPage() {
+          return (
+            <div key={entry.id} className="p-5">
+              <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5">
+                <span className="text-sm font-medium text-ink">
+                  {entry.participant ?? "Someone"}
+                </span>
+                <Badge tone="neutral">{entry.availability_state}</Badge>
+                {importance && (
+                  <Badge tone={importance.tone === "danger" ? "danger" : "warning"}>
+                    {importance.caption}
+                  </Badge>
+                )}
+                {!entry.replied && (
+                  <Badge
+                    tone="neutral"
+                    title="Already answered in this thread today, or the send failed"
+                  >
+                    no reply sent
+                  </Badge>
+                )}
+                {entry.occurred_at && (
+                  <span className="ml-auto shrink-0 text-xs text-subtle">
+                    {formatFull(entry.occurred_at)}
+                  </span>
+                )}
+              </div>
+
+              {entry.excerpt && (
+                <p className="mt-2 line-clamp-2 text-sm text-muted">
+                  {entry.excerpt}
+                </p>
+              )}
+
+              {/* Stored as sent, not reconstructed — a reconstruction drifts
+                  from what the channel actually saw. */}
+              {entry.reply_body && (
+                <p className="mt-2 rounded-md border border-line bg-surface-2 px-3 py-2 text-sm text-ink">
+                  <span className="text-subtle">Locus replied: </span>
+                  {entry.reply_body}
+                </p>
+              )}
+            </div>
+          );
+        })}
+      </Panel>
+    </Section>
+  );
+}
+
+export default function SchedulerView() {
   const { user } = useAuth();
+  const toast = useToast();
 
   const [conflicts, setConflicts] = useState<CalendarConflict[]>([]);
   const [totalEvents, setTotalEvents] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [unreadable, setUnreadable] = useState<string | null>(null);
 
   const [title, setTitle] = useState("");
-  const [when, setWhen] = useState("");
+  const [whenText, setWhenText] = useState("");
   const [duration, setDuration] = useState(60);
   const [attendees, setAttendees] = useState(1);
 
   const [proposal, setProposal] = useState<ScheduleProposal | null>(null);
   const [planning, setPlanning] = useState(false);
   const [applying, setApplying] = useState(false);
-  const [applied, setApplied] = useState<string[] | null>(null);
   const [availability, setAvailability] = useState<Availability | null>(null);
   const [interruptions, setInterruptions] = useState<InterruptionEntry[]>([]);
 
@@ -207,9 +231,11 @@ export default function SchedulerPage() {
       const data = await getScheduleConflicts();
       setConflicts(data.conflicts);
       setTotalEvents(data.total_events);
-      setError(null);
+      setUnreadable(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not read the calendar");
+      setUnreadable(
+        e instanceof Error ? e.message : "Could not read the calendar"
+      );
     } finally {
       setLoading(false);
     }
@@ -223,257 +249,268 @@ export default function SchedulerPage() {
     getInterruptions().then(setInterruptions).catch(() => setInterruptions([]));
   }, [refresh]);
 
-  const handlePlan = async () => {
-    if (!title.trim() || !when.trim()) return;
+  const plan = async () => {
+    if (!title.trim() || !whenText.trim()) return;
     setPlanning(true);
-    setError(null);
-    setApplied(null);
     try {
-      setProposal(await planSchedule(title.trim(), when.trim(), duration, attendees));
+      setProposal(
+        await planSchedule(title.trim(), whenText.trim(), duration, attendees)
+      );
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not build a plan");
+      toast.error(
+        "Could not build a plan",
+        e instanceof Error ? e.message : undefined
+      );
       setProposal(null);
     } finally {
       setPlanning(false);
     }
   };
 
-  const handleApply = async () => {
+  const apply = async () => {
     if (!proposal) return;
     setApplying(true);
     try {
       const result = await applySchedule(proposal.moves, proposal.additions);
-      setApplied([...result.applied, ...result.failed.map((f) => `Failed: ${f}`)]);
+      if (result.failed.length > 0) {
+        toast.error(
+          `${result.applied.length} applied, ${result.failed.length} failed`,
+          result.failed.join("; ")
+        );
+      } else {
+        toast.success(
+          `Calendar updated`,
+          `${result.applied.length} change${result.applied.length === 1 ? "" : "s"} applied.`
+        );
+      }
       setProposal(null);
       await refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not apply the plan");
+      toast.error(
+        "Could not apply the plan",
+        e instanceof Error ? e.message : undefined
+      );
     } finally {
       setApplying(false);
     }
   };
 
+  const movesOthers = proposal?.moves.some((m) => m.attendee_count > 1);
+  const hasChanges =
+    (proposal?.moves.length ?? 0) + (proposal?.additions.length ?? 0) > 0;
+
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-3xl p-6">
-        <div className="mb-6 flex items-start justify-between">
-          <div>
-            <h1 className="flex items-center gap-2 text-2xl font-bold text-foreground">
-              Scheduler
-              {availability && <AvailabilityChip availability={availability} />}
-            </h1>
-            <p className="text-sm text-muted-foreground">
-              Rearranges your calendar around new work, protecting deadlines.
-              Times are read in {user?.timezone ?? "Asia/Kolkata"}.
-            </p>
-          </div>
-          <button
-            onClick={refresh}
-            className="rounded-lg border border-border p-2 hover:bg-muted"
-            aria-label="Refresh"
-          >
-            <RefreshCw size={15} className="text-muted-foreground" />
-          </button>
-        </div>
+    <PageShell width="narrow">
+      <PageHeader
+        title="Calendar"
+        description={`Rearranges your week around new work, protecting deadlines and refusing to move anything with external attendees. Times are read in ${user?.timezone ?? "Asia/Kolkata"}.`}
+        eyebrow={availability && <AvailabilityChip availability={availability} />}
+        actions={
+          <IconButton label="Refresh" variant="secondary" onClick={refresh}>
+            <RefreshCw />
+          </IconButton>
+        }
+      />
 
-        {error && (
-          <div className="mb-4 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">
-            {error}
-          </div>
-        )}
+      {/* An unreadable calendar reads free, never busy — a broken token and a
+          real meeting produce identical silence, and defaulting to busy tells
+          everybody you are in a meeting you are not in. Said out loud here. */}
+      {unreadable && (
+        <Notice
+          tone="warning"
+          className="mt-6"
+          icon={<AlertTriangle aria-hidden />}
+          title="Your calendar could not be read"
+        >
+          {unreadable} Until this is fixed, Locus treats you as free rather than
+          busy — an auto-reply saying you are in a meeting you are not in is
+          worse than none.
+        </Notice>
+      )}
 
-        {interruptions.length > 0 && (
-          <InterruptionsStrip interruptions={interruptions} />
-        )}
-
-        {applied && (
-          <div className="mb-4 rounded-lg bg-green-500/10 px-3 py-2 text-sm text-green-600 dark:text-green-400">
-            <p className="mb-1 font-medium">Applied</p>
-            <ul className="space-y-0.5 text-xs">
-              {applied.map((line, i) => (
-                <li key={i}>{line}</li>
-              ))}
-            </ul>
-          </div>
-        )}
-
-        {/* Conflicts already on the calendar */}
-        <div className="mb-6 rounded-xl border border-border bg-card p-4">
-          <h2 className="mb-2 text-sm font-semibold text-foreground">
-            Double-bookings
-            <span className="ml-1 font-normal text-muted-foreground">
-              — next 14 days
-            </span>
-          </h2>
-          {loading ? (
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <Loader2 size={13} className="animate-spin" /> Reading calendar...
+      <div className="mt-8 space-y-10">
+        {/* ── Composer ──────────────────────────────────────────────────── */}
+        <Section
+          title="Fit something in"
+          description="Planning changes nothing. You see exactly what would move first."
+        >
+          <Panel className="p-5">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="What is it?" htmlFor="ev-title">
+                <Input
+                  id="ev-title"
+                  placeholder="Design review"
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                />
+              </Field>
+              <Field
+                label="When"
+                htmlFor="ev-when"
+                hint="Plain language. Nothing is guessed — an unreadable time returns no plan."
+              >
+                <Input
+                  id="ev-when"
+                  placeholder="tomorrow at 3pm"
+                  value={whenText}
+                  onChange={(e) => setWhenText(e.target.value)}
+                />
+              </Field>
             </div>
-          ) : conflicts.length === 0 ? (
-            <p className="flex items-center gap-1.5 text-xs text-green-600 dark:text-green-400">
-              <Check size={13} /> No conflicts across {totalEvents} events.
-            </p>
-          ) : (
-            <div className="space-y-1.5">
-              {conflicts.map((c, i) => (
-                <div
-                  key={i}
-                  className="rounded-lg border border-yellow-500/30 bg-yellow-500/5 px-3 py-2 text-xs"
-                >
-                  <span className="font-medium text-foreground">{c.first.title}</span>
-                  <span className="text-muted-foreground"> overlaps </span>
-                  <span className="font-medium text-foreground">{c.second.title}</span>
-                  <div className="mt-0.5 text-muted-foreground">
-                    {formatWhen(c.first.start)}
-                  </div>
+
+            <div className="mt-4 flex flex-wrap items-end gap-4">
+              <Field label="Minutes" htmlFor="ev-mins" className="w-28">
+                <Input
+                  id="ev-mins"
+                  type="number"
+                  min={5}
+                  max={720}
+                  value={duration}
+                  onChange={(e) => setDuration(Number(e.target.value))}
+                />
+              </Field>
+              <Field label="Attendees" htmlFor="ev-att" className="w-28">
+                <Input
+                  id="ev-att"
+                  type="number"
+                  min={1}
+                  value={attendees}
+                  onChange={(e) => setAttendees(Number(e.target.value))}
+                />
+              </Field>
+              <Button
+                className="ml-auto"
+                onClick={plan}
+                loading={planning}
+                disabled={!title.trim() || !whenText.trim()}
+              >
+                {!planning && <CalendarPlus aria-hidden />}
+                Plan it
+              </Button>
+            </div>
+          </Panel>
+        </Section>
+
+        {/* ── Proposal ──────────────────────────────────────────────────── */}
+        {proposal && (
+          <Section title="Proposed plan" description={proposal.summary}>
+            <div className="space-y-4">
+              {proposal.moves.length > 0 && (
+                <div className="space-y-2">
+                  <Kicker>Would move</Kicker>
+                  {proposal.moves.map((m) => (
+                    <MoveRow key={m.event_id} move={m} />
+                  ))}
                 </div>
+              )}
+
+              {proposal.additions.length > 0 && (
+                <div className="space-y-2">
+                  <Kicker>Would add</Kicker>
+                  {proposal.additions.map((m, i) => (
+                    <MoveRow key={i} move={m} />
+                  ))}
+                </div>
+              )}
+
+              {/* Anything with external attendees is reported as blocked
+                  rather than moved. The solver is plain Python for exactly
+                  this reason — a model asked to rearrange a calendar produces
+                  plausible schedules with overlaps and missed deadlines. */}
+              {proposal.blocked.length > 0 && (
+                <div className="space-y-2">
+                  <Kicker>Cannot resolve</Kicker>
+                  <Panel tone="warning" className="divide-y divide-warning-border">
+                    {proposal.blocked.map((b, i) => (
+                      <p
+                        key={i}
+                        className="flex items-start gap-2.5 px-4 py-3 text-sm text-ink"
+                      >
+                        <Lock className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden />
+                        {b}
+                      </p>
+                    ))}
+                  </Panel>
+                </div>
+              )}
+
+              {hasChanges && (
+                <>
+                  {movesOthers && (
+                    <Notice
+                      tone="warning"
+                      icon={<Users aria-hidden />}
+                      title="This reaches other people"
+                    >
+                      Some of these have other attendees. Applying sends every
+                      one of them an updated invite.
+                    </Notice>
+                  )}
+                  <div className="flex flex-wrap gap-2">
+                    <Button onClick={apply} loading={applying}>
+                      {!applying && <Check aria-hidden />}
+                      Apply plan
+                    </Button>
+                    <Button variant="secondary" onClick={() => setProposal(null)}>
+                      Discard
+                    </Button>
+                  </div>
+                </>
+              )}
+            </div>
+          </Section>
+        )}
+
+        {/* ── Conflicts ─────────────────────────────────────────────────── */}
+        <Section
+          title="Double-bookings"
+          description="The next fourteen days on your primary calendar."
+        >
+          {loading ? (
+            <Skeleton className="h-24 w-full" />
+          ) : conflicts.length === 0 ? (
+            <EmptyState
+              compact
+              icon={<Check aria-hidden />}
+              title="No conflicts"
+              description={`Nothing overlaps across ${totalEvents} event${totalEvents === 1 ? "" : "s"}.`}
+            />
+          ) : (
+            <div className="space-y-2">
+              {conflicts.map((c, i) => (
+                <Panel key={i} tone="warning" className="p-4">
+                  <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+                    <CalendarX2 className="size-4 shrink-0 text-warning" aria-hidden />
+                    <span className="font-medium text-ink">{c.first.title}</span>
+                    <span className="text-muted">overlaps</span>
+                    <span className="font-medium text-ink">{c.second.title}</span>
+                  </p>
+                  <p className="mt-1 pl-6 text-sm text-muted">
+                    {when(c.first.start)}
+                  </p>
+                </Panel>
               ))}
             </div>
           )}
-        </div>
+        </Section>
 
-        {/* Plan a new event */}
-        <div className="mb-6 rounded-xl border border-border bg-card p-4">
-          <h2 className="mb-3 text-sm font-semibold text-foreground">
-            Fit something in
-          </h2>
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <input
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="What is it?"
-              className="flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+        {/* ── Interruptions ─────────────────────────────────────────────── */}
+        {interruptions.length > 0 ? (
+          <Interruptions entries={interruptions} />
+        ) : (
+          <Section
+            title="Reached you while you were busy"
+            description="Locus replies with your state and when you are next free, at most once per thread per day."
+          >
+            <EmptyState
+              compact
+              icon={<MessageSquareWarning aria-hidden />}
+              title="Nobody has been auto-replied to"
+              description="Messages that arrive during a meeting or a focus block appear here, along with exactly what was sent back."
             />
-            <input
-              value={when}
-              onChange={(e) => setWhen(e.target.value)}
-              placeholder="tomorrow at 3pm"
-              className="flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
-            />
-          </div>
-          <div className="mt-2 flex flex-col gap-2 sm:flex-row">
-            <label className="flex items-center gap-2 text-xs text-muted-foreground">
-              Minutes
-              <input
-                type="number"
-                value={duration}
-                min={5}
-                max={720}
-                onChange={(e) => setDuration(Number(e.target.value))}
-                className="w-20 rounded-lg border border-border bg-background px-2 py-1.5 text-sm text-foreground"
-              />
-            </label>
-            <label className="flex items-center gap-2 text-xs text-muted-foreground">
-              Attendees
-              <input
-                type="number"
-                value={attendees}
-                min={1}
-                onChange={(e) => setAttendees(Number(e.target.value))}
-                className="w-20 rounded-lg border border-border bg-background px-2 py-1.5 text-sm text-foreground"
-              />
-            </label>
-            <button
-              onClick={handlePlan}
-              disabled={planning || !title.trim() || !when.trim()}
-              className="ml-auto flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-            >
-              {planning ? (
-                <Loader2 size={14} className="animate-spin" />
-              ) : (
-                <CalendarClock size={14} />
-              )}
-              Plan it
-            </button>
-          </div>
-          <p className="mt-2 text-xs text-muted-foreground">
-            Planning changes nothing. You will see exactly what would move first.
-          </p>
-        </div>
-
-        {/* The proposal */}
-        {proposal && (
-          <div className="rounded-xl border border-border bg-card p-4">
-            <h2 className="mb-1 text-sm font-semibold text-foreground">
-              Proposed plan
-            </h2>
-            <p className="mb-3 text-xs text-muted-foreground">{proposal.summary}</p>
-
-            {proposal.moves.length > 0 && (
-              <div className="mb-3 space-y-1.5">
-                <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Would move
-                </p>
-                {proposal.moves.map((m) => (
-                  <MoveRow key={m.event_id} move={m} />
-                ))}
-              </div>
-            )}
-
-            {proposal.additions.length > 0 && (
-              <div className="mb-3 space-y-1.5">
-                <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Would add
-                </p>
-                {proposal.additions.map((m, i) => (
-                  <MoveRow key={i} move={m} />
-                ))}
-              </div>
-            )}
-
-            {proposal.blocked.length > 0 && (
-              <div className="mb-3">
-                <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Cannot resolve
-                </p>
-                <ul className="space-y-1">
-                  {proposal.blocked.map((b, i) => (
-                    <li
-                      key={i}
-                      className="flex items-start gap-1.5 rounded-lg bg-yellow-500/10 px-3 py-2 text-xs text-yellow-700 dark:text-yellow-400"
-                    >
-                      <Lock size={11} className="mt-0.5 shrink-0" />
-                      {b}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            {proposal.moves.length + proposal.additions.length > 0 && (
-              <>
-                {proposal.moves.some((m) => m.attendee_count > 1) && (
-                  <p className="mb-2 flex items-start gap-1.5 text-xs text-yellow-700 dark:text-yellow-400">
-                    <AlertTriangle size={12} className="mt-0.5 shrink-0" />
-                    Some of these have other attendees. Applying sends them
-                    updated invites.
-                  </p>
-                )}
-                <div className="flex gap-2">
-                  <button
-                    onClick={handleApply}
-                    disabled={applying}
-                    className="flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-                  >
-                    {applying ? (
-                      <Loader2 size={14} className="animate-spin" />
-                    ) : (
-                      <Check size={14} />
-                    )}
-                    Apply plan
-                  </button>
-                  <button
-                    onClick={() => setProposal(null)}
-                    className="rounded-lg border border-border px-4 py-2 text-sm hover:bg-muted"
-                  >
-                    Discard
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
+          </Section>
         )}
       </div>
-    </div>
+    </PageShell>
   );
 }
