@@ -44,11 +44,16 @@ export function Wordmark({
   markClassName?: string;
 }) {
   return (
-    <span className={cn("inline-flex items-center gap-2", className)}>
-      <LogoMark className={cn("size-6 text-ink", markClassName)} />
+    // The colour is set once, on the wrapper, and both halves inherit it —
+    // `LogoMark` strokes in `currentColor`. Pinning `text-ink` on the children
+    // instead made the wordmark unusable anywhere the ground is not the page:
+    // a caller's `text-on-art` landed on the wrapper and lost to the child's
+    // own class, so the brand stayed near-black over the hero artwork.
+    <span className={cn("inline-flex items-center gap-2 text-ink", className)}>
+      <LogoMark className={cn("size-6", markClassName)} />
       {/* Serif, and the only serif in the product. It is what keeps the brand
           from reading as another label in the interface. */}
-      <span className="font-serif text-[1.375rem] leading-none tracking-tight text-ink">
+      <span className="font-serif text-[1.375rem] leading-none tracking-tight">
         Locus
       </span>
     </span>
