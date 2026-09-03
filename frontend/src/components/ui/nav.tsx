@@ -110,7 +110,10 @@ export function Segmented<T extends string>({
       role="group"
       aria-label={ariaLabel}
       className={cn(
-        "inline-flex items-center gap-0.5 rounded-pill border border-line bg-surface-2 p-1",
+        // `max-w-full` + `scroll-x` rather than wrapping: a segmented control
+        // that breaks a label onto two lines stops reading as one track, and
+        // four options genuinely do not fit across a 390px screen.
+        "scroll-x inline-flex max-w-full items-center gap-0.5 rounded-pill border border-line bg-surface-2 p-1",
         className
       )}
     >
@@ -123,7 +126,7 @@ export function Segmented<T extends string>({
             aria-pressed={active}
             onClick={() => onChange(item.value)}
             className={cn(
-              "relative flex items-center gap-1.5 rounded-pill font-medium transition-colors",
+              "relative flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-pill font-medium transition-colors",
               "[&_svg]:size-3.5",
               size === "sm" ? "px-2.5 py-1 text-xs" : "px-3.5 py-1.5 text-sm",
               active ? "text-ink" : "text-muted hover:text-ink"

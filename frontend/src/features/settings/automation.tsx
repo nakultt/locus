@@ -99,26 +99,42 @@ function Capability({ cap }: { cap: CapabilityStatus }) {
  */
 function ServicePanel({ service }: { service: ServiceStatus }) {
   const missing = service.capabilities.filter((c) => !c.available);
-  const tone = service.connected
-    ? missing.length === 0
-      ? "success"
-      : "warning"
-    : service.required
+  // Amber means something a run needs is unavailable — not merely that an
+  // optional capability is off. Toning every partially-configured service as a
+  // warning turned the whole section yellow and made the one real problem
+  // indistinguishable from two ordinary ones.
+  const missingRequired = missing.some((c) => c.required);
+  const tone = !service.connected
+    ? service.required
       ? "danger"
-      : "quiet";
+      : "quiet"
+    : missingRequired
+      ? "warning"
+      : "default";
 
   return (
     <Panel tone={tone} className="p-4">
       <div className="flex items-center gap-2">
-        {service.connected && missing.length === 0 ? (
-          <Check className="size-4 shrink-0 text-success" aria-hidden />
-        ) : service.required && !service.connected ? (
-          <X className="size-4 shrink-0 text-danger" aria-hidden />
-        ) : (
+        {!service.connected ? (
+          <X
+            className={cn(
+              "size-4 shrink-0",
+              service.required ? "text-danger" : "text-subtle"
+            )}
+            aria-hidden
+          />
+        ) : missingRequired ? (
           <AlertTriangle className="size-4 shrink-0 text-warning" aria-hidden />
+        ) : (
+          <Check className="size-4 shrink-0 text-success" aria-hidden />
         )}
         <h4 className="text-h3 text-ink">{service.label}</h4>
         {service.required && <Badge tone="outline">required</Badge>}
+        {service.connected && missing.length > 0 && !missingRequired && (
+          <span className="ml-auto text-xs text-subtle">
+            {missing.length} optional off
+          </span>
+        )}
       </div>
       <ul className="mt-2.5 space-y-1.5">
         {service.capabilities.map((cap) => (
@@ -174,7 +190,7 @@ function Defaults({ docsConnected }: { docsConnected: boolean }) {
       .finally(() => setLoaded(true));
     // A preset list that fails to load costs the shortcut, never the form.
     getAuthoringPresets()
-      .then(setPresets)
+      .then((rows) => setPresets(Array.isArray(rows) ? rows : []))
       .catch(() => setPresets([]));
   }, []);
 
@@ -867,7 +883,7 @@ export function AutomationSettings() {
     try {
       const [s, r] = await Promise.all([getPRAgentSummary(), listRepos()]);
       setSummary(s);
-      setRepos(r.repos);
+      setRepos(r?.repos ?? []);
     } catch {
       // The sections below degrade to their own empty states; a toast for a
       // background refresh would fire on every transient blip.

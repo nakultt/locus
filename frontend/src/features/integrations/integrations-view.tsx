@@ -142,28 +142,30 @@ function ConnectionGroup({
 
   return (
     <section className="space-y-3">
-      <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-2">
-        <div className="min-w-0">
+      <div>
+        {/* The count and the action sit on the title's own line rather than
+            wrapping below a two-line description, which is where they landed
+            when all three shared one flex container. */}
+        <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2">
           <h2 className="text-h2 text-ink">{group.title}</h2>
-          <p className="mt-1 max-w-2xl text-sm leading-relaxed text-muted">
-            {group.description}
-          </p>
-        </div>
-
-        <div className="flex shrink-0 items-center gap-3">
-          <span className="tabular text-xs text-subtle">
-            {connectedCount} of {group.entries.length}
-          </span>
+          <div className="flex shrink-0 items-center gap-3">
+            <span className="tabular text-xs text-subtle">
+              {connectedCount} of {group.entries.length}
+            </span>
           {/* One consent grants every Google scope, so the action belongs to
               the group. Offering it per service implied eight separate round
               trips through Google's screen. */}
-          {group.sharedOAuth === "google" && !allConnected && (
-            <Button size="sm" onClick={onConnectGoogle}>
-              <ShieldCheck aria-hidden />
-              {connectedCount > 0 ? "Reconnect Google" : "Connect all"}
-            </Button>
-          )}
+            {group.sharedOAuth === "google" && !allConnected && (
+              <Button size="sm" onClick={onConnectGoogle}>
+                <ShieldCheck aria-hidden />
+                {connectedCount > 0 ? "Reconnect Google" : "Connect all"}
+              </Button>
+            )}
+          </div>
         </div>
+        <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-muted">
+          {group.description}
+        </p>
       </div>
 
       <Panel className="divide-y divide-line overflow-hidden">
@@ -361,7 +363,7 @@ export default function IntegrationsView() {
     try {
       const result = await listIntegrations();
       setConnected(
-        new Set(result.integrations.map((i: Integration) => i.service_name))
+        new Set((result?.integrations ?? []).map((i: Integration) => i.service_name))
       );
     } catch (err) {
       toast.error(

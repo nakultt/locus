@@ -192,10 +192,8 @@ export default function LandingView() {
             className="mt-7 text-balance text-[clamp(2.75rem,7.5vw,5rem)] font-normal leading-[1.02] tracking-[-0.035em] text-ink animate-in-up"
             style={{ animationDelay: "60ms" }}
           >
-            The work between
-            <br className="hidden sm:block" />{" "}
-            <span className="text-muted">writing it</span> and{" "}
-            <span className="text-muted">shipping it</span>
+            <span className="text-muted">The work between</span>
+            <br className="hidden sm:block" /> writing it and shipping it
           </h1>
 
           <p
