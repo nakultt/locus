@@ -1,9 +1,11 @@
 """
 User Settings Router
-Local model backend status.
+Model backend status.
 
-Locus runs entirely on a local OpenAI-compatible model server (MoE Model
-Manager). There are no per-user model API keys to manage.
+Locus runs on a local OpenAI-compatible model server (MoE Model Manager) by
+default, and can be pointed at OpenAI, Anthropic or Gemini instead with
+`LLM_PROVIDER` plus that provider's key. Keys are environment configuration,
+not per-user data, and no endpoint here returns one -- only whether one is set.
 """
 
 from fastapi import APIRouter, Depends
@@ -13,7 +15,11 @@ from app import models, schemas
 from app.core.database import get_db
 from app.core.dependencies import get_current_user
 from app.services import integration_health
-from app.services.chat.llm import check_llm_available, describe_backend
+from app.services.chat.llm import (
+    available_providers,
+    check_llm_available,
+    describe_backend,
+)
 
 router = APIRouter()
 
@@ -21,14 +27,16 @@ router = APIRouter()
 @router.get(
     "/llm",
     response_model=schemas.LLMStatus,
-    summary="Local model backend status"
+    summary="Model backend status"
 )
 async def llm_status() -> schemas.LLMStatus:
     """
-    Report whether the local model server is reachable and has a model loaded.
+    Report whether the configured backend can serve a request.
 
-    The frontend uses this to tell the user to start MoE Model Manager, rather
-    than letting chat fail with an opaque connection error.
+    The frontend uses this to tell the user to start MoE Model Manager, or to
+    set the missing API key, rather than letting chat fail with an opaque
+    connection error. It also names which provider is active, because pointing
+    the analysis passes at a hosted API changes where your code goes.
     """
     available, message = await check_llm_available()
     backend = describe_backend()
@@ -37,9 +45,13 @@ async def llm_status() -> schemas.LLMStatus:
         available=available,
         message=message,
         provider=backend["provider"],
+        is_local=bool(backend["is_local"]),
         base_url=backend["base_url"],
         fast_model=backend["fast_model"],
         smart_model=backend["smart_model"],
+        api_key_env=backend["api_key_env"],
+        api_key_configured=bool(backend["api_key_configured"]),
+        providers=[schemas.LLMProviderOption(**p) for p in available_providers()],
     )
 
 
