@@ -254,6 +254,78 @@ def update_integration_credentials(
     return True
 
 
+# ============== Model Backend Operations ==============
+
+def get_llm_setting(db: Session, user_id: int) -> models.LLMSetting | None:
+    """The user's model backend row, or None if they have never saved one."""
+    return db.query(models.LLMSetting).filter(
+        models.LLMSetting.owner_id == user_id
+    ).first()
+
+
+def upsert_llm_setting(
+    db: Session,
+    user_id: int,
+    *,
+    provider: str | None = None,
+    base_url: str | None = None,
+    fast_model: str | None = None,
+    smart_model: str | None = None,
+    timeout_seconds: float | None = None,
+    api_key: str | None = None,
+    api_key_provided: bool = False,
+) -> models.LLMSetting:
+    """
+    Create or update the user's model backend settings.
+
+    `api_key_provided` separates the two things a blank key field can mean.
+    The API never returns a stored key, so a form that submits "" on every
+    save would erase the key each time somebody changed a model id -- and the
+    erasure is invisible until the next analysis fails with a 401. Omitting
+    the field leaves the stored key alone; sending an explicit empty string
+    clears it.
+
+    Every other blank is stored as NULL, which means "inherit the deployment
+    default" rather than "override with nothing".
+    """
+    def _clean(value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = value.strip()
+        return text or None
+
+    setting = get_llm_setting(db, user_id)
+    if not setting:
+        setting = models.LLMSetting(owner_id=user_id)
+        db.add(setting)
+
+    setting.provider = _clean(provider)
+    setting.base_url = _clean(base_url)
+    setting.fast_model = _clean(fast_model)
+    setting.smart_model = _clean(smart_model)
+    setting.timeout_seconds = timeout_seconds
+
+    if api_key_provided:
+        cleaned = _clean(api_key)
+        setting.encrypted_api_key = (
+            security.encrypt_token(cleaned) if cleaned else None
+        )
+
+    db.commit()
+    db.refresh(setting)
+    return setting
+
+
+def delete_llm_setting(db: Session, user_id: int) -> bool:
+    """Drop the row entirely, returning the user to the deployment default."""
+    setting = get_llm_setting(db, user_id)
+    if not setting:
+        return False
+    db.delete(setting)
+    db.commit()
+    return True
+
+
 # ============== Conversation Operations ==============
 
 def create_conversation(

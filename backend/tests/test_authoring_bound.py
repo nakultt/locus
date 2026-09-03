@@ -121,7 +121,7 @@ class TestShouldRetry:
         assert "human has pushed" in reason
 
     def test_the_throughput_cap_stops_it(self, db, monkeypatch):
-        monkeypatch.setattr(authoring, "MAX_OPEN_AUTONOMOUS_PRS", 1)
+        monkeypatch.setenv("LOCUS_MAX_OPEN_AUTONOMOUS_PRS", "1")
         s = settings_for(db)
         spend(db, 1, opened=True, ticket_key="OTHER-1")
 
@@ -275,7 +275,7 @@ class TestMaybeRetry:
         monkeypatch.setattr(
             "app.services.pipeline.review_flow.post_review_notification", capture
         )
-        monkeypatch.setattr(authoring, "MAX_OPEN_AUTONOMOUS_PRS", 1)
+        monkeypatch.setenv("LOCUS_MAX_OPEN_AUTONOMOUS_PRS", "1")
         monkeypatch.setattr(authoring, "get_driver", lambda *a, **k: _Driver([]))
 
         s = settings_for(db)

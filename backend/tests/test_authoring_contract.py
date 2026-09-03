@@ -225,7 +225,7 @@ class TestThroughputGuard:
         assert authoring.throughput_exceeded(db, owner_id=1, repo="acme/other") is False
 
     def test_exceeded_at_the_configured_cap(self, db, monkeypatch):
-        monkeypatch.setattr(authoring, "MAX_OPEN_AUTONOMOUS_PRS", 2)
+        monkeypatch.setenv("LOCUS_MAX_OPEN_AUTONOMOUS_PRS", "2")
         for number in (1, 2):
             self._opened(db, number)
 
@@ -396,7 +396,7 @@ class TestAuthorEndpoint:
 
         _go_autonomous(client)
         monkeypatch.setattr(authoring, "get_driver", lambda *a, **k: _StubDriver())
-        monkeypatch.setattr(authoring, "MAX_OPEN_AUTONOMOUS_PRS", 1)
+        monkeypatch.setenv("LOCUS_MAX_OPEN_AUTONOMOUS_PRS", "1")
 
         session = next(main.app.dependency_overrides[get_db]())
         authoring.record_attempt(

@@ -59,6 +59,12 @@ class LLMProviderOption(BaseModel):
     api_key_configured: bool
     fast_model: str
     smart_model: str
+    default_base_url: str = Field(
+        "", description="Endpoint used when none is configured; the form's placeholder"
+    )
+    needs_key: bool = Field(
+        False, description="Whether choosing this provider needs a key"
+    )
 
 
 class LLMStatus(BaseModel):
@@ -77,6 +83,55 @@ class LLMStatus(BaseModel):
         True, description="Whether a key is set. The key itself is never returned."
     )
     providers: list[LLMProviderOption] = Field(default_factory=list)
+    source: str = Field(
+        "environment",
+        description="Where the active settings came from: 'settings' or 'environment'",
+    )
+
+
+class LLMConfigOut(BaseModel):
+    """
+    A user's saved model backend settings.
+
+    The key is never returned -- only whether one is stored. Everything else
+    is echoed back exactly as saved, including the blanks, because a blank
+    means "inherit the deployment default" and rendering a resolved value in
+    its place would make the next save pin it.
+    """
+    provider: str | None = None
+    base_url: str | None = None
+    fast_model: str | None = None
+    smart_model: str | None = None
+    timeout_seconds: float | None = None
+    api_key_configured: bool = False
+    configured: bool = Field(
+        False, description="Whether the user has saved settings at all"
+    )
+    providers: list[LLMProviderOption] = Field(default_factory=list)
+
+
+class LLMConfigUpdate(BaseModel):
+    """
+    New model backend settings.
+
+    `api_key` omitted leaves the stored key untouched; an explicit empty
+    string clears it. The two have to be distinguishable because no endpoint
+    returns the key, so a form that always submitted its (empty) field would
+    erase the key every time somebody changed a model id -- invisibly, until
+    the next analysis failed with a 401.
+    """
+    provider: str | None = Field(None, description="local | openai | anthropic | gemini")
+    base_url: str | None = Field(
+        None, description="OpenAI-compatible endpoint; blank inherits the default"
+    )
+    fast_model: str | None = None
+    smart_model: str | None = None
+    timeout_seconds: float | None = Field(
+        None, gt=0, le=3600, description="Per-request timeout in seconds"
+    )
+    api_key: str | None = Field(
+        None, description="Omit to keep the stored key; empty string clears it"
+    )
 
 
 # ============== Integration Schemas ==============
@@ -1213,10 +1268,129 @@ class PRAgentDefaultsUpdate(BaseModel):
         ),
     )
 
+    # ---- the agent runtime -------------------------------------------------
+    #
+    # How this account's agent runs, as opposed to which tickets it may write.
+    # Every field is optional and None means inherit: the environment variable
+    # first, then the code's constant. That is what lets an account set only
+    # the model and keep the deployment's command template, and it is why the
+    # UI sends null for a blank field rather than an empty string.
+    authoring_driver: str | None = Field(
+        None, description="opencode | none. Blank inherits LOCUS_AUTHORING_DRIVER."
+    )
+    authoring_model: str | None = Field(
+        None,
+        description=(
+            "Pins the authoring model for reproducibility across attempts. "
+            "Blank lets the driver use its own."
+        ),
+    )
+    authoring_command: str | None = Field(
+        None,
+        description=(
+            "The invocation template, e.g. 'opencode run --prompt-file "
+            "{prompt} --cwd {workspace}'. A template, because the CLI moves."
+        ),
+    )
+    authoring_context: str | None = Field(
+        None,
+        description=(
+            "full | ticket_only -- how much of the brief leaves the machine. "
+            "ticket_only drops the Slack transcript and issue bodies."
+        ),
+    )
+    authoring_timeout_seconds: int | None = Field(
+        None, ge=60, le=7200, description="Wall clock for one attempt"
+    )
+    max_changed_files: int | None = Field(
+        None, ge=1, le=500, description="Diff size cap, in files"
+    )
+    max_changed_lines: int | None = Field(
+        None, ge=1, le=100000, description="Diff size cap, in lines"
+    )
+    max_open_autonomous_prs: int | None = Field(
+        None,
+        ge=0,
+        le=50,
+        description=(
+            "Agent-authored pull requests that may be open at once per repo. "
+            "Reviewer attention is the scarce resource this mode spends."
+        ),
+    )
+    agent_commit_name: str | None = Field(
+        None, max_length=120, description="Name on the agent's own commits"
+    )
+    agent_commit_email: str | None = Field(
+        None,
+        max_length=255,
+        description=(
+            "Address on the agent's own commits. Also how a human's commits "
+            "on a branch are told apart from a previous attempt's."
+        ),
+    )
+    code_root: str | None = Field(
+        None,
+        description=(
+            "A folder holding many repos, e.g. E:/Github. Used when a repo "
+            "sets no source_path of its own."
+        ),
+    )
+    workspace_root: str | None = Field(
+        None, description="Where the agent's throwaway worktrees are cut. Blank uses temp."
+    )
+    allow_in_place: bool | None = Field(
+        None,
+        description=(
+            "Let the agent work directly in the source checkout. Off unless a "
+            "tree genuinely cannot be worktree'd -- it shares a working tree "
+            "with a human, and git checkout becomes destructive."
+        ),
+    )
+    workspace_ttl_days: int | None = Field(
+        None, ge=0, le=90, description="How long kept-on-failure worktrees survive"
+    )
+    calendar_sweep_minutes: int | None = Field(
+        None, ge=5, le=1440, description="How often your calendars are swept"
+    )
+    calendar_lookahead_days: int | None = Field(
+        None, ge=1, le=90, description="How far ahead the sweep looks"
+    )
+
 
 class PRAgentDefaults(PRAgentDefaultsUpdate):
     """Stored account-wide fallbacks."""
     model_config = ConfigDict(from_attributes=True)
+
+
+class AgentRuntimeResolved(BaseModel):
+    """
+    What the agent will actually use, after account, environment and constant.
+
+    Rendered as the placeholder under each blank field, which is what makes
+    "blank inherits" legible rather than mysterious -- an empty box with no
+    hint is where someone types a guess. Nothing here is a secret: these are
+    paths, bounds and a model id, so unlike the model backend's key the values
+    themselves are returned.
+    """
+    driver: str
+    model: str
+    command: str
+    context_mode: str
+    timeout_seconds: int
+    max_changed_files: int
+    max_changed_lines: int
+    max_open_prs: int
+    agent_name: str
+    agent_email: str
+    code_root: str
+    workspace_root: str
+    allow_in_place: bool
+    workspace_ttl_days: int
+    calendar_sweep_minutes: int
+    calendar_lookahead_days: int
+    # True when this account has saved any runtime setting of its own. The UI
+    # says "your settings" or "this deployment's default" from it.
+    configured: bool = False
 
 
 class EffectiveSetting(BaseModel):

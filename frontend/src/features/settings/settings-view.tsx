@@ -10,6 +10,7 @@ import {
   Cpu,
   LogOut,
   Plug,
+  KeyRound,
   RefreshCw,
   ShieldCheck,
   SlidersHorizontal,
@@ -19,7 +20,13 @@ import { useAuth } from "@/features/auth/auth-context";
 import {
   checkLLMStatus,
   fetchIntegrationHealth,
+  fetchLLMConfig,
+  resetLLMConfig,
+  saveLLMConfig,
+  testLLMConfig,
   type IntegrationHealthEntry,
+  type LLMConfig,
+  type LLMConfigUpdate,
   type LLMStatus,
 } from "@/lib/api";
 import { timeAgo } from "@/lib/datetime";
@@ -29,7 +36,7 @@ import { ThemeToggle } from "@/components/layout/theme-toggle";
 import { Avatar } from "@/components/ui/avatar";
 import { Badge, Dot } from "@/components/ui/badge";
 import { Button, IconButton } from "@/components/ui/button";
-import { Field, Input } from "@/components/ui/form";
+import { Field, Input, Select } from "@/components/ui/form";
 import { Tabs } from "@/components/ui/nav";
 import { ConfirmDialog } from "@/components/ui/overlay";
 import {
@@ -297,6 +304,370 @@ function providerLabel(llm: LLMStatus): string {
   return active?.label ?? llm.provider ?? "—";
 }
 
+/* ── Model backend ────────────────────────────────────────────────────────
+   The provider, the endpoint, the model ids and the API key are settings,
+   not deployment constants. They used to live in `backend/.env`, which meant
+   changing a model id required a restart and a shell on the server — fine for
+   one machine, wrong for a product.
+
+   Two rules shape the form. The key is write-only: the API returns whether one
+   is stored and never the value, so the field stays empty and is sent only
+   when somebody types in it — a form that always submitted its empty box would
+   erase the key on every unrelated save, invisibly, until the next analysis
+   failed with a 401. And every field may be left blank, which inherits the
+   deployment default rather than overriding with nothing; the placeholder
+   shows what blank resolves to, because an empty box with no hint is where
+   someone types a guess. */
+
+function ModelBackendPanel({
+  llm,
+  loading,
+  onRefresh,
+}: {
+  llm: LLMStatus | null;
+  loading: boolean;
+  onRefresh: () => Promise<void> | void;
+}) {
+  const toast = useToast();
+
+  const [config, setConfig] = useState<LLMConfig | null>(null);
+  const [provider, setProvider] = useState("local");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [fastModel, setFastModel] = useState("");
+  const [smartModel, setSmartModel] = useState("");
+  const [timeout, setTimeoutSeconds] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [keyStored, setKeyStored] = useState(false);
+
+  const [busy, setBusy] = useState<"save" | "test" | "reset" | null>(null);
+  const [probe, setProbe] = useState<LLMStatus | null>(null);
+
+  const apply = useCallback((next: LLMConfig) => {
+    setConfig(next);
+    setProvider(next.provider ?? next.providers.find((p) => p.active)?.id ?? "local");
+    setBaseUrl(next.base_url ?? "");
+    setFastModel(next.fast_model ?? "");
+    setSmartModel(next.smart_model ?? "");
+    setTimeoutSeconds(
+      next.timeout_seconds == null ? "" : String(next.timeout_seconds)
+    );
+    setKeyStored(next.api_key_configured);
+    setApiKey("");
+  }, []);
+
+  useEffect(() => {
+    fetchLLMConfig()
+      .then(apply)
+      .catch(() => {
+        // The status notice above already reports an unreachable backend;
+        // a second error here would say the same thing twice.
+      });
+  }, [apply]);
+
+  const selected = config?.providers.find((p) => p.id === provider);
+  const isLocal = selected?.is_local ?? provider === "local";
+
+  /** What the form is about to send. Blank fields are sent as null: they mean
+      "inherit", and sending "" would store an override of nothing. */
+  const payload = (): LLMConfigUpdate => {
+    const trimmed = timeout.trim();
+    const seconds = trimmed ? Number(trimmed) : null;
+
+    return {
+      provider,
+      base_url: baseUrl.trim() || null,
+      fast_model: fastModel.trim() || null,
+      smart_model: smartModel.trim() || null,
+      timeout_seconds:
+        seconds != null && Number.isFinite(seconds) && seconds > 0 ? seconds : null,
+      // Omitted entirely unless typed, which is what keeps the stored key.
+      ...(apiKey ? { api_key: apiKey } : {}),
+    };
+  };
+
+  const run = async (
+    kind: "save" | "test" | "reset",
+    action: () => Promise<void>
+  ) => {
+    setBusy(kind);
+    try {
+      await action();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Something went wrong.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const onSave = () =>
+    run("save", async () => {
+      apply(await saveLLMConfig(payload()));
+      setProbe(null);
+      await onRefresh();
+      toast.success("Model backend saved.");
+    });
+
+  const onTest = () =>
+    run("test", async () => {
+      const result = await testLLMConfig(payload());
+      setProbe(result);
+      if (!result.available) toast.error(result.message);
+    });
+
+  const onReset = () =>
+    run("reset", async () => {
+      apply(await resetLLMConfig());
+      setProbe(null);
+      await onRefresh();
+      toast.success("Back to this deployment's default.");
+    });
+
+  const onClearKey = () =>
+    run("save", async () => {
+      // An explicit empty string, which is the only thing that clears it.
+      apply(await saveLLMConfig({ ...payload(), api_key: "" }));
+      await onRefresh();
+      toast.success("API key removed.");
+    });
+
+  return (
+    <Section title="Model backend">
+      <Panel>
+        <PanelHeader
+          icon={<Cpu aria-hidden />}
+          title="Inference"
+          description={
+            llm && llm.is_local === false
+              ? "Analysis runs on a hosted provider — diffs and discussion leave this machine."
+              : "Every model that reads your code automatically runs on the endpoint below."
+          }
+          actions={
+            <IconButton
+              label="Check again"
+              variant="ghost"
+              size="sm"
+              onClick={onRefresh}
+            >
+              <RefreshCw className={loading ? "animate-spin" : undefined} />
+            </IconButton>
+          }
+        />
+
+        <div className="space-y-6 p-5">
+          {loading && !llm ? (
+            <Skeleton className="h-16 w-full" />
+          ) : (
+            <>
+              <Notice
+                tone={llm?.available ? "success" : "warning"}
+                icon={llm?.available ? <Check aria-hidden /> : <AlertTriangle aria-hidden />}
+              >
+                {llm?.message}
+              </Notice>
+
+              {llm?.base_url && (
+                <dl className="divide-y divide-line border-t border-line">
+                  {[
+                    ["Provider", providerLabel(llm)],
+                    ["Endpoint", llm.base_url],
+                    ["Fast model", llm.fast_model],
+                    ["Smart model", llm.smart_model],
+                    [
+                      "Configured by",
+                      // Named as a state, not just a source. "this deployment"
+                      // alone reads as a choice somebody made, when what it
+                      // actually means is that this account has saved nothing
+                      // and the form below is showing inherited placeholders.
+                      llm.source === "settings"
+                        ? "your settings"
+                        : "backend/.env — nothing saved for your account",
+                    ],
+                  ].map(([label, value]) => (
+                    <div
+                      key={label}
+                      className="flex items-baseline justify-between gap-4 py-2.5"
+                    >
+                      <dt className="shrink-0 text-sm text-muted">{label}</dt>
+                      <dd className="min-w-0 truncate font-mono text-xs text-ink">
+                        {value || "—"}
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
+              )}
+            </>
+          )}
+
+          {/* ── The form ───────────────────────────────────────────────── */}
+          {config === null ? (
+            <Skeleton className="h-64 w-full" />
+          ) : (
+            <div className="space-y-5 border-t border-line pt-6">
+              <Field
+                label="Provider"
+                htmlFor="llm-provider"
+                hint={
+                  isLocal
+                    ? "Any OpenAI-compatible server you run — Ollama, LM Studio, etc. Nothing leaves the machine it runs on."
+                    : "A hosted provider receives every diff, Slack thread and ticket the analysis reads, on every push."
+                }
+              >
+                <Select
+                  id="llm-provider"
+                  value={provider}
+                  onChange={(e) => setProvider(e.target.value)}
+                >
+                  {config.providers.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+
+              <Field
+                label="Endpoint"
+                htmlFor="llm-base-url"
+                hint="Blank uses the default shown. Point this at your own gateway — LiteLLM, OpenRouter, an Azure deployment — when you have one."
+              >
+                <Input
+                  id="llm-base-url"
+                  value={baseUrl}
+                  placeholder={selected?.default_base_url}
+                  onChange={(e) => setBaseUrl(e.target.value)}
+                  className="font-mono text-xs"
+                  spellCheck={false}
+                />
+              </Field>
+
+              <div className="grid gap-5 sm:grid-cols-2">
+                <Field
+                  label="Fast model"
+                  htmlFor="llm-fast"
+                  hint="Classifiers and short answers."
+                >
+                  <Input
+                    id="llm-fast"
+                    value={fastModel}
+                    placeholder={selected?.fast_model}
+                    onChange={(e) => setFastModel(e.target.value)}
+                    className="font-mono text-xs"
+                    spellCheck={false}
+                  />
+                </Field>
+
+                <Field
+                  label="Smart model"
+                  htmlFor="llm-smart"
+                  hint="The security scan and the code review."
+                >
+                  <Input
+                    id="llm-smart"
+                    value={smartModel}
+                    placeholder={selected?.smart_model}
+                    onChange={(e) => setSmartModel(e.target.value)}
+                    className="font-mono text-xs"
+                    spellCheck={false}
+                  />
+                </Field>
+              </div>
+
+              {/* Local servers take no key. Rendering the field anyway invites
+                  someone to paste a real one into a box nothing will use. */}
+              {selected?.needs_key !== false && (
+                <Field
+                  label="API key"
+                  htmlFor="llm-key"
+                  hint={
+                    keyStored
+                      ? "A key is stored, encrypted. Leave this blank to keep it — it is never sent back to the browser."
+                      : `Stored encrypted. Falls back to ${
+                          selected?.api_key_env || "the environment"
+                        } in backend/.env when blank.`
+                  }
+                >
+                  <div className="flex gap-2">
+                    <Input
+                      id="llm-key"
+                      type="password"
+                      value={apiKey}
+                      autoComplete="off"
+                      placeholder={keyStored ? "•••••••••••••• (stored)" : "sk-…"}
+                      onChange={(e) => setApiKey(e.target.value)}
+                      icon={<KeyRound />}
+                      className="font-mono text-xs"
+                    />
+                    {keyStored && (
+                      <Button
+                        variant="ghost"
+                        onClick={onClearKey}
+                        disabled={busy !== null}
+                      >
+                        Remove
+                      </Button>
+                    )}
+                  </div>
+                </Field>
+              )}
+
+              <Field
+                label="Request timeout"
+                htmlFor="llm-timeout"
+                hint="Seconds. Local generation is slow and agent loops chain several calls; the default is 600."
+              >
+                <Input
+                  id="llm-timeout"
+                  value={timeout}
+                  inputMode="numeric"
+                  placeholder="600"
+                  onChange={(e) => setTimeoutSeconds(e.target.value)}
+                  className="max-w-32 font-mono text-xs"
+                />
+              </Field>
+
+              {/* The probe result, from Test. Deliberately separate from the
+                  status notice above, which describes what is *saved* — a test
+                  that overwrote it would claim settings are live before they
+                  have been saved. */}
+              {probe && (
+                <Notice
+                  tone={probe.available ? "success" : "warning"}
+                  icon={probe.available ? <Check aria-hidden /> : <AlertTriangle aria-hidden />}
+                >
+                  {probe.message}
+                </Notice>
+              )}
+
+              <div className="flex flex-wrap items-center gap-2 border-t border-line pt-5">
+                <Button onClick={onSave} disabled={busy !== null}>
+                  {busy === "save" ? "Saving…" : "Save"}
+                </Button>
+                <Button
+                  variant="secondary"
+                  onClick={onTest}
+                  disabled={busy !== null}
+                >
+                  {busy === "test" ? "Testing…" : "Test connection"}
+                </Button>
+                {config.configured && (
+                  <Button
+                    variant="ghost"
+                    onClick={onReset}
+                    disabled={busy !== null}
+                    className="ml-auto"
+                  >
+                    Use deployment default
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </Panel>
+    </Section>
+  );
+}
+
 /* ── System ───────────────────────────────────────────────────────────────── */
 
 function SystemTab() {
@@ -328,143 +699,30 @@ function SystemTab() {
     }
   }, []);
 
+  // A local server's readiness changes while you watch — a model finishes
+  // loading — so it is worth polling closely. A hosted provider's check is a
+  // request to a third party on a metered key, and polling that every fifteen
+  // seconds for as long as a settings tab is left open is a cost with no
+  // corresponding signal.
+  const interval = llm?.is_local === false ? 60000 : 15000;
+
   useEffect(() => {
     refreshLlm();
     refreshHealth();
-    const interval = setInterval(refreshLlm, 15000);
-    return () => clearInterval(interval);
   }, [refreshLlm, refreshHealth]);
+
+  useEffect(() => {
+    const timer = setInterval(refreshLlm, interval);
+    return () => clearInterval(timer);
+  }, [refreshLlm, interval]);
 
   return (
     <div className="space-y-10">
-      {/* ── Local model ─────────────────────────────────────────────────── */}
-      <Section title="Model backend">
-        <Panel>
-          <PanelHeader
-            icon={<Cpu aria-hidden />}
-            title="Inference"
-            description={
-              llm && llm.is_local === false
-                ? "Analysis runs on a hosted provider — diffs and discussion leave this machine."
-                : "Every model that reads your code automatically runs here, over loopback."
-            }
-            actions={
-              <IconButton
-                label="Check again"
-                variant="ghost"
-                size="sm"
-                onClick={refreshLlm}
-              >
-                <RefreshCw className={loadingLlm ? "animate-spin" : undefined} />
-              </IconButton>
-            }
-          />
-
-          <div className="p-5">
-            {loadingLlm && !llm ? (
-              <Skeleton className="h-16 w-full" />
-            ) : (
-              <>
-                <Notice
-                  tone={llm?.available ? "success" : "warning"}
-                  icon={
-                    llm?.available ? (
-                      <Check aria-hidden />
-                    ) : (
-                      <AlertTriangle aria-hidden />
-                    )
-                  }
-                >
-                  {llm?.message}
-                </Notice>
-
-                {llm?.base_url && (
-                  <dl className="mt-4 divide-y divide-line border-t border-line">
-                    {[
-                      ["Provider", providerLabel(llm)],
-                      ["Endpoint", llm.base_url],
-                      ["Fast model", llm.fast_model],
-                      ["Smart model", llm.smart_model],
-                      ...(llm.api_key_env
-                        ? [
-                            [
-                              "API key",
-                              `${llm.api_key_env} ${
-                                llm.api_key_configured ? "(set)" : "(missing)"
-                              }`,
-                            ] as [string, string],
-                          ]
-                        : []),
-                    ].map(([label, value]) => (
-                      <div
-                        key={label}
-                        className="flex items-baseline justify-between gap-4 py-2.5"
-                      >
-                        <dt className="shrink-0 text-sm text-muted">{label}</dt>
-                        <dd className="min-w-0 truncate font-mono text-xs text-ink">
-                          {value || "—"}
-                        </dd>
-                      </div>
-                    ))}
-                  </dl>
-                )}
-
-                {!llm?.available &&
-                  (llm?.is_local === false ? (
-                    <p className="mt-4 text-sm leading-relaxed text-muted">
-                      Set {llm.api_key_env ?? "the provider's API key"} in{" "}
-                      <code className="font-mono text-xs">backend/.env</code> and
-                      restart the backend, or set{" "}
-                      <code className="font-mono text-xs">LLM_PROVIDER=local</code>{" "}
-                      to go back to MoE Model Manager.
-                    </p>
-                  ) : (
-                    <p className="mt-4 text-sm leading-relaxed text-muted">
-                      Open MoE Model Manager and load a text model. No API key is
-                      required — the server holds one model at a time, and chat
-                      reports this rather than failing with a connection error.
-                    </p>
-                  ))}
-
-                {llm?.providers && llm.providers.length > 0 && (
-                  <div className="mt-6 border-t border-line pt-4">
-                    <p className="text-sm text-muted">
-                      Set <code className="font-mono text-xs">LLM_PROVIDER</code> in{" "}
-                      <code className="font-mono text-xs">backend/.env</code> to switch.
-                      A hosted provider sends every diff, Slack thread and ticket the
-                      analysis reads to a third party, on every push.
-                    </p>
-                    <ul className="mt-3 space-y-2">
-                      {llm.providers.map((p) => (
-                        <li
-                          key={p.id}
-                          className="flex items-baseline justify-between gap-4"
-                        >
-                          <span className="flex min-w-0 items-baseline gap-2">
-                            <code className="font-mono text-xs text-ink">{p.id}</code>
-                            <span className="truncate text-sm text-muted">
-                              {p.label}
-                            </span>
-                          </span>
-                          <span className="shrink-0 text-xs text-muted">
-                            {p.active
-                              ? "active"
-                              : p.is_local
-                                ? "available"
-                                : p.api_key_configured
-                                  ? `${p.api_key_env} set`
-                                  : `needs ${p.api_key_env}`}
-                          </span>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-        </Panel>
-      </Section>
+      <ModelBackendPanel
+        llm={llm}
+        loading={loadingLlm}
+        onRefresh={refreshLlm}
+      />
 
       {/* ── Integration health ──────────────────────────────────────────────
           The background loops swallow their own failures so one dead
@@ -551,8 +809,10 @@ function SystemTab() {
             The security scanner, the code reviewer, the QA classifier and the
             review summariser read text that anyone who can open a pull request
             controls. None of them has a tool bound, and all of them run on the
-            local endpoint above. Autonomous authoring is the one exception, is
-            off by default, and says so before its first attempt.
+            endpoint configured above — on a local server that is your own
+            machine, and on a hosted provider it is not. Autonomous authoring
+            runs on its own model regardless, is off by default, and says so
+            before its first attempt.
           </p>
           <p className="mt-4 flex items-center gap-2 text-xs text-subtle">
             <ShieldCheck className="size-3.5" aria-hidden />

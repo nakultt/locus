@@ -77,21 +77,40 @@ accurate version:
 The security scanner, the code reviewer, the QA classifier and the review-asks summarizer all run
 on `MOE_BASE_URL` over loopback, on every push, unprompted. That is the default and it is unchanged.
 
-If you would rather use a hosted model, set `LLM_PROVIDER` to `openai`, `anthropic` or `gemini`
-and supply that provider's key (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`). Locus
-then sends *those same automatic passes* — every diff, Slack thread and ticket they read — to that
-provider, so the sentence above stops being true for your install. Settings → System names the
-active provider for exactly that reason. Keys are read from `backend/.env` only: they are
-environment configuration rather than per-user data, no endpoint returns one, and the status
-surface reports only whether one is set. `anthropic` needs `uv sync --extra hosted`; OpenAI and
-Gemini speak the OpenAI wire format and need nothing extra.
+If you would rather use a hosted model, choose the provider under **Settings → System → Model
+backend** and paste that provider's key there. Locus then sends *those same automatic passes* —
+every diff, Slack thread and ticket they read — to that provider, so the sentence above stops
+being true for your install; the panel names the active provider for exactly that reason.
+`anthropic` needs `uv sync --extra hosted`; OpenAI and Gemini speak the OpenAI wire format and
+need nothing extra.
+
+Everything about the backend is configuration rather than code: the **endpoint is editable for
+every provider**, not only the local one, so a self-hosted vLLM or Ollama server, a LiteLLM or
+OpenRouter gateway, or an Azure deployment is a URL you type rather than a fork. Model ids and
+the request timeout are the same. Blank fields inherit the deployment default, and the field's
+placeholder shows what that is.
+
+Keys are stored per account, Fernet-encrypted with `ENCRYPTION_KEY` like every other credential
+in the database. **No endpoint returns a key** — the API reports only whether one is set, which
+is why the key field in the form is left blank on load and is sent only when you type in it: a
+form that always submitted its empty box would erase the key every time you changed a model id,
+invisibly, until the next analysis failed with a 401.
+
+`backend/.env` still holds `LLM_PROVIDER`, `MOE_BASE_URL` and the `*_API_KEY` variables, and they
+remain the **deployment-wide default** for accounts that have not configured their own. That is
+what keeps a single-machine install working with nothing set in the UI.
 
 The authoring agent is different. A local 35B model writing production code against a real ticket
 is the weakest link in the whole mode, so **OpenCode runs on its own configured model**, which is
-remote. That is a deliberate trade — better diffs in exchange for the brief leaving the machine,
+remote. That model — along with the driver, the invocation template, the context mode, the diff
+bounds, the commit identity, the source and workspace roots and the calendar agent's dials — is
+set per account under **Settings → Automation → Agent runtime**. Each field may be left blank,
+and blank inherits: the deployment's environment variable first, then the built-in default, with
+the placeholder showing what that currently resolves to. That is a deliberate trade — better diffs in exchange for the brief leaving the machine,
 on tickets a human explicitly handed over. The mode toggle names it, every `AuthoringAttempt` row
-records which model ran, and `LOCUS_AUTHORING_CONTEXT=ticket_only` drops the Slack transcript and
-issue bodies for teams that cannot send internal discussion to a third party.
+records which model ran, and Setting the context mode to `ticket_only` drops the Slack transcript
+and issue bodies for teams that cannot send internal discussion to a third party — an account
+setting, falling back to `LOCUS_AUTHORING_CONTEXT`.
 
 **Check the model provider's data-retention terms before pointing this at a private repository.**
 Free tiers commonly reserve the right to train on inputs, and the inputs here are proprietary

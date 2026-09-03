@@ -5,6 +5,7 @@ import Link from "next/link";
 import {
   AlertTriangle,
   Bot,
+  CalendarClock,
   Check,
   Copy,
   FileText,
@@ -13,6 +14,7 @@ import {
   Play,
   Plus,
   ShieldCheck,
+  Terminal,
   Trash2,
   UserRound,
   Webhook,
@@ -20,6 +22,7 @@ import {
 } from "lucide-react";
 import {
   analyzePR,
+  getAgentRuntime,
   getAuthoringPresets,
   getPRAgentDefaults,
   getPRAgentSummary,
@@ -28,6 +31,7 @@ import {
   registerRepo,
   savePRAgentDefaults,
   unregisterRepo,
+  type AgentRuntimeResolved,
   type AuthoringPreset,
   type CapabilityStatus,
   type MergeMethod,
@@ -170,6 +174,9 @@ function Defaults({ docsConnected }: { docsConnected: boolean }) {
   const toast = useToast();
   const [values, setValues] = useState<PRAgentDefaults | null>(null);
   const [presets, setPresets] = useState<AuthoringPreset[]>([]);
+  // What each blank runtime field currently resolves to. Rendered as the
+  // placeholders, so "blank inherits" is checkable rather than a claim.
+  const [resolved, setResolved] = useState<AgentRuntimeResolved | null>(null);
   const [emails, setEmails] = useState("");
   const [reviewers, setReviewers] = useState("");
   const [contacts, setContacts] = useState("");
@@ -192,6 +199,10 @@ function Defaults({ docsConnected }: { docsConnected: boolean }) {
     getAuthoringPresets()
       .then((rows) => setPresets(Array.isArray(rows) ? rows : []))
       .catch(() => setPresets([]));
+    // Same rule: a failed resolve costs the placeholders, never the form.
+    getAgentRuntime()
+      .then(setResolved)
+      .catch(() => setResolved(null));
   }, []);
 
   if (!loaded) {
@@ -247,6 +258,7 @@ function Defaults({ docsConnected }: { docsConnected: boolean }) {
       setReviewers((next.reviewers ?? []).join(", "));
       setContacts(next.reviewer_contacts ?? "");
       setDocs((next.context_docs ?? []).join("\n"));
+      getAgentRuntime().then(setResolved).catch(() => {});
       toast.success("Automation settings saved");
     } catch (e) {
       toast.error(
@@ -391,6 +403,394 @@ function Defaults({ docsConnected }: { docsConnected: boolean }) {
           )}
         </Section>
       )}
+
+      {/* ── Agent runtime ────────────────────────────────────────────────
+          How this account's agent runs, as opposed to which tickets it may
+          write. Every one of these was an environment variable, which made it
+          one operator's answer for every tenant — including the context mode,
+          which decides whether your Slack discussion may be sent to a third
+          party.
+
+          Every field may be left blank, and blank inherits: the deployment's
+          variable first, then the constant in the code. The placeholder under
+          each one shows what it currently resolves to, because an empty box
+          with no hint is where someone types a guess — and for the command
+          template or the source root, that guess has a shell behind it. */}
+      <Section
+        title="Agent runtime"
+        description={
+          resolved?.configured
+            ? "Your settings. Anything left blank inherits this deployment's default."
+            : "Inheriting this deployment's defaults. Anything you set here applies to your account only."
+        }
+      >
+        <Panel className="space-y-5 p-5">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field
+              label="Driver"
+              htmlFor="rt-driver"
+              hint="What actually writes the code. None is the safe answer: it reports that no driver is configured rather than running anything."
+            >
+              <Select
+                id="rt-driver"
+                value={values.authoring_driver ?? ""}
+                onChange={(e) =>
+                  set("authoring_driver", e.target.value || null)
+                }
+              >
+                <option value="">
+                  Inherit{resolved ? ` (${resolved.driver})` : ""}
+                </option>
+                <option value="opencode">OpenCode</option>
+                <option value="none">None</option>
+              </Select>
+            </Field>
+
+            <Field
+              label="How much of the brief leaves the machine"
+              htmlFor="rt-context"
+              hint="ticket_only drops the Slack transcript and the issue bodies. It costs output quality — that discussion is where the requirement actually lives — and it is the setting for a team that cannot send internal discussion to a third party."
+            >
+              <Select
+                id="rt-context"
+                value={values.authoring_context ?? ""}
+                onChange={(e) =>
+                  set("authoring_context", e.target.value || null)
+                }
+              >
+                <option value="">
+                  Inherit{resolved ? ` (${resolved.context_mode})` : ""}
+                </option>
+                <option value="full">Full brief</option>
+                <option value="ticket_only">Ticket only</option>
+              </Select>
+            </Field>
+          </div>
+
+          <Field
+            label="Authoring model"
+            htmlFor="rt-model"
+            hint="Pins the model for reproducibility across attempts. Blank lets the driver use its own. This one is remote whatever you choose — it is the exception to everything else running locally."
+          >
+            <Input
+              id="rt-model"
+              className="font-mono text-xs"
+              placeholder={resolved?.model || "the driver's own"}
+              value={values.authoring_model ?? ""}
+              onChange={(e) => set("authoring_model", e.target.value || null)}
+              spellCheck={false}
+            />
+          </Field>
+
+          <Field
+            label="Invocation template"
+            htmlFor="rt-command"
+            hint="{prompt} and {workspace} are substituted. A template rather than fixed flags, because the CLI moves and a pinned flag breaks on an upgrade with a non-zero exit and no useful message."
+          >
+            <Input
+              id="rt-command"
+              className="font-mono text-xs"
+              placeholder={resolved?.command || "opencode run --prompt-file {prompt}"}
+              value={values.authoring_command ?? ""}
+              onChange={(e) => set("authoring_command", e.target.value || null)}
+              spellCheck={false}
+            />
+          </Field>
+
+          {/* ── The bounds ──────────────────────────────────────────────
+              Reviewer attention is the scarce resource this mode spends, and
+              every one of these is a limit on how much of it one ticket can
+              consume. A 4,000-line agent-authored diff is not reviewable. */}
+          <div className="border-t border-line pt-5">
+            <Kicker>Bounds</Kicker>
+            <p className="mt-1.5 text-sm leading-relaxed text-muted">
+              Reviewer attention is what this mode actually spends. A run over
+              any of these is refused and recorded — it is not retried smaller,
+              because the ticket was too big for the mode and that is something
+              the human should hear.
+            </p>
+
+            <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              <Field label="Timeout (seconds)" htmlFor="rt-timeout">
+                <Input
+                  id="rt-timeout"
+                  type="number"
+                  min={60}
+                  max={7200}
+                  placeholder={String(resolved?.timeout_seconds ?? "")}
+                  value={values.authoring_timeout_seconds ?? ""}
+                  onChange={(e) =>
+                    set(
+                      "authoring_timeout_seconds",
+                      e.target.value ? Number(e.target.value) : null
+                    )
+                  }
+                />
+              </Field>
+
+              <Field label="Max files" htmlFor="rt-files">
+                <Input
+                  id="rt-files"
+                  type="number"
+                  min={1}
+                  max={500}
+                  placeholder={String(resolved?.max_changed_files ?? "")}
+                  value={values.max_changed_files ?? ""}
+                  onChange={(e) =>
+                    set(
+                      "max_changed_files",
+                      e.target.value ? Number(e.target.value) : null
+                    )
+                  }
+                />
+              </Field>
+
+              <Field label="Max lines" htmlFor="rt-lines">
+                <Input
+                  id="rt-lines"
+                  type="number"
+                  min={1}
+                  max={100000}
+                  placeholder={String(resolved?.max_changed_lines ?? "")}
+                  value={values.max_changed_lines ?? ""}
+                  onChange={(e) =>
+                    set(
+                      "max_changed_lines",
+                      e.target.value ? Number(e.target.value) : null
+                    )
+                  }
+                />
+              </Field>
+
+              <Field
+                label="Open PRs per repo"
+                htmlFor="rt-open"
+                hint="The rubber-stamping cap."
+              >
+                <Input
+                  id="rt-open"
+                  type="number"
+                  min={0}
+                  max={50}
+                  placeholder={String(resolved?.max_open_prs ?? "")}
+                  value={values.max_open_autonomous_prs ?? ""}
+                  onChange={(e) =>
+                    set(
+                      "max_open_autonomous_prs",
+                      e.target.value ? Number(e.target.value) : null
+                    )
+                  }
+                />
+              </Field>
+            </div>
+          </div>
+
+          {/* ── Where the code is, and where the agent may write ─────────
+              Two different questions. Conflating them is how an agent ends up
+              editing Locus itself — which is refused whatever is typed here,
+              in both directions, by the same check that has always guarded
+              the environment variable. */}
+          <div className="border-t border-line pt-5">
+            <Kicker>Workspace</Kicker>
+            <p className="mt-1.5 text-sm leading-relaxed text-muted">
+              Where your repositories already sit, and where the agent is
+              allowed to work. They are different questions: the agent always
+              works in a <code className="font-mono text-xs">git worktree</code>{" "}
+              cut from your checkout, so your branch, your uncommitted changes
+              and your stashes are never touched. A path resolving to Locus&apos;s
+              own tree, to something that is not a git repository, or to a repo
+              whose <code className="font-mono text-xs">origin</code> does not
+              match is refused as a configuration error.
+            </p>
+
+            <div className="mt-4 space-y-4">
+              <Field
+                label="Source root"
+                htmlFor="rt-code-root"
+                hint="A folder holding many repos. Used when a repository sets no path of its own."
+              >
+                <Input
+                  id="rt-code-root"
+                  className="font-mono text-xs"
+                  placeholder={resolved?.code_root || "E:/Github"}
+                  value={values.code_root ?? ""}
+                  onChange={(e) => set("code_root", e.target.value || null)}
+                  spellCheck={false}
+                />
+              </Field>
+
+              <Field
+                label="Workspace root"
+                htmlFor="rt-ws-root"
+                hint="Where the throwaway worktrees are cut. Blank uses the system temp directory."
+              >
+                <Input
+                  id="rt-ws-root"
+                  className="font-mono text-xs"
+                  placeholder={resolved?.workspace_root || "system temp"}
+                  value={values.workspace_root ?? ""}
+                  onChange={(e) => set("workspace_root", e.target.value || null)}
+                  spellCheck={false}
+                />
+              </Field>
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Field
+                  label="Work in the checkout itself"
+                  htmlFor="rt-in-place"
+                  hint="Off unless a tree genuinely cannot be worktree'd. On, the agent shares a working tree with a person: git checkout becomes destructive and concurrent attempts become impossible."
+                >
+                  <Select
+                    id="rt-in-place"
+                    value={
+                      values.allow_in_place == null
+                        ? ""
+                        : values.allow_in_place
+                          ? "on"
+                          : "off"
+                    }
+                    onChange={(e) =>
+                      set(
+                        "allow_in_place",
+                        e.target.value === ""
+                          ? null
+                          : e.target.value === "on"
+                      )
+                    }
+                  >
+                    <option value="">
+                      Inherit
+                      {resolved ? ` (${resolved.allow_in_place ? "on" : "off"})` : ""}
+                    </option>
+                    <option value="off">Off — always use a worktree</option>
+                    <option value="on">On — write in the checkout</option>
+                  </Select>
+                </Field>
+
+                <Field
+                  label="Keep failed worktrees for (days)"
+                  htmlFor="rt-ttl"
+                  hint="A failed run whose tree is gone is close to undebuggable, so they are kept and pruned on a timer."
+                >
+                  <Input
+                    id="rt-ttl"
+                    type="number"
+                    min={0}
+                    max={90}
+                    placeholder={String(resolved?.workspace_ttl_days ?? "")}
+                    value={values.workspace_ttl_days ?? ""}
+                    onChange={(e) =>
+                      set(
+                        "workspace_ttl_days",
+                        e.target.value ? Number(e.target.value) : null
+                      )
+                    }
+                  />
+                </Field>
+              </div>
+            </div>
+          </div>
+
+          {/* ── Commit identity ─────────────────────────────────────────
+              Also the test for "did a human commit on this branch", which is
+              what ends autonomous mode for a work item. Changing it while an
+              attempt is open makes the agent's own commits read as a
+              person's. */}
+          <div className="border-t border-line pt-5">
+            <Kicker>
+              <Terminal className="mr-1.5 inline size-3.5" aria-hidden />
+              Commit identity
+            </Kicker>
+            <p className="mt-1.5 text-sm leading-relaxed text-muted">
+              Who the agent&apos;s commits are attributed to. This is also how a
+              person&apos;s commits on a branch are told apart from a previous
+              attempt&apos;s — a human commit hands the work item back — so
+              changing it while an attempt is open makes the agent&apos;s own
+              commits read as someone else&apos;s.
+            </p>
+
+            <div className="mt-4 grid gap-4 sm:grid-cols-2">
+              <Field label="Name" htmlFor="rt-agent-name">
+                <Input
+                  id="rt-agent-name"
+                  placeholder={resolved?.agent_name}
+                  value={values.agent_commit_name ?? ""}
+                  onChange={(e) =>
+                    set("agent_commit_name", e.target.value || null)
+                  }
+                />
+              </Field>
+
+              <Field label="Email" htmlFor="rt-agent-email">
+                <Input
+                  id="rt-agent-email"
+                  className="font-mono text-xs"
+                  placeholder={resolved?.agent_email}
+                  value={values.agent_commit_email ?? ""}
+                  onChange={(e) =>
+                    set("agent_commit_email", e.target.value || null)
+                  }
+                  spellCheck={false}
+                />
+              </Field>
+            </div>
+          </div>
+
+          {/* ── Calendar agent ──────────────────────────────────────────
+              Per-user dials on a per-user agent. The loop still ticks on its
+              own clock; a user is swept when their own interval has elapsed,
+              which is what stops one aggressive setting from turning into a
+              Google rate limit for everybody. */}
+          <div className="border-t border-line pt-5">
+            <Kicker>
+              <CalendarClock className="mr-1.5 inline size-3.5" aria-hidden />
+              Calendar agent
+            </Kicker>
+            <p className="mt-1.5 text-sm leading-relaxed text-muted">
+              How often your calendars are checked for conflicts, and how far
+              ahead each sweep looks. Every sweep costs a Calendar call, and
+              the ceiling on how fast a calendar changes is far below the
+              ceiling on how fast Google rate-limits.
+            </p>
+
+            <div className="mt-4 grid gap-4 sm:grid-cols-2">
+              <Field label="Sweep every (minutes)" htmlFor="rt-sweep">
+                <Input
+                  id="rt-sweep"
+                  type="number"
+                  min={5}
+                  max={1440}
+                  placeholder={String(resolved?.calendar_sweep_minutes ?? "")}
+                  value={values.calendar_sweep_minutes ?? ""}
+                  onChange={(e) =>
+                    set(
+                      "calendar_sweep_minutes",
+                      e.target.value ? Number(e.target.value) : null
+                    )
+                  }
+                />
+              </Field>
+
+              <Field label="Look ahead (days)" htmlFor="rt-lookahead">
+                <Input
+                  id="rt-lookahead"
+                  type="number"
+                  min={1}
+                  max={90}
+                  placeholder={String(resolved?.calendar_lookahead_days ?? "")}
+                  value={values.calendar_lookahead_days ?? ""}
+                  onChange={(e) =>
+                    set(
+                      "calendar_lookahead_days",
+                      e.target.value ? Number(e.target.value) : null
+                    )
+                  }
+                />
+              </Field>
+            </div>
+          </div>
+        </Panel>
+      </Section>
 
       {/* ── Routing ─────────────────────────────────────────────────────── */}
       <Section

@@ -471,15 +471,20 @@ export interface LLMProviderOption {
   api_key_configured: boolean;
   fast_model: string;
   smart_model: string;
+  /** What the endpoint falls back to; rendered as the field's placeholder. */
+  default_base_url: string;
+  /** Whether choosing this provider requires a key. Local does not. */
+  needs_key: boolean;
 }
 
 /**
  * Status of the configured model backend.
  *
- * Locus defaults to the local MoE Model Manager. `LLM_PROVIDER` on the backend
+ * Locus defaults to a local OpenAI-compatible server. The provider setting
  * points it at OpenAI, Anthropic or Gemini instead, which changes where the
  * code the analysis passes read is sent — so the status names the active
- * provider rather than assuming local.
+ * provider rather than assuming local, and says whether it came from this
+ * account's settings or the deployment's environment.
  */
 export interface LLMStatus {
   available: boolean;
@@ -492,10 +497,70 @@ export interface LLMStatus {
   api_key_env?: string | null;
   api_key_configured?: boolean;
   providers?: LLMProviderOption[];
+  /** "settings" when this account configured it, "environment" otherwise. */
+  source?: string;
 }
 
 export async function checkLLMStatus(): Promise<LLMStatus> {
   return apiRequest<LLMStatus>("/api/settings/llm");
+}
+
+/**
+ * This account's saved model backend, exactly as saved.
+ *
+ * Blanks come back blank rather than resolved: a blank means "inherit the
+ * deployment default", and showing the resolved value would make the next
+ * save pin it. The API key is never returned — only whether one is stored.
+ */
+export interface LLMConfig {
+  provider?: string | null;
+  base_url?: string | null;
+  fast_model?: string | null;
+  smart_model?: string | null;
+  timeout_seconds?: number | null;
+  api_key_configured: boolean;
+  configured: boolean;
+  providers: LLMProviderOption[];
+}
+
+/**
+ * New settings.
+ *
+ * `api_key` omitted keeps the stored key; an explicit empty string clears it.
+ * The browser never receives the key, so a form that always sent its empty
+ * field would erase it every time somebody changed a model id.
+ */
+export interface LLMConfigUpdate {
+  provider?: string | null;
+  base_url?: string | null;
+  fast_model?: string | null;
+  smart_model?: string | null;
+  timeout_seconds?: number | null;
+  api_key?: string;
+}
+
+export async function fetchLLMConfig(): Promise<LLMConfig> {
+  return apiRequest<LLMConfig>("/api/settings/llm-config");
+}
+
+export async function saveLLMConfig(update: LLMConfigUpdate): Promise<LLMConfig> {
+  return apiRequest<LLMConfig>("/api/settings/llm-config", {
+    method: "PUT",
+    body: JSON.stringify(update),
+  });
+}
+
+/** Check settings against the real endpoint before committing to them. */
+export async function testLLMConfig(update: LLMConfigUpdate): Promise<LLMStatus> {
+  return apiRequest<LLMStatus>("/api/settings/llm-config/test", {
+    method: "POST",
+    body: JSON.stringify(update),
+  });
+}
+
+/** Drop the saved settings, key included, and inherit the deployment default. */
+export async function resetLLMConfig(): Promise<LLMConfig> {
+  return apiRequest<LLMConfig>("/api/settings/llm-config", { method: "DELETE" });
 }
 
 /**
@@ -1027,7 +1092,71 @@ export interface AuthoringSettings {
   test_command?: string | null;
 }
 
-export interface PRAgentDefaults extends AuthoringSettings {
+/**
+ * How this account's agent runs, as opposed to which tickets it may write.
+ *
+ * Every field is nullable and null means **inherit** — the deployment's
+ * environment variable first, then the constant in the code. That is why a
+ * blank input sends null rather than "": an empty string is an override with
+ * nothing, and would pin the agent to a blank command template. `GET
+ * /webhooks/agent-runtime` returns what each blank currently resolves to, and
+ * the form renders those as placeholders.
+ */
+export interface AgentRuntimeSettings {
+  /** opencode | none */
+  authoring_driver?: string | null;
+  authoring_model?: string | null;
+  authoring_command?: string | null;
+  /** full | ticket_only — how much of the brief leaves the machine. */
+  authoring_context?: string | null;
+  authoring_timeout_seconds?: number | null;
+  max_changed_files?: number | null;
+  max_changed_lines?: number | null;
+  max_open_autonomous_prs?: number | null;
+  agent_commit_name?: string | null;
+  agent_commit_email?: string | null;
+  code_root?: string | null;
+  workspace_root?: string | null;
+  /** Tri-state: null inherits, true and false are choices. */
+  allow_in_place?: boolean | null;
+  workspace_ttl_days?: number | null;
+  calendar_sweep_minutes?: number | null;
+  calendar_lookahead_days?: number | null;
+}
+
+/**
+ * What the agent will actually use, after account, environment and constant.
+ *
+ * Rendered as the placeholder under each blank field. Nothing here is a
+ * secret — these are paths, bounds and a model id — so unlike the model
+ * backend's key the values themselves come back.
+ */
+export interface AgentRuntimeResolved {
+  driver: string;
+  model: string;
+  command: string;
+  context_mode: string;
+  timeout_seconds: number;
+  max_changed_files: number;
+  max_changed_lines: number;
+  max_open_prs: number;
+  agent_name: string;
+  agent_email: string;
+  code_root: string;
+  workspace_root: string;
+  allow_in_place: boolean;
+  workspace_ttl_days: number;
+  calendar_sweep_minutes: number;
+  calendar_lookahead_days: number;
+  /** Whether this account has saved any runtime setting of its own. */
+  configured: boolean;
+}
+
+export async function getAgentRuntime(): Promise<AgentRuntimeResolved> {
+  return apiRequest<AgentRuntimeResolved>("/webhooks/agent-runtime");
+}
+
+export interface PRAgentDefaults extends AuthoringSettings, AgentRuntimeSettings {
   slack_channel?: string | null;
   export_to_docs: boolean;
   qa_emails: string[];
@@ -1481,6 +1610,45 @@ export async function applySchedule(
   return apiRequest("/api/schedule/apply", {
     method: "POST",
     body: JSON.stringify({ moves, additions }),
+  });
+}
+
+/**
+ * The calendar agent's dials, one set per user.
+ *
+ * Working hours are "HH:MM" read in the account's timezone, not the browser's
+ * — the same rule the rest of the scheduler follows. They decide the
+ * `off_hours` availability state, so they are what a Slack busy reply says
+ * about you when someone reaches you at eight in the evening.
+ */
+export interface TimeAgentSettings {
+  enabled: boolean;
+  auto_apply: boolean;
+  auto_reply_invites: boolean;
+  auto_reply_busy: boolean;
+  working_hours_start: string;
+  working_hours_end: string;
+  protect_focus_blocks: boolean;
+  slack_member_id?: string | null;
+  timezone?: string | null;
+}
+
+/** Reading never writes: the defaults come back when nothing is saved. */
+export async function getAgentSettings(): Promise<TimeAgentSettings> {
+  return apiRequest<TimeAgentSettings>("/api/schedule/agent");
+}
+
+/**
+ * Save the whole set. The endpoint replaces the row rather than patching it,
+ * so every field is sent — a partial body would silently reset the dials the
+ * form did not carry.
+ */
+export async function saveAgentSettings(
+  settings: Omit<TimeAgentSettings, "slack_member_id" | "timezone">
+): Promise<TimeAgentSettings> {
+  return apiRequest<TimeAgentSettings>("/api/schedule/agent", {
+    method: "PUT",
+    body: JSON.stringify(settings),
   });
 }
 

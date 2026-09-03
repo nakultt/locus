@@ -471,14 +471,17 @@ async def author_task(
     if driver.name == "none":
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="No authoring driver configured (set LOCUS_AUTHORING_DRIVER)",
+            detail=(
+                "No authoring driver configured. Choose one under Settings > "
+                "Automation > Agent runtime, or set LOCUS_AUTHORING_DRIVER."
+            ),
         )
 
     if authoring.throughput_exceeded(db, owner_id=current_user.id, repo=repo):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=(
-                f"{authoring.MAX_OPEN_AUTONOMOUS_PRS} agent-authored pull "
+                f"{authoring.max_open_autonomous_prs()} agent-authored pull "
                 f"requests are already open on {repo}. Reviewer attention is "
                 "what this mode spends; land or close one first."
             ),

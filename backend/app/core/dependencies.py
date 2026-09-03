@@ -15,6 +15,8 @@ from sqlalchemy.orm import Session
 from app import crud, models
 from app.core import security
 from app.core.database import get_db
+from app.services.authoring import agent_runtime
+from app.services.chat import llm_config
 
 # Services authenticated through the shared Google OAuth app. Their stored
 # access tokens expire hourly and are refreshed with the client credentials.
@@ -86,7 +88,19 @@ def get_integration_configs(
 
     Shared by the chat router and the background worker so both see the same
     credential shape.
+
+    This is also where the user's model backend and agent runtime are bound,
+    and deliberately so.
+    `get_llm()` is called from thirteen places, none of which takes a user --
+    the security scanner and the chat agent both just ask for a model. Every
+    path that reaches one already comes through here to build its credentials,
+    so binding here means no caller can be missed; missing one would silently
+    run that path on the deployment default rather than the settings the user
+    entered, which looks like the setting not having saved.
     """
+    llm_config.bind_for_user(db, user_id)
+    agent_runtime.bind_for_user(db, user_id)
+
     configs: dict[str, dict] = {}
 
     for integration in crud.get_user_integrations(db, user_id):

@@ -536,7 +536,7 @@ class TestAuthorRun:
         Not retried with a smaller scope: the ticket was too big for the mode,
         which is information the human should get.
         """
-        monkeypatch.setattr(driver, "MAX_CHANGED_FILES", 2)
+        monkeypatch.setenv("LOCUS_MAX_CHANGED_FILES", "2")
         monkeypatch.setattr(driver, "run_agent", fake_agent(
             {f"f{n}.py": "x\n" for n in range(5)}
         ))

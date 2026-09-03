@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app import models
+from app.services.authoring import agent_runtime
 
 # How much of the brief leaves the machine.
 #
@@ -30,12 +31,16 @@ from app import models
 # a team that cannot send internal discussion to a third party gets a usable
 # mode rather than no mode. Recorded on every attempt, because the trade is
 # per-pull-request information that a config value cannot answer retroactively.
-CONTEXT_MODES = ("full", "ticket_only")
+#
+# Whose choice it is has moved: this is a statement about a team's own
+# discussion, so it is an account setting that falls back to
+# LOCUS_AUTHORING_CONTEXT rather than a deployment constant. `agent_runtime`
+# resolves it.
+CONTEXT_MODES = agent_runtime.CONTEXT_MODES
 
 
 def context_mode() -> str:
-    mode = (os.getenv("LOCUS_AUTHORING_CONTEXT") or "full").strip().lower()
-    return mode if mode in CONTEXT_MODES else "full"
+    return agent_runtime.context_mode()
 
 
 class AuthoringRequest(BaseModel):
@@ -138,7 +143,10 @@ class NoneDriver:
     ) -> AuthoringResult:
         return AuthoringResult(
             opened=False,
-            error="No authoring driver configured (set LOCUS_AUTHORING_DRIVER)",
+            error=(
+                "No authoring driver configured. Choose one under Settings > "
+                "Automation > Agent runtime, or set LOCUS_AUTHORING_DRIVER."
+            ),
             driver=self.name,
             context_mode=context_mode(),
         )
@@ -151,7 +159,7 @@ def get_driver(name: str | None = None) -> AuthoringDriver:
     Imported lazily: the OpenCode driver pulls in subprocess and git handling
     that nothing else needs, and a bad driver name must not break app startup.
     """
-    resolved = (name or os.getenv("LOCUS_AUTHORING_DRIVER") or "none").strip().lower()
+    resolved = (name or "").strip().lower() or agent_runtime.driver_name()
 
     if resolved == "opencode":
         from app.services.authoring.opencode_driver import OpenCodeDriver
@@ -246,7 +254,14 @@ def hand_back(
 # settings would not touch that; a cap does. Reviewer attention is the scarce
 # resource this whole mode spends, which is the same argument behind the diff
 # size caps.
+# Resolved per account through `agent_runtime`; the module-level name is the
+# deployment default, kept because it is what the environment variable means.
 MAX_OPEN_AUTONOMOUS_PRS = int(os.getenv("LOCUS_MAX_OPEN_AUTONOMOUS_PRS") or 3)
+
+
+def max_open_autonomous_prs() -> int:
+    """The cap for the account whose work is running now."""
+    return agent_runtime.max_open_prs(MAX_OPEN_AUTONOMOUS_PRS)
 
 
 def open_autonomous_prs(db: Session, *, owner_id: int, repo: str) -> int:
@@ -283,7 +298,10 @@ def open_autonomous_prs(db: Session, *, owner_id: int, repo: str) -> int:
 
 
 def throughput_exceeded(db: Session, *, owner_id: int, repo: str) -> bool:
-    return open_autonomous_prs(db, owner_id=owner_id, repo=repo) >= MAX_OPEN_AUTONOMOUS_PRS
+    return (
+        open_autonomous_prs(db, owner_id=owner_id, repo=repo)
+        >= max_open_autonomous_prs()
+    )
 
 
 def next_attempt_number(db: Session, *, owner_id: int, ticket_key: str) -> int:
@@ -377,7 +395,7 @@ def should_retry(
         # trains people to ignore the channel, the same rule
         # `automerge.sweep_once` follows.
         return False, (
-            f"{MAX_OPEN_AUTONOMOUS_PRS} agent-authored pull requests are "
+            f"{max_open_autonomous_prs()} agent-authored pull requests are "
             f"already open on {repo}"
         )
 

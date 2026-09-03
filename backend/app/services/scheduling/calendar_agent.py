@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from sqlalchemy.orm import Session
 
 from app import models, schemas
+from app.services.authoring import agent_runtime
 from app.services.scheduling.scheduler import (
     SchedulingContext,
     find_conflicts,
@@ -34,8 +35,40 @@ logger = logging.getLogger(__name__)
 
 # In minutes, not seconds. The ceiling on how fast a calendar changes is far
 # below the ceiling on how fast Google rate-limits.
+#
+# Both are now per-account settings that fall back to these variables; read
+# them through `agent_runtime`. How often *my* calendar is checked and how far
+# ahead it looks are dials on an agent that runs on my behalf, and one number
+# for every tenant is the wrong shape for them.
 SWEEP_INTERVAL_MINUTES = int(os.getenv("LOCUS_CALENDAR_SWEEP_MINUTES") or 30)
 LOOKAHEAD_DAYS = int(os.getenv("LOCUS_CALENDAR_LOOKAHEAD_DAYS") or 14)
+
+# The loop's own clock, which is deliberately *not* a per-user setting: there
+# is one loop. It ticks fast and each user is swept when their own interval has
+# elapsed, so a user asking for 10 minutes gets 10 rather than the deployment's
+# 30. A user cannot be swept more often than this tick, which is what stops one
+# account's aggressive setting from turning into a Google rate limit for
+# everybody.
+TICK_MINUTES = max(1, int(os.getenv("LOCUS_CALENDAR_TICK_MINUTES") or 5))
+
+# owner_id -> monotonic seconds at the last completed sweep. In memory rather
+# than a column: it is a rate limiter, and the correct behaviour after a
+# restart is to sweep, not to remember that we nearly did.
+_last_swept: dict[int, float] = {}
+
+
+def _due(owner_id: int, interval_minutes: int) -> bool:
+    """Whether this user's own interval has elapsed since their last sweep."""
+    import time
+
+    last = _last_swept.get(owner_id)
+    return last is None or (time.monotonic() - last) >= interval_minutes * 60
+
+
+def _mark_swept(owner_id: int) -> None:
+    import time
+
+    _last_swept[owner_id] = time.monotonic()
 
 
 def get_settings(db: Session, owner_id: int) -> models.TimeAgentSettings:
@@ -201,8 +234,13 @@ async def sweep_once() -> int:
                 continue
 
             try:
+                # Also binds this user's agent runtime, which is where the
+                # sweep interval and the lookahead window come from.
                 configs = get_integration_configs(db, user.id)
                 if "calendar" not in configs:
+                    continue
+
+                if not _due(user.id, agent_runtime.calendar_sweep_minutes(SWEEP_INTERVAL_MINUTES)):
                     continue
 
                 # Bind this user's credentials before touching the service.
@@ -217,6 +255,10 @@ async def sweep_once() -> int:
                 proposed += len(
                     sweep_user(db, settings, events, user.timezone or "Asia/Kolkata")
                 )
+                # Marked after the work, not before: a sweep that raised did
+                # not happen, and rate-limiting a user out of their next
+                # attempt would turn one failure into a silent outage.
+                _mark_swept(user.id)
             except Exception:
                 logger.exception(
                     "Calendar sweep failed for user %s", settings.owner_id
@@ -243,7 +285,8 @@ def _load_events(
     from app.routers.schedule import events_from_raw
     from app.services.integrations import calendar as calendar_service
 
-    raw, error = calendar_service.fetch_events("today", f"in {LOOKAHEAD_DAYS} days")
+    lookahead = agent_runtime.calendar_lookahead_days(LOOKAHEAD_DAYS)
+    raw, error = calendar_service.fetch_events("today", f"in {lookahead} days")
     if error:
         raise RuntimeError(error)
 

@@ -1,6 +1,6 @@
 "use client";
 
-import type { CSSProperties } from "react";
+import { type CSSProperties, useState, useEffect } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 
 /**
@@ -83,6 +83,10 @@ function rng(seed: number) {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
+
+/** Round floating-point numbers to 2 decimal places to ensure cross-engine
+ *  determinism (e.g. Bun JavaScriptCore SSR vs browser V8) and prevent hydration mismatches. */
+const r2 = (n: number) => Math.round(n * 100) / 100;
 
 /** The height of a ridge at a given x, by interpolating its sample points.
  *  Linear is enough: everything sits *below* the line by a random depth, so a
@@ -193,12 +197,12 @@ function scatter(opts: {
     if (opts.avoid?.(x, y)) continue;
     const s = opts.minScale + t * (opts.maxScale - opts.minScale) * (0.6 + r() * 0.7);
     out.push({
-      x,
-      y,
-      rx: 16 * s * (0.7 + r() * 0.65),
-      ry: 11 * s * (0.65 + r() * 0.7),
+      x: r2(x),
+      y: r2(y),
+      rx: r2(16 * s * (0.7 + r() * 0.65)),
+      ry: r2(11 * s * (0.65 + r() * 0.7)),
       fill: opts.palette[Math.floor(r() * opts.palette.length)],
-      o: 0.55 + t * 0.38 + r() * 0.1,
+      o: r2(0.55 + t * 0.38 + r() * 0.1),
     });
   }
   return out.sort((a, b) => a.y - b.y);
@@ -240,9 +244,13 @@ const POND_RINGS = (() => {
     const dur = 4.4 + r() * 3.6;
     for (let k = 0; k < 3; k++) {
       out.push({
-        ox, oy, rx: max, ry: max * flat, dur,
-        delay: -((k * dur) / 3) - r() * 1.5,
-        o: 0.52 - k * 0.09,
+        ox: r2(ox),
+        oy: r2(oy),
+        rx: r2(max),
+        ry: r2(max * flat),
+        dur: r2(dur),
+        delay: r2(-((k * dur) / 3) - r() * 1.5),
+        o: r2(0.52 - k * 0.09),
       });
     }
   }
@@ -256,11 +264,13 @@ const LILIES = (() => {
     // angle and a radius under one, mapped through the pond's own radii.
     const a = r() * Math.PI * 2;
     const d = 0.35 + r() * 0.55;
+    const rx = 7 + r() * 7;
     return {
-      cx: POND.cx + Math.cos(a) * POND.rx * d,
-      cy: POND.cy + Math.sin(a) * POND.ry * d,
-      rx: 7 + r() * 7,
-      o: 0.5 + r() * 0.35,
+      cx: r2(POND.cx + Math.cos(a) * POND.rx * d),
+      cy: r2(POND.cy + Math.sin(a) * POND.ry * d),
+      rx: r2(rx),
+      ry: r2(rx * 0.34),
+      o: r2(0.5 + r() * 0.35),
     };
   });
 })();
@@ -312,12 +322,12 @@ function treeline(opts: {
     // the slope rather than balanced on top of it.
     const y = opts.top(x) + (opts.sink ?? 8) + r() * 22;
     out.push({
-      y,
+      y: r2(y),
       d:
         `M${(x - w).toFixed(1)} ${y.toFixed(1)} L${x.toFixed(1)} ${(y - h * 0.72).toFixed(1)} L${(x + w).toFixed(1)} ${y.toFixed(1)} Z` +
         `M${(x - w * 0.7).toFixed(1)} ${(y - h * 0.4).toFixed(1)} L${x.toFixed(1)} ${(y - h * 1.04).toFixed(1)} L${(x + w * 0.7).toFixed(1)} ${(y - h * 0.4).toFixed(1)} Z`,
       fill: opts.palette[Math.floor(r() * opts.palette.length)],
-      o: 0.62 + r() * 0.34,
+      o: r2(0.62 + r() * 0.34),
     });
   }
   return out.sort((a, b) => a.y - b.y);
@@ -376,21 +386,23 @@ function broadleaves(
       const a = r() * Math.PI * 2;
       const d = r() ** 0.7;
       canopy.push({
-        x: x + Math.cos(a) * 38 * s * d,
-        y: y - 78 * s + Math.sin(a) * 30 * s * d,
-        rx: (20 + r() * 17) * s,
-        ry: (16 + r() * 14) * s,
+        x: r2(x + Math.cos(a) * 38 * s * d),
+        y: r2(y - 78 * s + Math.sin(a) * 30 * s * d),
+        rx: r2((20 + r() * 17) * s),
+        ry: r2((16 + r() * 14) * s),
         fill: palette[Math.floor(r() * palette.length)],
-        o: 0.74 + r() * 0.24,
+        o: r2(0.74 + r() * 0.24),
       });
     }
     const w = 5 * s;
     return {
-      x, y, s,
-      trunk: `M${x - w} ${y} L${x - w * 0.5} ${y - 76 * s} L${x + w * 0.5} ${y - 76 * s} L${x + w} ${y} Z`,
+      x: r2(x),
+      y: r2(y),
+      s: r2(s),
+      trunk: `M${r2(x - w)} ${r2(y)} L${r2(x - w * 0.5)} ${r2(y - 76 * s)} L${r2(x + w * 0.5)} ${r2(y - 76 * s)} L${r2(x + w)} ${r2(y)} Z`,
       canopy,
-      dur: 4.6 + r() * 3.4,
-      delay: -r() * 8,
+      dur: r2(4.6 + r() * 3.4),
+      delay: r2(-r() * 8),
     };
   });
 }
@@ -424,10 +436,10 @@ const RIPPLES: Ripple[] = (() => {
     const n = 1 + Math.floor(r() * 3);
     for (let i = 0; i < n; i++) {
       out.push({
-        cx: mid + (r() - 0.5) * half * 1.3,
-        cy: y,
-        rx: half * (0.12 + r() * 0.5),
-        o: 0.1 + r() * 0.3,
+        cx: r2(mid + (r() - 0.5) * half * 1.3),
+        cy: r2(y),
+        rx: r2(half * (0.12 + r() * 0.5)),
+        o: r2(0.1 + r() * 0.3),
       });
     }
   }
@@ -443,12 +455,12 @@ const GLINTS = (() => {
     const mid = (BANK_L(y) + BANK_R(y)) / 2;
     const half = (BANK_R(y) - BANK_L(y)) / 2;
     return {
-      cx: mid + (r() - 0.5) * half * 1.1,
-      cy: y,
-      rx: half * (0.08 + r() * 0.26),
-      dur: 4 + r() * 7,
-      delay: -r() * 10,
-      o2: 0.34 + r() * 0.4,
+      cx: r2(mid + (r() - 0.5) * half * 1.1),
+      cy: r2(y),
+      rx: r2(half * (0.08 + r() * 0.26)),
+      dur: r2(4 + r() * 7),
+      delay: r2(-r() * 10),
+      o2: r2(0.34 + r() * 0.4),
     };
   });
 })();
@@ -457,14 +469,14 @@ const GLINTS = (() => {
 const MOTES = (() => {
   const r = rng(5309);
   return Array.from({ length: 34 }, () => ({
-    cx: 120 + r() * 1200,
-    cy: 740 + r() * 420,
-    rad: 1 + r() * 2.4,
-    dx: (r() - 0.5) * 90,
-    dy: -110 - r() * 190,
-    dur: 13 + r() * 16,
-    delay: -r() * 26,
-    o: 0.32 + r() * 0.5,
+    cx: r2(120 + r() * 1200),
+    cy: r2(740 + r() * 420),
+    rad: r2(1 + r() * 2.4),
+    dx: r2((r() - 0.5) * 90),
+    dy: r2(-110 - r() * 190),
+    dur: r2(13 + r() * 16),
+    delay: r2(-r() * 26),
+    o: r2(0.32 + r() * 0.5),
   }));
 })();
 
@@ -473,14 +485,14 @@ const MOTES = (() => {
 const LEAVES = (() => {
   const r = rng(6151);
   return Array.from({ length: 11 }, () => ({
-    cx: 60 + r() * 1320,
-    cy: 700 + r() * 200,
-    rx: 4 + r() * 3.5,
-    ry: 2.2 + r() * 1.8,
-    dx: (r() - 0.5) * 190,
-    dy: 240 + r() * 260,
-    dur: 15 + r() * 14,
-    delay: -r() * 28,
+    cx: r2(60 + r() * 1320),
+    cy: r2(700 + r() * 200),
+    rx: r2(4 + r() * 3.5),
+    ry: r2(2.2 + r() * 1.8),
+    dx: r2((r() - 0.5) * 190),
+    dy: r2(240 + r() * 260),
+    dur: r2(15 + r() * 14),
+    delay: r2(-r() * 28),
     fill: r() > 0.5 ? "oklch(0.66 0.106 96)" : "oklch(0.552 0.092 128)",
   }));
 })();
@@ -488,10 +500,10 @@ const LEAVES = (() => {
 const STARS = (() => {
   const r = rng(313);
   return Array.from({ length: 22 }, () => ({
-    cx: r() * 1440,
-    cy: 16 + r() * 260,
-    rad: 0.7 + r() * 1.4,
-    o: 0.16 + r() * 0.44,
+    cx: r2(r() * 1440),
+    cy: r2(16 + r() * 260),
+    rad: r2(0.7 + r() * 1.4),
+    o: r2(0.16 + r() * 0.44),
   }));
 })();
 
@@ -543,9 +555,9 @@ const SUN = { x: 1560, y: -150 };
 const SHAFTS = [21, 27, 33, 39, 45, 51, 57].map((deg, i) => ({
   deg,
   w: 10 + ((i * 29) % 26),
-  o: 0.34 + ((i * 17) % 9) / 26,
-  dur: 9 + i * 1.7,
-  delay: -i * 2.4,
+  o: r2(0.34 + ((i * 17) % 9) / 26),
+  dur: r2(9 + i * 1.7),
+  delay: r2(-i * 2.4),
 }));
 
 /** Long enough that every wedge still has reach left when it crosses the sky.
@@ -555,7 +567,12 @@ const SHAFTS = [21, 27, 33, 39, 45, 51, 57].map((deg, i) => ({
 const SHAFT_LEN = 1600;
 
 export function HeroScene({ className }: { className?: string }) {
-  const still = useReducedMotion();
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+  const reducedMotion = useReducedMotion();
+  const still = mounted && reducedMotion;
 
   /** Wind on a band of foliage: a slow gust wrapping a faster sway. Returns the
    *  outer group's props; the caller nests the inner one. */
@@ -600,6 +617,7 @@ export function HeroScene({ className }: { className?: string }) {
       // come out white on white once the browser discards the artwork.
       data-hero-art=""
       aria-hidden
+      suppressHydrationWarning
     >
       <svg
         viewBox="0 0 1440 1240"
@@ -608,6 +626,7 @@ export function HeroScene({ className }: { className?: string }) {
         // puts it instead of sliding up behind the headline.
         preserveAspectRatio="xMidYMax slice"
         className="size-full"
+        suppressHydrationWarning
       >
         <defs>
           {/* ── Sky ──────────────────────────────────────────────────────
@@ -796,8 +815,8 @@ export function HeroScene({ className }: { className?: string }) {
                     : css({
                         "--hs-dur": `${s.dur}s`,
                         "--hs-delay": `${s.delay}s`,
-                        "--hs-o1": s.o * 0.55,
-                        "--hs-o2": s.o * 1.6,
+                        "--hs-o1": r2(s.o * 0.55),
+                        "--hs-o2": r2(s.o * 1.6),
                       })
                 }
               />
@@ -846,8 +865,8 @@ export function HeroScene({ className }: { className?: string }) {
             <motion.path
               key={i}
               d={`M${x} ${y} q ${7 * s} ${-6 * s} ${14 * s} 0 q ${7 * s} ${-6 * s} ${14 * s} 0`}
-              strokeWidth={1.7 * s}
-              opacity={0.32 * s + 0.16}
+              strokeWidth={r2(1.7 * s)}
+              opacity={r2(0.32 * s + 0.16)}
               {...(still
                 ? {}
                 : {
@@ -992,19 +1011,19 @@ export function HeroScene({ className }: { className?: string }) {
                 crisp mirror image is the tell of a rendered puddle. */}
             <ellipse
               cx={POND.cx}
-              cy={POND.cy - POND.ry * 0.62}
+              cy={r2(POND.cy - POND.ry * 0.62)}
               rx={POND.rx}
-              ry={POND.ry * 0.72}
+              ry={r2(POND.ry * 0.72)}
               fill="oklch(0.386 0.062 158)"
               opacity="0.5"
               filter="url(#s-haze-soft)"
             />
             {/* And the sun, low and to the right, laid across the near half. */}
             <ellipse
-              cx={POND.cx + POND.rx * 0.34}
-              cy={POND.cy + POND.ry * 0.42}
-              rx={POND.rx * 0.5}
-              ry={POND.ry * 0.3}
+              cx={r2(POND.cx + POND.rx * 0.34)}
+              cy={r2(POND.cy + POND.ry * 0.42)}
+              rx={r2(POND.rx * 0.5)}
+              ry={r2(POND.ry * 0.3)}
               fill="oklch(0.975 0.052 90)"
               opacity="0.42"
               filter="url(#s-haze-soft)"
@@ -1013,7 +1032,7 @@ export function HeroScene({ className }: { className?: string }) {
             {/* Lily pads, before the rings, so the rings run over them. */}
             <g fill="oklch(0.436 0.086 148)">
               {LILIES.map((l, i) => (
-                <ellipse key={i} cx={l.cx} cy={l.cy} rx={l.rx} ry={l.rx * 0.34} opacity={l.o} />
+                <ellipse key={i} cx={l.cx} cy={l.cy} rx={l.rx} ry={l.ry} opacity={l.o} />
               ))}
             </g>
 

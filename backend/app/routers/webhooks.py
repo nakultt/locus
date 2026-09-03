@@ -24,7 +24,7 @@ from app import crud, models, schemas
 from app.core import security
 from app.core.database import SessionLocal, get_db
 from app.core.dependencies import get_current_user, get_integration_configs
-from app.services.authoring import authoring_flow
+from app.services.authoring import agent_runtime, authoring_flow
 from app.services.integrations import github_pr, project_board
 from app.services.integrations.google_docs_context import extract_document_id
 from app.services.pipeline import (
@@ -386,6 +386,66 @@ def _apply_authoring(row, request) -> None:
     row.test_command = _blank_to_none(request.test_command)
 
 
+# The runtime dials, account-level only.
+#
+# Deliberately a separate pair from `_apply_authoring` / `_authoring_fields`,
+# which are shared with the repo registration: these describe the agent itself
+# rather than one repo's work, and the registration has no columns for them.
+# Every value is stored as NULL when blank, because NULL is what the resolver
+# reads as "inherit the deployment default" -- an empty string would be an
+# override with nothing, and would pin the agent to a blank command template.
+_RUNTIME_TEXT = (
+    "authoring_driver",
+    "authoring_model",
+    "authoring_command",
+    "authoring_context",
+    "agent_commit_name",
+    "agent_commit_email",
+    "code_root",
+    "workspace_root",
+)
+
+_RUNTIME_NUMBERS = (
+    "authoring_timeout_seconds",
+    "max_changed_files",
+    "max_changed_lines",
+    "max_open_autonomous_prs",
+    "workspace_ttl_days",
+    "calendar_sweep_minutes",
+    "calendar_lookahead_days",
+)
+
+
+def _apply_runtime(row, request) -> None:
+    """Copy the agent runtime dials onto the defaults row."""
+    for name in _RUNTIME_TEXT:
+        setattr(row, name, _blank_to_none(getattr(request, name, None)))
+
+    # An unrecognized driver or context mode is stored as NULL rather than
+    # rejected: the same direction the environment already failed in, towards
+    # the do-nothing driver and the safe context mode, rather than a 422 on a
+    # form somebody has spent five minutes filling in.
+    row.authoring_driver = agent_runtime.normalize_driver(row.authoring_driver)
+    row.authoring_context = agent_runtime.normalize_context_mode(row.authoring_context)
+
+    for name in _RUNTIME_NUMBERS:
+        setattr(row, name, getattr(request, name, None))
+
+    # Tri-state: None inherits, and only an explicit choice is stored.
+    allow = getattr(request, "allow_in_place", None)
+    row.allow_in_place = None if allow is None else (1 if allow else 0)
+
+
+def _runtime_fields(row) -> dict:
+    """The runtime dials read back off a row, blanks included as null."""
+    fields = {name: getattr(row, name, None) for name in _RUNTIME_TEXT}
+    fields.update({name: getattr(row, name, None) for name in _RUNTIME_NUMBERS})
+    fields["allow_in_place"] = (
+        None if row.allow_in_place is None else bool(row.allow_in_place)
+    )
+    return fields
+
+
 def _authoring_fields(row) -> dict:
     """The authoring dials as a response fragment, read back off a row."""
     return {
@@ -398,6 +458,40 @@ def _authoring_fields(row) -> dict:
         "prepare_command": row.prepare_command,
         "test_command": row.test_command,
     }
+
+
+@router.get(
+    "/agent-runtime",
+    response_model=schemas.AgentRuntimeResolved,
+    summary="What the agent will actually use, after every fallback",
+)
+async def get_agent_runtime(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> schemas.AgentRuntimeResolved:
+    """
+    The resolved runtime: account setting, then environment, then constant.
+
+    The form renders these as the placeholder under each blank field. Without
+    it "blank inherits the default" is a claim the user cannot check, and an
+    empty box with no hint is where someone types a guess -- which for the
+    command template or the source root is a guess with a shell behind it.
+    """
+    runtime = agent_runtime.bind_for_user(db, current_user.id)
+    try:
+        resolved = agent_runtime.describe()
+    finally:
+        # Bound only to answer this request. Leaving it set would carry one
+        # user's runtime into whatever this worker handles next.
+        agent_runtime.clear()
+
+    return schemas.AgentRuntimeResolved(
+        **resolved,
+        configured=runtime is not None and any(
+            getattr(runtime, name) is not None
+            for name in runtime.__dataclass_fields__
+        ),
+    )
 
 
 @router.get(
@@ -517,6 +611,7 @@ async def get_defaults(
         return schemas.PRAgentDefaults()
 
     return schemas.PRAgentDefaults(
+        **_runtime_fields(row),
         slack_channel=row.slack_channel,
         export_to_docs=bool(row.export_to_docs),
         qa_emails=[e for e in (row.qa_emails or "").splitlines() if e.strip()],
@@ -582,12 +677,14 @@ async def save_defaults(
     row.project_board_sync = 1 if request.project_board_sync else 0
     row.project_column_map = (request.project_column_map or "").strip() or None
     _apply_authoring(row, request)
+    _apply_runtime(row, request)
     row.context_doc_ids = "\n".join(doc_ids) if doc_ids else None
 
     db.commit()
     db.refresh(row)
 
     return schemas.PRAgentDefaults(
+        **_runtime_fields(row),
         slack_channel=row.slack_channel,
         export_to_docs=bool(row.export_to_docs),
         qa_emails=emails,

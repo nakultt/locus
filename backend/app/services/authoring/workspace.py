@@ -26,9 +26,16 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.services.authoring import agent_runtime
+
 # A folder holding many repos, e.g. E:\\Github. Optional -- a repo Locus has
 # never seen must still work, or autonomous mode only functions on machines
 # that happen to be set up correctly.
+#
+# All four are now account settings that fall back to these variables; the
+# names are kept because they are the deployment-wide default and because the
+# error messages name them. `agent_runtime` is the resolver -- read it rather
+# than the environment, or an account's own root is silently ignored.
 CODE_ROOT_ENV = "LOCUS_CODE_ROOT"
 WORKSPACE_ROOT_ENV = "LOCUS_WORKSPACE_ROOT"
 ALLOW_IN_PLACE_ENV = "LOCUS_ALLOW_IN_PLACE"
@@ -210,7 +217,7 @@ def resolve_source(repo: str, source_path: str | None) -> Path | None:
         _validate(explicit, repo)
         return explicit
 
-    root_value = (os.getenv(CODE_ROOT_ENV) or "").strip()
+    root_value = agent_runtime.code_root().strip()
     if not root_value:
         return None
 
@@ -231,7 +238,7 @@ def _validate(path: Path, repo: str) -> None:
 
 
 def workspace_root() -> Path:
-    root = (os.getenv(WORKSPACE_ROOT_ENV) or "").strip()
+    root = agent_runtime.workspace_root_setting().strip()
     if root:
         return Path(root).expanduser()
     import tempfile
@@ -252,7 +259,7 @@ def allow_in_place() -> bool:
     submodule-heavy trees, build systems with absolute paths baked in -- not as
     a convenience.
     """
-    return (os.getenv(ALLOW_IN_PLACE_ENV) or "").strip() in ("1", "true", "yes")
+    return agent_runtime.allow_in_place()
 
 
 def prune_old_workspaces(root: Path | None = None) -> int:
@@ -267,7 +274,7 @@ def prune_old_workspaces(root: Path | None = None) -> int:
     if not base.exists():
         return 0
 
-    cutoff = time.time() - WORKSPACE_TTL_DAYS * 86400
+    cutoff = time.time() - agent_runtime.workspace_ttl_days(WORKSPACE_TTL_DAYS) * 86400
     removed = 0
     for repo_dir in base.iterdir():
         if not repo_dir.is_dir():

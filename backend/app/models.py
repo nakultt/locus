@@ -668,6 +668,65 @@ class PRAgentDefaults(Base):
     # them, and without them an unregistered repo reviews against nothing.
     context_doc_ids = Column(Text, nullable=True)
 
+    # ---- the agent runtime -------------------------------------------------
+    #
+    # How this account's authoring agent runs, as opposed to which tickets it
+    # is allowed to write. These were environment variables, which made them
+    # one operator's choice for every tenant on the deployment -- including
+    # `authoring_context`, which decides whether internal Slack discussion may
+    # be sent to a third party. That is a tenant's policy, not the operator's.
+    #
+    # Every column is nullable, and NULL means "inherit": the environment
+    # variable first, then the code's constant. That is what keeps an existing
+    # single-machine install working with nothing saved here, and it is why
+    # `allow_in_place` is an Integer rather than a Boolean -- it has three
+    # states, and NULL is one of them.
+    #
+    # Account-level only, deliberately. The repo registration already carries
+    # the per-repo axis (mode, rounds, source_path, prepare and test commands);
+    # these describe the agent itself, and a second copy per repo would be a
+    # resolution layer with nothing to resolve.
+
+    # opencode | none. NULL falls back to LOCUS_AUTHORING_DRIVER.
+    authoring_driver = Column(String(32), nullable=True)
+    # Pins OpenCode's model for reproducibility across attempts. Unset lets
+    # OpenCode use its own.
+    authoring_model = Column(Text, nullable=True)
+    # The invocation template, e.g. "opencode run --prompt-file {prompt}".
+    # A template rather than flags: OpenCode's CLI surface moves.
+    authoring_command = Column(Text, nullable=True)
+    # full | ticket_only -- how much of the brief leaves the machine.
+    authoring_context = Column(String(16), nullable=True)
+
+    # The bounds. Every one of these spends a reviewer's attention when it is
+    # too loose, which is the scarce resource the whole mode consumes.
+    authoring_timeout_seconds = Column(Integer, nullable=True)
+    max_changed_files = Column(Integer, nullable=True)
+    max_changed_lines = Column(Integer, nullable=True)
+    max_open_autonomous_prs = Column(Integer, nullable=True)
+
+    # Who the agent's commits are attributed to. Also how a human's commits on
+    # a branch are told apart from a previous attempt's, so changing it while
+    # an attempt is open makes the agent's own commits read as a person's.
+    agent_commit_name = Column(String(120), nullable=True)
+    agent_commit_email = Column(String(255), nullable=True)
+
+    # Where repositories already sit, and where the agent is allowed to work.
+    # Two different questions -- conflating them is how the agent ends up
+    # editing Locus itself, which `workspace.check_not_locus` refuses whatever
+    # is stored here.
+    code_root = Column(Text, nullable=True)
+    workspace_root = Column(Text, nullable=True)
+    # Tri-state: NULL inherits LOCUS_ALLOW_IN_PLACE, 0 and 1 are choices.
+    allow_in_place = Column(Integer, nullable=True)
+    workspace_ttl_days = Column(Integer, nullable=True)
+
+    # ---- the calendar agent ------------------------------------------------
+    # Per-user dials on a per-user agent. The sweep interval is how often this
+    # account's calendars are checked; the loop still ticks on its own clock.
+    calendar_sweep_minutes = Column(Integer, nullable=True)
+    calendar_lookahead_days = Column(Integer, nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
@@ -906,3 +965,50 @@ class InterruptionEvent(Base):
 
     def __repr__(self) -> str:
         return f"<InterruptionEvent(owner_id={self.owner_id}, state={self.availability_state})>"
+
+
+class LLMSetting(Base):
+    """
+    Which model backend one user's work runs on.
+
+    The provider, the endpoint and the key used to be environment
+    configuration, which is right for one machine and wrong for a product:
+    two tenants of the same deployment cannot share a `.env`, and nobody
+    should have to restart the backend to change a model id. One row per
+    user, and the key is Fernet-encrypted at rest like every other
+    credential in this schema.
+
+    Every column is nullable and blank means "fall back to the environment",
+    so an existing single-tenant deployment keeps working untouched and a
+    user can override the endpoint without also having to restate the models.
+    """
+
+    __tablename__ = "llm_settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    # Unique: this is settings, not history. A second row would make "which
+    # backend am I on" a question with two answers.
+    owner_id = Column(
+        Integer, ForeignKey("users.id"), nullable=False, unique=True, index=True
+    )
+
+    # local | openai | anthropic | gemini. Blank falls back to LLM_PROVIDER.
+    provider = Column(String(32), nullable=True)
+    # The OpenAI-compatible endpoint. Configurable for every provider, not
+    # only the local one: self-hosted vLLM, Ollama, LiteLLM, OpenRouter and an
+    # Azure deployment are all "OpenAI-compatible at some other URL", and
+    # hard-coding one address is what made the local server special.
+    base_url = Column(String(500), nullable=True)
+    fast_model = Column(String(200), nullable=True)
+    smart_model = Column(String(200), nullable=True)
+    # Never returned by any endpoint -- the API reports whether one is set.
+    encrypted_api_key = Column(Text, nullable=True)
+    timeout_seconds = Column(Float, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    owner = relationship("User")
+
+    def __repr__(self) -> str:
+        return f"<LLMSetting(owner_id={self.owner_id}, provider={self.provider})>"

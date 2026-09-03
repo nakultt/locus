@@ -148,12 +148,33 @@ the pre-hydration `null` and erases the session being restored.
 project directory; the PostCSS plugin does not. Without it every utility is pruned and the app
 renders unstyled.
 
-**Inference is local and loopback-bound.** `app/services/chat/llm.py` targets `MOE_BASE_URL`
-(default `http://127.0.0.1:8081/v1`). The backend must run on the machine with the GPU — a
-remotely hosted backend cannot reach that address. The server holds one model at a time, so
-chat returns `503` with a remediation hint when none is loaded rather than an opaque
-connection error. Generation is slow; the default timeout is 600s because agent loops chain
-several calls.
+**Inference defaults to local and loopback-bound, and every part of that is a setting.**
+`app/services/chat/llm.py` resolves the provider, endpoint, model ids, timeout and key in two
+steps: the config bound for the current user, then the environment. Its default is still
+`MOE_BASE_URL` (`http://127.0.0.1:8081/v1`), and with a local backend the process must run on
+the machine with the GPU — a remotely hosted backend cannot reach that address. The server
+holds one model at a time, so chat returns `503` with a remediation hint when none is loaded
+rather than an opaque connection error. Generation is slow; the default timeout is 600s because
+agent loops chain several calls.
+
+**Nothing about the model backend is hard-coded, including the local endpoint.**
+`app/services/chat/llm_config.py` holds one user's resolved backend in a **ContextVar**, for the
+same reason credentials live in one: `get_llm()` is called from thirteen places and none of them
+takes a user, so a module-level "current settings" would let two tenants' background jobs
+overwrite each other's provider — one tenant's diffs sent to another's hosted API on their key.
+`get_integration_configs` binds it, because that is the one place every path reaching a model
+already builds its per-user state; binding anywhere else means a caller can be missed, and a
+missed caller silently runs on the deployment default, which looks exactly like the setting not
+having saved. Four rules. A blank field inherits rather than overriding with nothing, so
+changing the endpoint does not also pin the model ids. A stored key applies only to the provider
+it was entered for — switching the selector without clearing the field must not hand an OpenAI
+key to Anthropic, which returns a 401 that reads as an outage. An unrecognized provider resolves
+to local, the same direction the environment already failed in: towards the backend that sends
+nothing off the machine. And no endpoint returns a key, which is why
+`schemas.LLMConfigUpdate.api_key` is optional rather than required — the browser cannot read the
+key back, so a form that always submitted its empty field would erase it on every unrelated save.
+`backend/.env` remains the deployment-wide default for accounts that set nothing.
+`tests/test_llm_providers.py` pins all of it.
 
 **The agent is LangChain 1.x `create_agent`**, which compiles to a LangGraph — `AgentExecutor`
 was removed in 1.0. Task events are emitted from the graph stream, and a tool that raises
@@ -714,14 +735,55 @@ this stops being hypothetical: Locus at `E:\Github\locus` plus `LOCUS_CODE_ROOT=
 resolves the `locus` repo to exactly that directory, and that layout is the normal one, which makes
 this the most likely misconfiguration the feature has.
 
+**The agent's runtime is a setting, and it resolves in three layers.**
+`app/services/authoring/agent_runtime.py` holds the driver, the model, the invocation template,
+the context mode, the diff bounds, the commit identity, the source and workspace roots and the
+calendar agent's two dials, resolving each as **account setting, then environment variable, then
+the caller's own module constant**. Those were environment variables, which made every one of
+them a single operator's answer for every tenant — including `LOCUS_AUTHORING_CONTEXT`, which
+decides whether a team's internal Slack discussion may be sent to a third party. That is a
+tenant's policy, not the operator's. Five rules. The resolved config lives in a **ContextVar**,
+the third use of that pattern after `credential_context` and `llm_config`, and for the same
+reason: `AGENT_EMAIL` alone is read from six places across two modules and none of them takes a
+user, so a module-level "current settings" would let two accounts' runs overwrite each other's
+source root and point one agent at the other's code. The last layer is the *caller's* constant,
+passed in — `agent_runtime.max_changed_files(MAX_CHANGED_FILES)` — because that constant is where
+the environment variable is read at import, and a second copy of the number here would be one
+setting with two defaults that drift. Both the bound value and the environment value go through
+the same normalizer, so an unrecognized driver name cannot reach the check that exists to stop
+it, and an unrecognized one resolves to the do-nothing driver rather than to `opencode`: guessing
+would run a shell in a checkout on the strength of a typo. `allow_in_place` is tri-state (NULL
+inherits, 0 and 1 are choices), because stored as a boolean an account could never turn off a
+deployment default that was on. And a malformed number is *absent*, not zero — a timeout of zero
+kills every attempt instantly and a file cap of zero refuses every diff, so it must fall through
+rather than be coerced into the most destructive value in the range.
+`tests/test_agent_runtime.py` pins it.
+
+**Letting a user set the source root does not weaken the workspace checks.** `check_not_locus`,
+`check_is_git_repo` and `check_origin_matches` run on the resolved path whatever produced it, and
+the denylist is enforced on the diff after the run. They never consulted where the value came
+from, which is exactly what makes it safe for it to come from a form: an account pointing its
+root at the tree holding `ENCRYPTION_KEY` gets the same named configuration error that setting
+`LOCUS_CODE_ROOT` there has always produced.
+
+**The calendar loop ticks on its own clock; the sweep interval is per user.** There is one loop,
+so a per-account interval cannot be a per-account sleep. `calendar_agent` ticks every
+`TICK_MINUTES` and sweeps a user only when *their* interval has elapsed, which is what lets one
+account ask for ten minutes without the deployment's thirty, and stops another's aggressive
+setting from becoming a Google rate limit for everybody. The last-swept time is in memory rather
+than a column: it is a rate limiter, and the correct behaviour after a restart is to sweep, not
+to remember that we nearly did. It is marked *after* the work, so a sweep that raised does not
+rate-limit the user out of their next attempt.
+
 **The source location and the workspace are different settings.** `LOCUS_CODE_ROOT` and
 `repo_webhooks.source_path` say where your repos already sit — cloned, dependencies installed,
 caches warm — because re-cloning per attempt spends the timeout on network. The agent still works
 in a `git worktree` cut from that repo, so a human's branch, uncommitted changes and stashes are
 never touched. This is not a convenience: a shared checkout can only have one branch out at a time,
 and an agent running `git checkout` in the directory somebody is working in destroys their
-afternoon and looks like a successful run. `LOCUS_ALLOW_IN_PLACE` exists for trees that genuinely
-cannot be worktree'd, is off by default, and the README states what it costs.
+afternoon and looks like a successful run. `LOCUS_ALLOW_IN_PLACE` — and the account setting that overrides it —
+exists for trees that genuinely cannot be worktree'd, is off by default, and the README states
+what it costs.
 
 **A resolved path whose `origin` does not match the repo is refused.** `<root>/<name>` is a guess
 based on a folder name, and `acme/api` and `beta/api` collapse to one directory under a flat root.
@@ -757,12 +819,14 @@ a bot muted, and a muted bot takes the review pings and QA threads with it.
 
 **The analysis models run locally; the authoring model does not.** Every model that reads your code
 *automatically* — the security scanner, the code reviewer, the QA classifier, the asks summarizer —
-runs on `MOE_BASE_URL` over loopback, on every push, without being asked. That claim is unchanged
-and is worth keeping. Authoring is the deliberate exception: OpenCode runs on its own configured
+runs on the configured endpoint, which defaults to loopback, on every push, without being asked.
+That default is worth keeping, and pointing it at a hosted provider is a deliberate act the
+settings panel states plainly rather than a performance dial. Authoring is the deliberate exception: OpenCode runs on its own configured
 model, which is remote, so the brief leaves the machine on tickets a human explicitly handed over.
 The mode toggle says so before the first attempt, every `AuthoringAttempt` records which model ran,
-and `LOCUS_AUTHORING_CONTEXT=ticket_only` drops the Slack transcript for teams that cannot send
-internal discussion to a third party. "Runs entirely on local models" is false the moment
+and `ticket_only` — an account setting, falling back to
+`LOCUS_AUTHORING_CONTEXT` — drops the Slack transcript for teams that cannot send internal
+discussion to a third party. "Runs entirely on local models" is false the moment
 autonomous mode is used; the accurate claim is narrower and still strong.
 
 **A busy reply carries a state and a time and nothing else.** `Availability` has three fields —

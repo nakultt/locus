@@ -303,9 +303,13 @@ async def human_pushed_since_last_attempt(
     except Exception:
         return False
 
-    from app.services.authoring.opencode_driver import AGENT_EMAIL
+    from app.services.authoring.opencode_driver import agent_email
 
-    return any(email.lower() != AGENT_EMAIL.lower() for email in authors)
+    # The resolved identity, not the module constant: an account that set its
+    # own commit address would otherwise have every one of its agent's own
+    # commits read as a human's, handing back work the agent itself wrote.
+    address = agent_email().lower()
+    return any(email.lower() != address for email in authors)
 
 
 def key_for(db: Session, *, owner_id: int, repo: str, pr_number: int) -> str | None:

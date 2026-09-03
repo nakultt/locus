@@ -28,6 +28,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from app.services.authoring import agent_runtime
 from app.services.authoring.authoring import AuthoringRequest, AuthoringResult, context_mode
 from app.services.authoring.workspace import (
     Workspace,
@@ -48,6 +49,9 @@ logger = logging.getLogger(__name__)
 # installed version at integration time and record it in the README.
 DEFAULT_COMMAND = "opencode run --prompt-file {prompt} --cwd {workspace}"
 
+# The deployment-wide defaults. Each is now an account setting that falls back
+# to its environment variable; call the `agent_runtime` accessor rather than
+# reading these constants, or an account's own bound is silently ignored.
 TIMEOUT_SECONDS = int(os.getenv("LOCUS_AUTHORING_TIMEOUT_SECONDS") or 1200)
 MAX_CHANGED_FILES = int(os.getenv("LOCUS_MAX_CHANGED_FILES") or 25)
 MAX_CHANGED_LINES = int(os.getenv("LOCUS_MAX_CHANGED_LINES") or 600)
@@ -257,6 +261,22 @@ AGENT_EMAIL = os.getenv("LOCUS_AGENT_EMAIL") or "locus-agent@users.noreply.githu
 AGENT_NAME = os.getenv("LOCUS_AGENT_NAME") or "Locus"
 
 
+def agent_email() -> str:
+    """
+    The address the agent's own commits carry, for this account.
+
+    A function rather than the constant because it is also the test for "did a
+    human commit on this branch": a run that resolved a different identity than
+    the one that made the commits would read a previous attempt's work as a
+    person's and hand the item back.
+    """
+    return agent_runtime.agent_email(AGENT_EMAIL)
+
+
+def agent_name() -> str:
+    return agent_runtime.agent_name(AGENT_NAME)
+
+
 def attribution_trailer(driver: str, model: str | None, attempt: int) -> str:
     """
     The line that says a machine wrote this commit.
@@ -273,7 +293,7 @@ def attribution_trailer(driver: str, model: str | None, attempt: int) -> str:
     ran = f"{driver} running {model}" if model else driver
     return (
         f"Machine-authored: written by {ran}, attempt {attempt}.\n"
-        f"Co-authored-by: {AGENT_NAME} <{AGENT_EMAIL}>"
+        f"Co-authored-by: {agent_name()} <{agent_email()}>"
     )
 
 
@@ -326,8 +346,8 @@ def stamp_attribution(
         if existing.returncode == 0 and marker not in existing.stdout:
             run_git(
                 [
-                    "-c", f"user.email={AGENT_EMAIL}",
-                    "-c", f"user.name={AGENT_NAME}",
+                    "-c", f"user.email={agent_email()}",
+                    "-c", f"user.name={agent_name()}",
                     "commit", "--amend", "--no-edit",
                     "-m", existing.stdout.strip(),
                     "-m", trailer,
@@ -342,8 +362,8 @@ def stamp_attribution(
     # empty commit is visible in `git log` where a silent skip would not be.
     run_git(
         [
-            "-c", f"user.email={AGENT_EMAIL}",
-            "-c", f"user.name={AGENT_NAME}",
+            "-c", f"user.email={agent_email()}",
+            "-c", f"user.name={agent_name()}",
             "commit", "--allow-empty",
             "-m", f"Attribution for the {len(shas)} commits above",
             "-m", trailer,
@@ -362,7 +382,7 @@ def human_commits_on(workspace: Workspace, base_branch: str, branch: str) -> boo
     is continued; one carrying anyone else's is handed back.
     """
     authors = branch_commit_authors(workspace, base_branch, branch)
-    return any(author.lower() != AGENT_EMAIL.lower() for author in authors)
+    return any(author.lower() != agent_email().lower() for author in authors)
 
 
 SCOPE_INSTRUCTIONS = """
@@ -452,13 +472,13 @@ def build_command(prompt_path: Path, workspace_path: Path) -> list[str]:
     moves and a driver pinning today's flags breaks on an upgrade with a
     non-zero exit and no useful message.
     """
-    template = (os.getenv("LOCUS_OPENCODE_CMD") or DEFAULT_COMMAND).strip()
+    template = agent_runtime.command(DEFAULT_COMMAND).strip()
     rendered = template.format(prompt=str(prompt_path), workspace=str(workspace_path))
     parts = shlex.split(rendered, posix=os.name != "nt")
 
     # The model is OpenCode's, not Locus's. This exists only to pin one when a
     # team wants reproducibility across attempts, and is unset by default.
-    model = (os.getenv("LOCUS_OPENCODE_MODEL") or "").strip()
+    model = agent_runtime.model().strip()
     if model and "--model" not in parts:
         parts += ["--model", model]
 
@@ -466,7 +486,7 @@ def build_command(prompt_path: Path, workspace_path: Path) -> list[str]:
 
 
 async def run_agent(
-    command: list[str], workspace: Path, timeout: int = TIMEOUT_SECONDS
+    command: list[str], workspace: Path, timeout: int | None = None
 ) -> tuple[int, str]:
     """
     Run the agent under a wall clock, returning (returncode, output).
@@ -475,6 +495,11 @@ async def run_agent(
     which consumes an attempt like every other failure, or a ticket that
     reliably hangs retries forever and the bound protects nothing.
     """
+    if timeout is None:
+        # Resolved here rather than as a default argument, which would freeze
+        # the deployment's value at import and ignore the account's.
+        timeout = agent_runtime.timeout_seconds(TIMEOUT_SECONDS)
+
     try:
         process = await asyncio.create_subprocess_exec(
             *command,
@@ -850,15 +875,18 @@ class OpenCodeDriver:
             run_git(["add", "-A"], workspace.path, check=False)
             files, lines = diff_size(workspace, base_branch)
 
-            if files > MAX_CHANGED_FILES or lines > MAX_CHANGED_LINES:
+            max_files = agent_runtime.max_changed_files(MAX_CHANGED_FILES)
+            max_lines = agent_runtime.max_changed_lines(MAX_CHANGED_LINES)
+
+            if files > max_files or lines > max_lines:
                 # Reviewer attention is the scarce resource this mode spends. A
                 # 4,000-line agent-authored diff is not reviewable, and this is
                 # not retried with a smaller scope: the ticket was too big for
                 # the mode, which is information the human should get.
                 return failed(
                     f"The change is too large to review: {files} files and "
-                    f"{lines} lines, over the {MAX_CHANGED_FILES}-file / "
-                    f"{MAX_CHANGED_LINES}-line cap.",
+                    f"{lines} lines, over the {max_files}-file / "
+                    f"{max_lines}-line cap.",
                     files_changed=files,
                     lines_changed=lines,
                     workspace_path=str(workspace.path),
@@ -890,8 +918,8 @@ class OpenCodeDriver:
 
             commit = run_git(
                 [
-                    "-c", f"user.email={AGENT_EMAIL}",
-                    "-c", f"user.name={AGENT_NAME}",
+                    "-c", f"user.email={agent_email()}",
+                    "-c", f"user.name={agent_name()}",
                     "commit", "-m",
                     f"{request.ticket_key}: {request.title}",
                     "-m", attribution_trailer(self.name, model, request.attempt),

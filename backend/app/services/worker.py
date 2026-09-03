@@ -276,13 +276,16 @@ async def calendar_agent_loop() -> None:
     the UI and `POST /schedule/apply` executing it unchanged.
     """
     from app.core.locks import CALENDAR_LOCK, advisory_lock
-    from app.services.scheduling.calendar_agent import SWEEP_INTERVAL_MINUTES, sweep_once
+    from app.services.scheduling.calendar_agent import TICK_MINUTES, sweep_once
 
     logger.info("Calendar agent started")
 
     while True:
         try:
-            await asyncio.sleep(SWEEP_INTERVAL_MINUTES * 60)
+            # The loop's tick, not a user's interval. `sweep_once` skips
+            # any user whose own interval has not elapsed, so a per-account
+            # setting is honoured without one loop per user.
+            await asyncio.sleep(TICK_MINUTES * 60)
 
             # One sweeper at a time. Two instances would find the same
             # double-booking and propose the same reshuffle twice, and a

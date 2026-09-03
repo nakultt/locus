@@ -7,6 +7,7 @@ import {
   CalendarPlus,
   CalendarX2,
   Check,
+  Clock,
   Lock,
   MessageSquareWarning,
   RefreshCw,
@@ -16,21 +17,24 @@ import { useAuth } from "@/features/auth/auth-context";
 import { formatFull, formatWithWeekday } from "@/lib/datetime";
 import {
   applySchedule,
+  getAgentSettings,
   getAvailability,
   getInterruptions,
   getScheduleConflicts,
   planSchedule,
+  saveAgentSettings,
   type Availability,
   type CalendarConflict,
   type EventClass,
   type InterruptionEntry,
   type ScheduleMove,
   type ScheduleProposal,
+  type TimeAgentSettings,
 } from "@/lib/api";
 import { PageHeader, PageShell } from "@/components/layout/app-shell";
 import { Badge, Dot, type DotTone } from "@/components/ui/badge";
 import { Button, IconButton } from "@/components/ui/button";
-import { Field, Input } from "@/components/ui/form";
+import { CheckboxRow, Field, Input } from "@/components/ui/form";
 import {
   EmptyState,
   Kicker,
@@ -206,6 +210,170 @@ function Interruptions({ entries }: { entries: InterruptionEntry[] }) {
   );
 }
 
+/**
+ * The calendar agent's dials, working hours first.
+ *
+ * Working hours are what produces the `off_hours` state above, and that state
+ * is what a Slack busy reply says about you — so they are configured on the
+ * page where that reply is read, not buried in a general settings screen.
+ *
+ * Saved explicitly rather than on change. Every dial here reaches other
+ * people: turning the agent on lets it answer someone, and a switch that
+ * fires the moment you drag it gives no chance to set both ends of the day
+ * before the first reply goes out. `Switch` is for what is already done by
+ * the time you let go; this is a form.
+ *
+ * Only the dials something actually reads are rendered. `auto_apply`,
+ * `auto_reply_invites` and `protect_focus_blocks` are stored columns with no
+ * reader anywhere in the backend -- the sweep always proposes rather than
+ * applying, there is no invite-response path at all, and `is_focus` runs
+ * unconditionally so focus time already always reads as busy. A control that
+ * changes nothing is worse than a missing one: it is a promise the product
+ * does not keep. They are round-tripped unchanged from the GET, because the
+ * endpoint replaces the row and omitting them would reset them.
+ */
+function AgentSettings({
+  timezone,
+  onSaved,
+}: {
+  timezone: string;
+  onSaved: () => void;
+}) {
+  const toast = useToast();
+  const [settings, setSettings] = useState<TimeAgentSettings | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [unavailable, setUnavailable] = useState(false);
+
+  useEffect(() => {
+    getAgentSettings()
+      .then((s) => setSettings(s))
+      .catch(() => setUnavailable(true))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const set = <K extends keyof TimeAgentSettings>(
+    key: K,
+    value: TimeAgentSettings[K]
+  ) => setSettings((prev) => (prev ? { ...prev, [key]: value } : prev));
+
+  // An end at or before the start puts every instant of every day outside
+  // working hours -- `within_working_hours` is a single `start <= t <= end`
+  // -- so the auto-reply would tell everybody you are off, permanently.
+  // Refused here rather than saved, because nothing downstream reports it.
+  const start = settings?.working_hours_start ?? "";
+  const end = settings?.working_hours_end ?? "";
+  const badRange = Boolean(start && end && end <= start);
+  const incomplete = !start || !end;
+
+  const save = async () => {
+    if (!settings || badRange || incomplete) return;
+    setSaving(true);
+    try {
+      const saved = await saveAgentSettings({
+        enabled: settings.enabled,
+        auto_reply_busy: settings.auto_reply_busy,
+        // Sent back as they came. Nothing here can change them.
+        auto_apply: settings.auto_apply,
+        auto_reply_invites: settings.auto_reply_invites,
+        working_hours_start: settings.working_hours_start,
+        working_hours_end: settings.working_hours_end,
+        protect_focus_blocks: settings.protect_focus_blocks,
+      });
+
+      setSettings(saved);
+      toast.success(
+        "Settings saved",
+        `Working hours are ${saved.working_hours_start}–${saved.working_hours_end} in ${saved.timezone ?? timezone}.`
+      );
+      // The chip above reads the same value, so it is re-read rather than
+      // left showing what was true before the save.
+      onSaved();
+    } catch (e) {
+      toast.error(
+        "Could not save",
+        e instanceof Error ? e.message : undefined
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (unavailable) return null;
+
+  return (
+    <Section
+      title="Working hours"
+      description={`Read in ${timezone}, never the browser's zone. Outside them — and at any time on a weekend — you read as off, and that is what an auto-reply says.`}
+    >
+      {loading || !settings ? (
+        <Skeleton className="h-40 w-full" />
+      ) : (
+        <Panel className="p-5">
+          <div className="flex flex-wrap items-end gap-4">
+            <Field label="Day starts" htmlFor="wh-start" className="w-36">
+              <Input
+                id="wh-start"
+                type="time"
+                value={settings.working_hours_start}
+                onChange={(e) => set("working_hours_start", e.target.value)}
+              />
+            </Field>
+            <Field label="Day ends" htmlFor="wh-end" className="w-36">
+              <Input
+                id="wh-end"
+                type="time"
+                value={settings.working_hours_end}
+                onChange={(e) => set("working_hours_end", e.target.value)}
+              />
+            </Field>
+            <span className="inline-flex items-center gap-1.5 pb-2.5 text-xs text-muted">
+              <Clock className="size-3.5" aria-hidden />
+              {timezone}
+            </span>
+          </div>
+
+          {badRange && (
+            <p className="mt-3 text-sm text-danger">
+              The day has to end after it starts. As written, every hour counts
+              as outside working hours.
+            </p>
+          )}
+
+          <div className="mt-5 space-y-4 border-t border-line pt-5">
+            <CheckboxRow
+              id="wh-enabled"
+              label="Run the calendar agent"
+              hint="Off by default. Sweeps your calendar for double-bookings every half hour and stores a plan for you to confirm — it never moves a meeting on its own. Also required for the reply below."
+              checked={settings.enabled}
+              onCheckedChange={(v) => set("enabled", v)}
+            />
+            <CheckboxRow
+              id="wh-reply-busy"
+              label="Answer people who reach you while you are booked"
+              hint="When somebody @-mentions you in Slack. Replies with your state and when you are next free — never a meeting title, attendee or location. At most once per thread per day."
+              disabled={!settings.enabled}
+              checked={settings.auto_reply_busy}
+              onCheckedChange={(v) => set("auto_reply_busy", v)}
+            />
+          </div>
+
+          <div className="mt-5 flex justify-end">
+            <Button
+              onClick={save}
+              loading={saving}
+              disabled={badRange || incomplete}
+            >
+              {!saving && <Check aria-hidden />}
+              Save settings
+            </Button>
+          </div>
+        </Panel>
+      )}
+    </Section>
+  );
+}
+
 export default function SchedulerView() {
   const { user } = useAuth();
   const toast = useToast();
@@ -246,17 +414,24 @@ export default function SchedulerView() {
     }
   }, []);
 
+  // Pulled out of the effect because saving working hours changes it: the
+  // chip and the Slack reply read one value, so it is re-read rather than
+  // left reporting the day that was configured a moment ago.
+  const refreshAvailability = useCallback(() => {
+    getAvailability()
+      .then((a) => setAvailability(a?.state ? a : null))
+      .catch(() => setAvailability(null));
+  }, []);
+
   useEffect(() => {
     refresh();
     // Both are decoration on the page below. A failure costs the chip or the
     // strip, never the conflicts view that is the point of the page.
-    getAvailability()
-      .then((a) => setAvailability(a?.state ? a : null))
-      .catch(() => setAvailability(null));
+    refreshAvailability();
     getInterruptions()
       .then((rows) => setInterruptions(Array.isArray(rows) ? rows : []))
       .catch(() => setInterruptions([]));
-  }, [refresh]);
+  }, [refresh, refreshAvailability]);
 
   const plan = async () => {
     if (!title.trim() || !whenText.trim()) return;
@@ -506,6 +681,12 @@ export default function SchedulerView() {
             </div>
           )}
         </Section>
+
+        {/* ── Agent settings ────────────────────────────────────────────── */}
+        <AgentSettings
+          timezone={user?.timezone ?? "Asia/Kolkata"}
+          onSaved={refreshAvailability}
+        />
 
         {/* ── Interruptions ─────────────────────────────────────────────── */}
         {interruptions.length > 0 ? (
