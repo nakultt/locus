@@ -1,28 +1,64 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import Link from "next/link";
 import {
-  Send,
-  Wrench,
-  CheckCircle,
-  XCircle,
-  Lightbulb,
+  ArrowUp,
+  Calendar,
+  CheckCircle2,
+  ChevronDown,
+  Cpu,
+  FileText,
+  Github,
   Loader2,
+  Mail,
+  MessagesSquare,
+  PanelLeft,
+  Sparkles,
+  Square,
+  Ticket,
+  Wrench,
+  XCircle,
 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useAuth } from "@/features/auth/auth-context";
-import { useRouter } from "next/navigation";
 import MarkdownMessage from "@/features/chat/markdown-message";
 import {
-  streamChatMessage,
-  getConversationMessages,
+  ConversationRail,
+  useConversations,
+} from "@/features/chat/conversation-rail";
+import {
   checkLLMStatus,
+  getConversationMessages,
+  streamChatMessage,
   type ActionResult,
-  type StreamEvent,
   type Message as ApiMessage,
+  type StreamEvent,
 } from "@/lib/api";
+import { Avatar } from "@/components/ui/avatar";
+import { Button, IconButton } from "@/components/ui/button";
+import { Dialog, Sheet } from "@/components/ui/overlay";
+import { Notice } from "@/components/ui/surface";
+import { cn } from "@/lib/utils";
 
-interface Message {
+/**
+ * Chat.
+ *
+ * Three structural changes from what this replaces. The conversation list came
+ * out of the global sidebar and into a rail that belongs to this page. The
+ * composer is a growing textarea rather than a single-line `<input>` inside a
+ * spring-animated container that changed height on focus — you could not see
+ * the second line of what you were typing, and Shift+Enter did nothing. And a
+ * run in progress can be stopped: the stream already returned an abort handle,
+ * and nothing was wired to it, so a request that picked the wrong tool ran to
+ * completion with no way to interrupt it.
+ *
+ * The emoji service map is gone. Thirteen emoji at 18px rendering differently
+ * on every platform is not an icon set.
+ */
+
+interface ChatMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
@@ -40,334 +76,381 @@ interface LiveTask {
   error?: string;
 }
 
-const PLACEHOLDERS = [
-  "Ask me anything...",
-  "What can I help you with?",
-  "Start a conversation...",
-  "Type your message here...",
-];
+/**
+ * Rendered elements rather than component types.
+ *
+ * Looking a component *type* up by name and binding it to a capitalised local
+ * inside a render body is how a component gets recreated on every render —
+ * `react-hooks/static-components` flags it, correctly. Elements are inert, so
+ * the map holds those and the call site just interpolates one.
+ */
+const ICON_CLASS = "size-3.5";
 
-// Service icon mapping - extended for all services
-const getServiceIcon = (service: string) => {
-  switch (service.toLowerCase()) {
-    case "slack":
-      return "💬";
-    case "jira":
-      return "🎫";
-    case "gmail":
-      return "📧";
-    case "calendar":
-      return "📅";
-    case "notion":
-      return "📝";
-    case "docs":
-      return "📄";
-    case "sheets":
-      return "📊";
-    case "slides":
-      return "📽️";
-    case "drive":
-      return "📁";
-    case "forms":
-      return "📋";
-    case "meet":
-      return "🎥";
-    case "github":
-      return "🐙";
-    case "linear":
-      return "🔷";
-    case "bugasura":
-      return "🐛";
-    default:
-      return "🔧";
-  }
+const SERVICE_ICON: Record<string, React.ReactNode> = {
+  slack: <MessagesSquare className={ICON_CLASS} />,
+  jira: <Ticket className={ICON_CLASS} />,
+  linear: <Ticket className={ICON_CLASS} />,
+  gmail: <Mail className={ICON_CLASS} />,
+  calendar: <Calendar className={ICON_CLASS} />,
+  meet: <Calendar className={ICON_CLASS} />,
+  notion: <FileText className={ICON_CLASS} />,
+  docs: <FileText className={ICON_CLASS} />,
+  sheets: <FileText className={ICON_CLASS} />,
+  slides: <FileText className={ICON_CLASS} />,
+  drive: <FileText className={ICON_CLASS} />,
+  forms: <FileText className={ICON_CLASS} />,
+  github: <Github className={ICON_CLASS} />,
 };
 
-// Live Tool Card - shows tools being called in real-time
-const LiveToolCard = ({ task }: { task: LiveTask }) => (
-  <motion.div
-    initial={{ opacity: 0, scale: 0.95, x: -10 }}
-    animate={{ opacity: 1, scale: 1, x: 0 }}
-    className={`flex items-start gap-3 p-3 rounded-lg border mb-2 ${
-      task.status === "in_progress"
-        ? "bg-blue-50 dark:bg-blue-950/30 border-blue-200 dark:border-blue-800"
-        : task.status === "completed"
-        ? "bg-green-50 dark:bg-green-950/30 border-green-200 dark:border-green-800"
-        : task.status === "failed"
-        ? "bg-red-50 dark:bg-red-950/30 border-red-200 dark:border-red-800"
-        : "bg-muted/50 border-border"
-    }`}
-  >
-    <span className="text-lg">{getServiceIcon(task.service)}</span>
-    <div className="flex-1 min-w-0">
-      <div className="flex items-center gap-2">
-        <Wrench size={14} className="text-muted-foreground" />
-        <span className="text-sm font-medium text-foreground">
-          {task.action}
-        </span>
-        {task.status === "in_progress" && (
-          <Loader2 size={14} className="text-blue-500 animate-spin" />
-        )}
-        {task.status === "completed" && (
-          <CheckCircle size={14} className="text-green-500" />
-        )}
-        {task.status === "failed" && (
-          <XCircle size={14} className="text-red-500" />
-        )}
-      </div>
-      <p className="text-xs text-muted-foreground mt-1">{task.description}</p>
-      {task.result && task.status === "completed" && (
-        <p className="text-xs text-green-600 dark:text-green-400 mt-1 truncate">
-          {task.result.substring(0, 100)}
-          {task.result.length > 100 ? "..." : ""}
-        </p>
-      )}
-      {task.error && (
-        <p className="text-xs text-red-400 mt-1">{task.error}</p>
-      )}
-    </div>
-  </motion.div>
-);
+const iconFor = (service: string): React.ReactNode =>
+  SERVICE_ICON[service?.toLowerCase()] ?? <Wrench className={ICON_CLASS} />;
 
-// Tool Action Card component (for completed messages)
-const ToolActionCard = ({ action }: { action: ActionResult }) => (
-  <motion.div
-    initial={{ opacity: 0, scale: 0.95 }}
-    animate={{ opacity: 1, scale: 1 }}
-    className="flex items-start gap-3 p-3 bg-muted/50 rounded-lg border border-border mb-2"
-  >
-    <span className="text-lg">{getServiceIcon(action.service)}</span>
-    <div className="flex-1 min-w-0">
-      <div className="flex items-center gap-2">
-        <Wrench size={14} className="text-muted-foreground" />
-        <span className="text-sm font-medium text-foreground">
-          {action.action}
-        </span>
-        {action.success ? (
-          <CheckCircle size={14} className="text-green-500" />
-        ) : (
-          <XCircle size={14} className="text-red-500" />
-        )}
-      </div>
-      {action.result && (
-        <p className="text-xs text-muted-foreground mt-1 truncate">
-          {action.result.substring(0, 100)}
-          {action.result.length > 100 ? "..." : ""}
-        </p>
-      )}
-      {action.error && (
-        <p className="text-xs text-red-400 mt-1">{action.error}</p>
-      )}
-    </div>
-  </motion.div>
-);
+const SUGGESTIONS = [
+  {
+    icon: MessagesSquare,
+    label: "What did the team decide about the retry gate?",
+  },
+  { icon: Ticket, label: "Summarise the tickets assigned to me this week" },
+  { icon: Calendar, label: "Find me two hours for deep work tomorrow" },
+  { icon: Mail, label: "Draft a QA brief for the last merge" },
+];
 
-// Message component for individual messages
-const ChatMessage = ({ message }: { message: Message }) => {
-  const isUser = message.role === "user";
+/* ── Tool run ─────────────────────────────────────────────────────────────── */
 
+function ToolRun({
+  service,
+  action,
+  description,
+  status,
+  result,
+  error,
+}: {
+  service: string;
+  action: string;
+  description?: string;
+  status: LiveTask["status"] | "done";
+  result?: string;
+  error?: string;
+}) {
   return (
     <motion.div
-      initial={{ opacity: 0, y: 20 }}
+      layout
+      initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.3 }}
-      className={`flex ${isUser ? "justify-end" : "justify-start"} mb-4`}
+      className={cn(
+        "flex items-start gap-3 rounded-md border px-3.5 py-2.5",
+        status === "failed"
+          ? "border-danger-border bg-danger-soft"
+          : status === "in_progress"
+            ? "border-info-border bg-info-soft"
+            : "border-line bg-surface-2"
+      )}
     >
-      {isUser ? (
-        // Human message - cylindrical rounded bubble
-        <div className="max-w-[70%] bg-secondary text-secondary-foreground px-4 py-3 rounded-[1.25rem] rounded-br-[0.25rem] shadow-sm">
-          <p className="text-sm leading-relaxed whitespace-pre-wrap">
+      <span className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-pill bg-surface text-subtle">
+        {iconFor(service)}
+      </span>
+
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <span className="truncate text-sm font-medium text-ink">{action}</span>
+          {status === "in_progress" && (
+            <Loader2 className="size-3.5 shrink-0 animate-spin text-info" aria-hidden />
+          )}
+          {(status === "completed" || status === "done") && (
+            <CheckCircle2 className="size-3.5 shrink-0 text-success" aria-hidden />
+          )}
+          {status === "failed" && (
+            <XCircle className="size-3.5 shrink-0 text-danger" aria-hidden />
+          )}
+        </div>
+        {description && (
+          <p className="mt-0.5 text-xs leading-relaxed text-muted">{description}</p>
+        )}
+        {result && (status === "completed" || status === "done") && (
+          <p className="mt-1 line-clamp-2 text-xs text-muted">{result}</p>
+        )}
+        {error && <p className="mt-1 text-xs text-danger">{error}</p>}
+      </div>
+    </motion.div>
+  );
+}
+
+/* ── Message ──────────────────────────────────────────────────────────────── */
+
+function Bubble({
+  message,
+  userName,
+  userEmail,
+}: {
+  message: ChatMessage;
+  userName?: string | null;
+  userEmail?: string | null;
+}) {
+  if (message.role === "user") {
+    return (
+      <div className="flex justify-end gap-3">
+        <div className="max-w-[80%] rounded-xl rounded-br-sm bg-surface-3 px-4 py-3">
+          <p className="whitespace-pre-wrap text-body leading-relaxed text-ink">
             {message.content}
           </p>
         </div>
-      ) : (
-        // AI message with tool actions
-        <div className="max-w-[85%] py-2">
-          {/* Show tool actions if present */}
-          {message.actions && message.actions.length > 0 && (
-            <div className="mb-3">
-              <p className="text-xs text-muted-foreground mb-2">Tools used:</p>
-              {message.actions.map((action, idx) => (
-                <ToolActionCard key={idx} action={action} />
-              ))}
-            </div>
-          )}
-          <MarkdownMessage content={message.content} />
-        </div>
-      )}
-    </motion.div>
-  );
-};
+        <Avatar name={userName} email={userEmail} size="sm" className="mt-0.5" />
+      </div>
+    );
+  }
 
-// Main Chat Interface component
-interface ChatInterfaceProps {
-  conversationId?: number;
+  return (
+    <div className="flex gap-3">
+      <span
+        className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-pill bg-accent-soft"
+        aria-hidden
+      >
+        <Sparkles className="size-3.5 text-accent-strong" />
+      </span>
+      <div className="min-w-0 flex-1 pt-0.5">
+        {/* What it actually did, before what it says about it. A tool that
+            failed is the most useful thing on screen and used to be a truncated
+            line under the answer. */}
+        {message.actions && message.actions.length > 0 && (
+          <div className="mb-3 space-y-1.5">
+            {message.actions.map((action, i) => (
+              <ToolRun
+                key={i}
+                service={action.service}
+                action={action.action}
+                status={action.success ? "done" : "failed"}
+                result={action.result}
+                error={action.error}
+              />
+            ))}
+          </div>
+        )}
+        <MarkdownMessage content={message.content} />
+      </div>
+    </div>
+  );
 }
 
-const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceProps) => {
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [inputValue, setInputValue] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
-  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
-  const [placeholderIndex, setPlaceholderIndex] = useState(0);
-  const [showPlaceholder, setShowPlaceholder] = useState(true);
-  const [isActive, setIsActive] = useState(false);
-  const [smartMode, setSmartMode] = useState(false);
-  const [showApiKeyModal, setShowApiKeyModal] = useState(false);
-  const [llmMessage, setLlmMessage] = useState<string>("");
-  
-  // Live streaming state
-  const [currentStatus, setCurrentStatus] = useState<string>("");
-  const [liveTasks, setLiveTasks] = useState<LiveTask[]>([]);
-  const [currentConversationId, setCurrentConversationId] = useState<number | undefined>(initialConversationId);
-  
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const wrapperRef = useRef<HTMLDivElement>(null);
-  const abortRef = useRef<(() => void) | null>(null);
+/* ── Composer ─────────────────────────────────────────────────────────────── */
+
+function Composer({
+  value,
+  onChange,
+  onSend,
+  onStop,
+  busy,
+  smart,
+  onSmartChange,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  onSend: () => void;
+  onStop: () => void;
+  busy: boolean;
+  smart: boolean;
+  onSmartChange: (v: boolean) => void;
+}) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+
+  // Grow to fit, up to a ceiling. Measured off `scrollHeight` after resetting
+  // the height, because otherwise it only ever grows and never shrinks when
+  // text is deleted.
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+  }, [value]);
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      onSend();
+    }
+  };
+
+  return (
+    <div className="rounded-xl border border-line bg-surface p-2 shadow-sm transition-colors focus-within:border-accent focus-within:ring-[3px] focus-within:ring-accent/20">
+      <textarea
+        ref={ref}
+        rows={1}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={onKeyDown}
+        placeholder="Ask across your connected tools…"
+        aria-label="Message"
+        className="block max-h-[200px] w-full resize-none bg-transparent px-3 py-2.5 text-body leading-relaxed text-ink outline-none placeholder:text-subtle"
+      />
+
+      <div className="flex items-center gap-2 px-1 pb-0.5 pt-1">
+        <button
+          type="button"
+          onClick={() => onSmartChange(!smart)}
+          aria-pressed={smart}
+          title="Use the higher-intelligence model. Slower."
+          className={cn(
+            "inline-flex items-center gap-1.5 rounded-pill border px-3 py-1.5 text-xs font-medium transition-colors",
+            smart
+              ? "border-accent bg-accent-soft text-accent-strong"
+              : "border-line text-muted hover:border-line-strong hover:text-ink"
+          )}
+        >
+          <Sparkles className="size-3.5" aria-hidden />
+          Smart
+        </button>
+
+        <span className="ml-auto hidden text-xs text-subtle sm:inline">
+          <kbd className="font-mono">Enter</kbd> to send ·{" "}
+          <kbd className="font-mono">Shift+Enter</kbd> for a new line
+        </span>
+
+        {/* A run in progress can be stopped. The stream already handed back an
+            abort function and nothing called it. */}
+        {busy ? (
+          <IconButton label="Stop generating" variant="secondary" onClick={onStop}>
+            <Square className="fill-current" />
+          </IconButton>
+        ) : (
+          <IconButton
+            label="Send"
+            variant="primary"
+            onClick={onSend}
+            disabled={!value.trim()}
+          >
+            <ArrowUp />
+          </IconButton>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ── Page ─────────────────────────────────────────────────────────────────── */
+
+export function ChatInterface({
+  conversationId: initialConversationId,
+}: {
+  conversationId?: number;
+}) {
   const { user } = useAuth();
   const router = useRouter();
+  const { conversations, loading: loadingRail, reload } = useConversations();
 
-  // Scroll to bottom when new messages arrive
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, liveTasks]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [status, setStatus] = useState("");
+  const [liveTasks, setLiveTasks] = useState<LiveTask[]>([]);
+  const [smart, setSmart] = useState(false);
+  const [railOpen, setRailOpen] = useState(false);
+  const [railPinned, setRailPinned] = useState(true);
+  const [modelDown, setModelDown] = useState<string | null>(null);
+  const [conversationId, setConversationId] = useState<number | undefined>(
+    initialConversationId
+  );
 
-  // Load existing messages when conversationId changes
+  const endRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<(() => void) | null>(null);
+
   useEffect(() => {
-    const loadMessages = async () => {
-      if (initialConversationId) {
-        setIsLoadingHistory(true);
-        try {
-          const apiMessages = await getConversationMessages(initialConversationId);
-          const loadedMessages: Message[] = apiMessages.map((msg: ApiMessage) => ({
-            id: msg.id.toString(),
-            role: msg.role as "user" | "assistant",
-            content: msg.content,
-            timestamp: new Date(msg.created_at),
-            actions: msg.actions_taken,
-          }));
-          setMessages(loadedMessages);
-        } catch (err) {
-          console.error("Failed to load messages:", err);
-        } finally {
-          setIsLoadingHistory(false);
-        }
-      } else {
-        // Reset for new conversation
-        setMessages([]);
-        setCurrentConversationId(undefined);
-      }
+    endRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, liveTasks, status]);
+
+  // Cancel any in-flight stream when the component goes away, or the socket
+  // outlives the page that was reading from it.
+  useEffect(() => () => abortRef.current?.(), []);
+
+  useEffect(() => {
+    setConversationId(initialConversationId);
+    if (!initialConversationId) {
+      setMessages([]);
+      return;
+    }
+    let cancelled = false;
+    setLoadingHistory(true);
+    getConversationMessages(initialConversationId)
+      .then((apiMessages) => {
+        if (cancelled) return;
+        setMessages(
+          apiMessages.map((m: ApiMessage) => ({
+            id: String(m.id),
+            role: m.role as "user" | "assistant",
+            content: m.content,
+            timestamp: new Date(m.created_at),
+            actions: m.actions_taken,
+          }))
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setMessages([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingHistory(false);
+      });
+    return () => {
+      cancelled = true;
     };
-    loadMessages();
   }, [initialConversationId]);
 
-  // Cleanup abort on unmount
-  useEffect(() => {
-    return () => {
-      if (abortRef.current) {
-        abortRef.current();
-      }
-    };
+  const stop = useCallback(() => {
+    abortRef.current?.();
+    abortRef.current = null;
+    setBusy(false);
+    setStatus("");
+    setLiveTasks([]);
   }, []);
 
-  // Cycle placeholder text when input is inactive
-  useEffect(() => {
-    if (isActive || inputValue) return;
-
-    const interval = setInterval(() => {
-      setShowPlaceholder(false);
-      setTimeout(() => {
-        setPlaceholderIndex((prev) => (prev + 1) % PLACEHOLDERS.length);
-        setShowPlaceholder(true);
-      }, 400);
-    }, 3000);
-
-    return () => clearInterval(interval);
-  }, [isActive, inputValue]);
-
-  // Close input when clicking outside
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (
-        wrapperRef.current &&
-        !wrapperRef.current.contains(event.target as Node)
-      ) {
-        if (!inputValue) setIsActive(false);
-      }
-    };
-
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [inputValue]);
-
-  const handleActivate = () => setIsActive(true);
-
-  const sendMessage = async () => {
-    if (!inputValue.trim() || isLoading) return;
-
-    const userMessage: Message = {
-      id: Date.now().toString(),
-      role: "user",
-      content: inputValue.trim(),
-      timestamp: new Date(),
-    };
-
-    setMessages((prev) => [...prev, userMessage]);
-    setInputValue("");
-    setIsLoading(true);
-    setCurrentStatus("Analyzing your request...");
-    setLiveTasks([]);
+  const send = async (text?: string) => {
+    const content = (text ?? input).trim();
+    if (!content || busy) return;
 
     if (!user?.id) {
-      const errorMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: "assistant",
-        content: "Please log in to use the chat",
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, errorMessage]);
-      setIsLoading(false);
-      setCurrentStatus("");
+      setModelDown("You need to be signed in to use chat.");
       return;
     }
 
-    // Check the local model server is up with a model loaded
+    // The model server holds one model at a time, so an unavailable one is a
+    // configuration state with a remediation, not an opaque connection error.
     try {
-      const status = await checkLLMStatus();
-      if (!status.available) {
-        setLlmMessage(status.message);
-        setShowApiKeyModal(true);
-        setIsLoading(false);
-        setCurrentStatus("");
-        // Remove the user message we just added
-        setMessages((prev) => prev.slice(0, -1));
+      const llm = await checkLLMStatus();
+      if (!llm.available) {
+        setModelDown(llm.message);
         return;
       }
-    } catch (err) {
-      console.error("Error checking local model status:", err);
-      setLlmMessage(
-        "Cannot reach the Locus backend. Make sure it is running."
+    } catch {
+      setModelDown(
+        "Cannot reach the Locus backend. Check that it is running on this machine."
       );
-      setShowApiKeyModal(true);
-      setIsLoading(false);
-      setCurrentStatus("");
-      setMessages((prev) => prev.slice(0, -1));
       return;
     }
 
-    // Use streaming API for live updates
-    const abort = streamChatMessage(
-      userMessage.content,
-      // onEvent
+    const userMessage: ChatMessage = {
+      id: `u${Date.now()}`,
+      role: "user",
+      content,
+      timestamp: new Date(),
+    };
+    setMessages((prev) => [...prev, userMessage]);
+    setInput("");
+    setBusy(true);
+    setStatus("Reading your request…");
+    setLiveTasks([]);
+
+    abortRef.current = streamChatMessage(
+      content,
       (event: StreamEvent) => {
-        // Capture conversation_id from any event
-        if (event.data?.conversation_id && !currentConversationId) {
-          setCurrentConversationId(event.data.conversation_id as number);
+        // A new conversation gets its id from the first event that carries
+        // one; the URL is then corrected so a refresh does not start over.
+        const newId = event.data?.conversation_id as number | undefined;
+        if (newId && !conversationId) {
+          setConversationId(newId);
+          router.replace(`/chatbot?id=${newId}`, { scroll: false });
         }
-        
+
         switch (event.event_type) {
           case "planning":
-            setCurrentStatus(event.data.status || "Planning tasks...");
+            setStatus(event.data.status || "Planning…");
             break;
 
           case "plan":
@@ -377,38 +460,37 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
                 service: t.service,
                 action: t.action,
                 description: t.description,
-                status: "pending" as const,
+                status: "pending",
               }));
               setLiveTasks(tasks);
-              setCurrentStatus(`Executing ${tasks.length} task${tasks.length > 1 ? 's' : ''}...`);
+              setStatus(
+                `Running ${tasks.length} step${tasks.length === 1 ? "" : "s"}…`
+              );
             }
             break;
 
           case "task_started":
-            setCurrentStatus(`Calling ${event.data.service || 'tool'}...`);
-            setLiveTasks((prev) =>
-              prev.map((t) =>
-                t.task_id === event.data.task_id
-                  ? { ...t, status: "in_progress" as const }
-                  : t
-              )
-            );
-            // If task not in list, add it
+            setStatus(`Calling ${event.data.service || "a tool"}…`);
             setLiveTasks((prev) => {
               const exists = prev.some((t) => t.task_id === event.data.task_id);
-              if (!exists && event.data.task_id) {
-                return [
-                  ...prev,
-                  {
-                    task_id: event.data.task_id,
-                    service: event.data.service || "unknown",
-                    action: event.data.action || "unknown",
-                    description: event.data.description || "",
-                    status: "in_progress" as const,
-                  },
-                ];
+              if (exists) {
+                return prev.map((t) =>
+                  t.task_id === event.data.task_id
+                    ? { ...t, status: "in_progress" as const }
+                    : t
+                );
               }
-              return prev;
+              if (!event.data.task_id) return prev;
+              return [
+                ...prev,
+                {
+                  task_id: event.data.task_id,
+                  service: event.data.service || "unknown",
+                  action: event.data.action || "unknown",
+                  description: event.data.description || "",
+                  status: "in_progress" as const,
+                },
+              ];
             });
             break;
 
@@ -416,11 +498,7 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
             setLiveTasks((prev) =>
               prev.map((t) =>
                 t.task_id === event.data.task_id
-                  ? {
-                      ...t,
-                      status: "completed" as const,
-                      result: event.data.result,
-                    }
+                  ? { ...t, status: "completed", result: event.data.result }
                   : t
               )
             );
@@ -430,404 +508,287 @@ const ChatInterface = ({ conversationId: initialConversationId }: ChatInterfaceP
             setLiveTasks((prev) =>
               prev.map((t) =>
                 t.task_id === event.data.task_id
-                  ? {
-                      ...t,
-                      status: "failed" as const,
-                      error: event.data.error,
-                    }
+                  ? { ...t, status: "failed", error: event.data.error }
                   : t
               )
             );
             break;
 
           case "complete": {
-            // Create final AI message with all actions
-            const aiMessage: Message = {
-              id: (Date.now() + 1).toString(),
-              role: "assistant",
-              content: event.data.message || "Done!",
-              timestamp: new Date(),
-              actions: event.data.actions_taken as ActionResult[],
-            };
-            setMessages((prev) => [...prev, aiMessage]);
-            setIsLoading(false);
-            setCurrentStatus("");
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `a${Date.now()}`,
+                role: "assistant",
+                content: event.data.message || "Done.",
+                timestamp: new Date(),
+                actions: event.data.actions_taken as ActionResult[],
+              },
+            ]);
+            setBusy(false);
+            setStatus("");
             setLiveTasks([]);
+            reload();
             break;
           }
 
           case "error": {
-            const errorMessage: Message = {
-              id: (Date.now() + 1).toString(),
-              role: "assistant",
-              content: event.data.message || "An error occurred",
-              timestamp: new Date(),
-            };
-            setMessages((prev) => [...prev, errorMessage]);
-            setIsLoading(false);
-            setCurrentStatus("");
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `e${Date.now()}`,
+                role: "assistant",
+                content: event.data.message || "Something went wrong.",
+                timestamp: new Date(),
+              },
+            ]);
+            setBusy(false);
+            setStatus("");
             setLiveTasks([]);
             break;
           }
         }
       },
-      // onError
       (error: Error) => {
-        const errorMessage: Message = {
-          id: (Date.now() + 1).toString(),
-          role: "assistant",
-          content: `Sorry, I encountered an error: ${error.message}`,
-          timestamp: new Date(),
-        };
-        setMessages((prev) => [...prev, errorMessage]);
-        setIsLoading(false);
-        setCurrentStatus("");
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `e${Date.now()}`,
+            role: "assistant",
+            content: `That request failed: ${error.message}`,
+            timestamp: new Date(),
+          },
+        ]);
+        setBusy(false);
+        setStatus("");
         setLiveTasks([]);
       },
-      // onComplete
       () => {
-        setIsLoading(false);
-        setCurrentStatus("");
+        setBusy(false);
+        setStatus("");
       },
-      // conversationId
-      currentConversationId
+      conversationId
     );
-
-    abortRef.current = abort;
   };
 
-  const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      sendMessage();
-    }
-  };
-
-  const containerVariants: {
-    collapsed: { height: number; boxShadow: string };
-    expanded: { height: number; boxShadow: string };
-  } = {
-    collapsed: {
-      height: 68,
-      boxShadow: "0 2px 8px 0 rgba(0,0,0,0.08)",
-    },
-    expanded: {
-      height: 128,
-      boxShadow: "0 8px 32px 0 rgba(0,0,0,0.16)",
-    },
-  };
-
-  const placeholderContainerVariants = {
-    initial: {},
-    animate: { transition: { staggerChildren: 0.025 } },
-    exit: { transition: { staggerChildren: 0.015, staggerDirection: -1 } },
-  };
-
-  const letterVariants = {
-    initial: { opacity: 0, filter: "blur(12px)", y: 10 },
-    animate: {
-      opacity: 1,
-      filter: "blur(0px)",
-      y: 0,
-    },
-    exit: {
-      opacity: 0,
-      filter: "blur(12px)",
-      y: -10,
-    },
-  };
+  const empty = messages.length === 0 && !busy && !loadingHistory;
 
   return (
-    <div className="flex flex-col h-full">
-      {/* API Key Required Modal */}
-      <AnimatePresence>
-        {showApiKeyModal && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
-            onClick={() => setShowApiKeyModal(false)}
-          >
-            <motion.div
-              initial={{ scale: 0.9, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.9, opacity: 0 }}
-              className="bg-background rounded-2xl p-6 max-w-md w-full shadow-2xl border border-border"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="text-center">
-                <div className="w-16 h-16 bg-yellow-100 dark:bg-yellow-900/30 rounded-full flex items-center justify-center mx-auto mb-4">
-                  <Lightbulb className="w-8 h-8 text-yellow-600 dark:text-yellow-400" />
-                </div>
-                <h2 className="text-xl font-bold text-foreground mb-2">
-                  Local model unavailable
-                </h2>
-                <p className="text-muted-foreground mb-6">
-                  {llmMessage ||
-                    "Start MoE Model Manager and load a text model to chat with Locus."}
-                </p>
-                <div className="flex gap-3 justify-center">
-                  <button
-                    onClick={() => setShowApiKeyModal(false)}
-                    className="px-4 py-2 rounded-lg border border-border text-foreground hover:bg-accent transition"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={() => {
-                      setShowApiKeyModal(false);
-                      router.push("/settings");
-                    }}
-                    className="px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition font-medium"
-                  >
-                    Go to Settings
-                  </button>
-                </div>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+    <div className="flex min-h-0 flex-1">
+      {/* ── Rail ──────────────────────────────────────────────────────────
+          Pinned by default on a wide screen, collapsible, and a drawer below
+          `lg`. It is chat's own furniture, not the application's. */}
+      {railPinned && (
+        <aside className="hidden w-72 shrink-0 border-r border-line bg-surface-2/40 lg:flex lg:flex-col">
+          <ConversationRail
+            conversations={conversations}
+            loading={loadingRail}
+            activeId={conversationId}
+            onCollapse={() => setRailPinned(false)}
+          />
+        </aside>
+      )}
 
-      {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto px-4 py-6">
-        {isLoadingHistory ? (
-          // Loading history state
-          <div className="flex flex-col items-center justify-center h-full text-center">
-            <div className="flex gap-1 mb-4">
-              <motion.span
-                animate={{ opacity: [0.4, 1, 0.4] }}
-                transition={{ duration: 1.5, repeat: Infinity }}
-                className="w-2 h-2 bg-muted-foreground rounded-full"
-              />
-              <motion.span
-                animate={{ opacity: [0.4, 1, 0.4] }}
-                transition={{ duration: 1.5, repeat: Infinity, delay: 0.2 }}
-                className="w-2 h-2 bg-muted-foreground rounded-full"
-              />
-              <motion.span
-                animate={{ opacity: [0.4, 1, 0.4] }}
-                transition={{ duration: 1.5, repeat: Infinity, delay: 0.4 }}
-                className="w-2 h-2 bg-muted-foreground rounded-full"
-              />
-            </div>
-            <p className="text-muted-foreground">Loading conversation...</p>
-          </div>
-        ) : messages.length === 0 && !isLoading ? (
-          // Welcome state
-          <div className="flex flex-col items-center justify-center h-full text-center">
-            <h2 className="text-2xl font-semibold text-foreground mb-2">
-              Welcome to Locus
-            </h2>
-            <p className="text-muted-foreground max-w-md">
-              Start a conversation below. I'm here to help you with anything you
-              need.
-            </p>
-          </div>
-        ) : (
-          // Messages list
-          <div className="max-w-3xl mx-auto">
-            {messages.map((message) => (
-              <ChatMessage key={message.id} message={message} />
-            ))}
-            
-            {/* Live streaming indicator */}
-            {isLoading && (
-              <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="mb-4"
-              >
-                {/* Status indicator */}
-                <div className="flex items-center gap-2 mb-3">
-                  <Loader2 size={16} className="text-primary animate-spin" />
-                  <span className="text-sm text-muted-foreground">
-                    {currentStatus || "Processing..."}
-                  </span>
-                </div>
-                
-                {/* Live tool execution cards */}
-                {liveTasks.length > 0 && (
-                  <div className="mb-3">
-                    <p className="text-xs text-muted-foreground mb-2">Live execution:</p>
-                    <AnimatePresence>
-                      {liveTasks.map((task) => (
-                        <LiveToolCard key={task.task_id} task={task} />
-                      ))}
-                    </AnimatePresence>
-                  </div>
-                )}
-                
-                {/* Fallback dots if no tasks yet */}
-                {liveTasks.length === 0 && (
-                  <div className="py-2">
-                    <div className="flex gap-1">
-                      <motion.span
-                        animate={{ opacity: [0.4, 1, 0.4] }}
-                        transition={{ duration: 1.5, repeat: Infinity }}
-                        className="w-2 h-2 bg-muted-foreground rounded-full"
-                      />
-                      <motion.span
-                        animate={{ opacity: [0.4, 1, 0.4] }}
-                        transition={{
-                          duration: 1.5,
-                          repeat: Infinity,
-                          delay: 0.2,
-                        }}
-                        className="w-2 h-2 bg-muted-foreground rounded-full"
-                      />
-                      <motion.span
-                        animate={{ opacity: [0.4, 1, 0.4] }}
-                        transition={{
-                          duration: 1.5,
-                          repeat: Infinity,
-                          delay: 0.4,
-                        }}
-                        className="w-2 h-2 bg-muted-foreground rounded-full"
-                      />
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        {/* ── Conversation bar ────────────────────────────────────────── */}
+        <div className="flex items-center gap-2 border-b border-line px-4 py-2.5 sm:px-6">
+          {!railPinned && (
+            <IconButton
+              label="Show conversations"
+              variant="ghost"
+              size="sm"
+              className="hidden lg:inline-flex"
+              onClick={() => setRailPinned(true)}
+            >
+              <PanelLeft />
+            </IconButton>
+          )}
+          <IconButton
+            label="Conversations"
+            variant="ghost"
+            size="sm"
+            className="lg:hidden"
+            onClick={() => setRailOpen(true)}
+          >
+            <PanelLeft />
+          </IconButton>
+
+          <p className="min-w-0 truncate text-sm font-medium text-ink">
+            {conversations.find((c) => c.id === conversationId)?.title ??
+              "New conversation"}
+          </p>
+
+          <Button
+            variant="ghost"
+            size="sm"
+            className="ml-auto"
+            onClick={() => router.push("/chatbot")}
+          >
+            New chat
+          </Button>
+        </div>
+
+        {/* ── Transcript ──────────────────────────────────────────────── */}
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-6">
+          <div className="mx-auto max-w-3xl">
+            {loadingHistory ? (
+              <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted">
+                <Loader2 className="size-4 animate-spin" aria-hidden />
+                Loading conversation…
+              </div>
+            ) : empty ? (
+              <Welcome onPick={(text) => send(text)} />
+            ) : (
+              <div className="space-y-6">
+                {messages.map((m) => (
+                  <Bubble
+                    key={m.id}
+                    message={m}
+                    userName={user?.name}
+                    userEmail={user?.email}
+                  />
+                ))}
+
+                {busy && (
+                  <div className="flex gap-3">
+                    <span
+                      className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-pill bg-accent-soft"
+                      aria-hidden
+                    >
+                      <Sparkles className="size-3.5 animate-pulse text-accent-strong" />
+                    </span>
+                    <div className="min-w-0 flex-1 space-y-2 pt-1">
+                      <p
+                        className="flex items-center gap-2 text-sm text-muted"
+                        aria-live="polite"
+                      >
+                        <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                        {status || "Working…"}
+                      </p>
+                      <AnimatePresence initial={false}>
+                        {liveTasks.map((task) => (
+                          <ToolRun key={task.task_id} {...task} />
+                        ))}
+                      </AnimatePresence>
                     </div>
                   </div>
                 )}
-              </motion.div>
-            )}
-            <div ref={messagesEndRef} />
-          </div>
-        )}
-      </div>
-
-      {/* Input Area - Fixed at bottom */}
-      <div className="bg-background p-4">
-        <div className="max-w-3xl mx-auto">
-          <motion.div
-            ref={wrapperRef}
-            className="w-full"
-            variants={containerVariants}
-            animate={isActive || inputValue ? "expanded" : "collapsed"}
-            initial="collapsed"
-            style={{
-              overflow: "hidden",
-              borderRadius: 32,
-              background: "var(--card)",
-            }}
-            onClick={handleActivate}
-          >
-            <div className="flex flex-col items-stretch w-full h-full border border-border rounded-[32px]">
-              {/* Input Row */}
-              <div className="flex items-center gap-2 p-3 w-full ">
-
-                {/* Text Input & Placeholder */}
-                <div className="relative flex-1">
-                  <input
-                    type="text"
-                    value={inputValue}
-                    onChange={(e) => setInputValue(e.target.value)}
-                    onKeyDown={handleKeyPress}
-                    className="flex-1 border-0 outline-0 rounded-md py-2 text-base bg-transparent w-full font-normal text-foreground"
-                    style={{ position: "relative", zIndex: 1 }}
-                    onFocus={handleActivate}
-                  />
-                  <div className="absolute left-0 top-0 w-full h-full pointer-events-none flex items-center py-2">
-                    <AnimatePresence mode="wait">
-                      {showPlaceholder && !isActive && !inputValue && (
-                        <motion.span
-                          key={placeholderIndex}
-                          className="absolute left-0 top-1/2 -translate-y-1/2 text-muted-foreground select-none pointer-events-none"
-                          style={{
-                            whiteSpace: "nowrap",
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            zIndex: 0,
-                          }}
-                          variants={placeholderContainerVariants}
-                          initial="initial"
-                          animate="animate"
-                          exit="exit"
-                        >
-                          {PLACEHOLDERS[placeholderIndex]
-                            .split("")
-                            .map((char, i) => (
-                              <motion.span
-                                key={i}
-                                variants={letterVariants}
-                                style={{ display: "inline-block" }}
-                              >
-                                {char === " " ? "\u00A0" : char}
-                              </motion.span>
-                            ))}
-                        </motion.span>
-                      )}
-                    </AnimatePresence>
-                  </div>
-                </div>
-
-                <button
-                  onClick={sendMessage}
-                  disabled={!inputValue.trim() || isLoading}
-                  className="flex items-center gap-1 bg-primary hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed text-primary-foreground p-2.5 rounded-full font-medium justify-center transition"
-                  title="Send"
-                  type="button"
-                >
-                  <Send size={18} />
-                </button>
               </div>
+            )}
+            <div ref={endRef} />
+          </div>
+        </div>
 
-              {/* Expanded Controls */}
-              <motion.div
-                className="w-full flex justify-start px-4 items-center text-sm"
-                variants={{
-                  hidden: {
-                    opacity: 0,
-                    y: 20,
-                    pointerEvents: "none" as const,
-                    transition: { duration: 0.25 },
-                  },
-                  visible: {
-                    opacity: 1,
-                    y: 0,
-                    pointerEvents: "auto" as const,
-                    transition: { duration: 0.35, delay: 0.08 },
-                  },
-                }}
-                initial="hidden"
-                animate={isActive || inputValue ? "visible" : "hidden"}
-                style={{ marginTop: 8, paddingBottom: 12 }}
-              >
-                <div className="flex gap-3 items-center">
-                  {/* Smart Toggle */}
-                  <button
-                    className={`flex items-center gap-1 px-4 py-2 rounded-full transition-all font-medium group ${
-                      smartMode
-                        ? "bg-yellow-500/20 outline outline-yellow-500/60 text-yellow-700 dark:text-yellow-300"
-                        : "bg-accent text-accent-foreground hover:bg-accent/80"
-                    }`}
-                    title="Use higher intelligence model"
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setSmartMode((s) => !s);
-                    }}
-                  >
-                    <Lightbulb
-                      className={`transition-all ${
-                        smartMode
-                          ? "fill-yellow-400 text-yellow-600"
-                          : "group-hover:fill-yellow-300"
-                      }`}
-                      size={18}
-                    />
-                    Smart
-                  </button>
-                </div>
-              </motion.div>
-            </div>
-          </motion.div>
+        {/* ── Composer ────────────────────────────────────────────────── */}
+        <div className="border-t border-line bg-bg px-4 py-4 sm:px-6">
+          <div className="mx-auto max-w-3xl">
+            <Composer
+              value={input}
+              onChange={setInput}
+              onSend={() => send()}
+              onStop={stop}
+              busy={busy}
+              smart={smart}
+              onSmartChange={setSmart}
+            />
+          </div>
         </div>
       </div>
+
+      {/* Mobile rail */}
+      <Sheet
+        open={railOpen}
+        onClose={() => setRailOpen(false)}
+        title="Conversations"
+        width="narrow"
+        side="left"
+      >
+        <ConversationRail
+          conversations={conversations}
+          loading={loadingRail}
+          activeId={conversationId}
+          onPick={() => setRailOpen(false)}
+          className="-mx-5"
+        />
+      </Sheet>
+
+      {/* The model server holds one model at a time, so this is a
+          configuration state with a fix, not an error. */}
+      <Dialog
+        open={!!modelDown}
+        onClose={() => setModelDown(null)}
+        size="sm"
+        title="No model is loaded"
+        description={modelDown ?? undefined}
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setModelDown(null)}>
+              Close
+            </Button>
+            <Button asChild data-autofocus>
+              <Link href="/settings?tab=system">
+                <Cpu aria-hidden />
+                Check the server
+              </Link>
+            </Button>
+          </>
+        }
+      >
+        <Notice tone="info" icon={<Cpu aria-hidden />}>
+          Open MoE Model Manager and load a text model. Inference is local and
+          loopback-bound — no API key is required, and nothing you type here
+          leaves this machine.
+        </Notice>
+      </Dialog>
     </div>
   );
-};
+}
 
-// Export both the new ChatInterface and keep the old AIChatInput for backward compatibility
-export { ChatInterface };
+/**
+ * The empty state.
+ *
+ * Four things this can actually do, as clickable prompts. "Start a conversation
+ * below. I'm here to help you with anything you need" told nobody what the
+ * product connects to, which is the entire reason to use this over any other
+ * chat window.
+ */
+function Welcome({ onPick }: { onPick: (text: string) => void }) {
+  return (
+    <div className="flex flex-col items-center py-12 text-center sm:py-20">
+      <span
+        className="flex size-12 items-center justify-center rounded-pill bg-accent-soft"
+        aria-hidden
+      >
+        <Sparkles className="size-5 text-accent-strong" />
+      </span>
+      <h2 className="mt-5 text-[1.75rem] leading-tight tracking-[-0.026em] text-ink">
+        What do you need?
+      </h2>
+      <p className="mt-2 max-w-md text-sm leading-relaxed text-muted">
+        Locus can read and act across every tool you have connected — GitHub,
+        Jira, Slack, Linear and Google Workspace.
+      </p>
+
+      <div className="mt-8 grid w-full max-w-xl gap-2 sm:grid-cols-2">
+        {SUGGESTIONS.map((s) => (
+          <button
+            key={s.label}
+            type="button"
+            onClick={() => onPick(s.label)}
+            className="flex items-start gap-3 rounded-lg border border-line bg-surface px-4 py-3.5 text-left transition-colors hover:border-line-strong hover:bg-surface-2"
+          >
+            <s.icon className="mt-0.5 size-4 shrink-0 text-subtle" aria-hidden />
+            <span className="text-sm leading-snug text-ink">{s.label}</span>
+          </button>
+        ))}
+      </div>
+
+      <p className="mt-8 flex items-center gap-1.5 text-xs text-subtle">
+        <ChevronDown className="size-3.5" aria-hidden />
+        Or type your own below
+      </p>
+    </div>
+  );
+}
+
 export { ChatInterface as AIChatInput };

@@ -5,8 +5,8 @@ export default function ChatbotPage() {
   return (
     <Suspense
       fallback={
-        <div className="flex flex-1 items-center justify-center">
-          <p className="animate-pulse text-muted-foreground">Loading chat...</p>
+        <div className="flex min-h-0 flex-1 items-center justify-center">
+          <p className="text-sm text-muted">Loading chat…</p>
         </div>
       }
     >

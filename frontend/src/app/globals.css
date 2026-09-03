@@ -9,121 +9,402 @@
 
 @custom-variant dark (&:is(.dark *));
 
-@theme inline {
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
-  --radius-2xl: calc(var(--radius) + 8px);
-  --radius-3xl: calc(var(--radius) + 12px);
-  --radius-4xl: calc(var(--radius) + 16px);
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --color-card: var(--card);
-  --color-card-foreground: var(--card-foreground);
-  --color-popover: var(--popover);
-  --color-popover-foreground: var(--popover-foreground);
-  --color-primary: var(--primary);
-  --color-primary-foreground: var(--primary-foreground);
-  --color-secondary: var(--secondary);
-  --color-secondary-foreground: var(--secondary-foreground);
-  --color-muted: var(--muted);
-  --color-muted-foreground: var(--muted-foreground);
-  --color-accent: var(--accent);
-  --color-accent-foreground: var(--accent-foreground);
-  --color-destructive: var(--destructive);
-  --color-border: var(--border);
-  --color-input: var(--input);
-  --color-ring: var(--ring);
-  --color-chart-1: var(--chart-1);
-  --color-chart-2: var(--chart-2);
-  --color-chart-3: var(--chart-3);
-  --color-chart-4: var(--chart-4);
-  --color-chart-5: var(--chart-5);
-  --color-sidebar: var(--sidebar);
-  --color-sidebar-foreground: var(--sidebar-foreground);
-  --color-sidebar-primary: var(--sidebar-primary);
-  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
-  --color-sidebar-accent: var(--sidebar-accent);
-  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
-  --color-sidebar-border: var(--sidebar-border);
-  --color-sidebar-ring: var(--sidebar-ring);
-}
+/* ==========================================================================
+   Design tokens
+   --------------------------------------------------------------------------
+   One warm neutral ramp, one accent, four semantic tones. Every colour in the
+   product resolves to a name here — a component that reaches for `slate-500`
+   or `bg-green-100` directly is a bug, because it will not follow the theme.
+
+   The ramp is warm rather than neutral (a few degrees of chroma at hue ~80).
+   Pure greys next to a sand accent read as dirty; carrying a trace of the
+   accent's hue through the neutrals is what makes the surface look considered
+   instead of default.
+   ========================================================================== */
 
 :root {
-  --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  /* --- Ground and surfaces ------------------------------------------------
+     Four steps, and that is the whole vocabulary. `bg` is the page, `surface`
+     is a panel lifted off it, `surface-2` is a well *inside* a panel, and
+     `surface-3` is a pressed or hovered state. Nesting past `surface-2` is
+     the card-in-card-in-card that this replaces. */
+  --bg: oklch(0.986 0.0035 85);
+  --surface: oklch(1 0 0);
+  --surface-2: oklch(0.968 0.005 85);
+  --surface-3: oklch(0.941 0.006 85);
+
+  /* --- Lines -------------------------------------------------------------
+     `border` is the default hairline; `border-strong` is for a line that has
+     to survive next to a filled surface. There is no third. */
+  --border: oklch(0.908 0.006 85);
+  --border-strong: oklch(0.858 0.008 82);
+
+  /* --- Text --------------------------------------------------------------
+     Three weights of emphasis. `subtle` is the floor — anything quieter than
+     this fails contrast, which is how the old 10px muted captions became
+     unreadable. */
+  --text: oklch(0.235 0.009 70);
+  --text-muted: oklch(0.508 0.012 74);
+  --text-subtle: oklch(0.618 0.011 78);
+
+  /* --- Primary action ----------------------------------------------------
+     Ink, not the accent. The references both put their loudest CTA in a
+     near-neutral pill and spend colour on identity instead; that keeps a
+     dense screen from having six competing coloured buttons. */
+  --primary: oklch(0.235 0.012 70);
+  --primary-hover: oklch(0.305 0.012 70);
+  --primary-fg: oklch(0.985 0.004 85);
+
+  /* --- Accent ------------------------------------------------------------
+     Sand. Three roles, because one value cannot do all of them: `accent` is
+     a fill (light enough to need dark text on it), `accent-strong` is the
+     text/icon value that actually passes contrast on paper, and `accent-soft`
+     is the tinted surface behind them. */
+  --accent: oklch(0.795 0.105 76);
+  --accent-hover: oklch(0.755 0.110 74);
+  --accent-strong: oklch(0.545 0.098 62);
+  --accent-soft: oklch(0.962 0.028 82);
+  --accent-fg: oklch(0.235 0.020 65);
+
+  /* --- Semantic ----------------------------------------------------------
+     Each tone is a triple: readable foreground, tinted surface, and a border
+     that sits between them. Defined once so a "confirmed finding" is the same
+     red on the board, in the sheet and in a toast. */
+  --success: oklch(0.492 0.126 156);
+  --success-soft: oklch(0.958 0.032 158);
+  --success-border: oklch(0.868 0.062 158);
+
+  --warning: oklch(0.545 0.115 72);
+  --warning-soft: oklch(0.966 0.042 84);
+  --warning-border: oklch(0.878 0.070 80);
+
+  --danger: oklch(0.545 0.192 24);
+  --danger-soft: oklch(0.962 0.030 24);
+  --danger-border: oklch(0.878 0.058 24);
+
+  --info: oklch(0.522 0.132 248);
+  --info-soft: oklch(0.960 0.030 248);
+  --info-border: oklch(0.872 0.052 248);
+
+  /* --- Focus -------------------------------------------------------------
+     One ring, everywhere, in the accent. Never removed without replacement. */
+  --ring: oklch(0.700 0.110 74);
+
+  /* --- Radii -------------------------------------------------------------
+     One value per role. Controls are pills, panels are 16, page containers
+     are 24. Mixing radii within a role is the fastest way to make a UI look
+     assembled from parts. */
+  --r-xs: 6px;
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-xl: 24px;
+  --r-pill: 999px;
+
+  /* --- Elevation ---------------------------------------------------------
+     Borders carry structure; shadow is reserved for things that genuinely
+     float above the page. `shadow-pop` is the only one an overlay uses. */
+  --shadow-sm: 0 1px 2px oklch(0.235 0.009 70 / 0.05);
+  --shadow-md: 0 4px 16px -4px oklch(0.235 0.009 70 / 0.08);
+  --shadow-pop: 0 16px 48px -12px oklch(0.235 0.009 70 / 0.18);
+
+  /* --- Motion ------------------------------------------------------------ */
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+  --dur-fast: 120ms;
+  --dur: 200ms;
+  --dur-slow: 380ms;
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  --bg: oklch(0.172 0.006 76);
+  --surface: oklch(0.212 0.007 76);
+  --surface-2: oklch(0.248 0.008 76);
+  --surface-3: oklch(0.288 0.009 76);
+
+  --border: oklch(0.302 0.009 76);
+  --border-strong: oklch(0.392 0.011 76);
+
+  --text: oklch(0.964 0.005 85);
+  --text-muted: oklch(0.702 0.013 80);
+  --text-subtle: oklch(0.582 0.012 78);
+
+  /* Inverted: on a dark ground the loudest control is cream, not ink. */
+  --primary: oklch(0.948 0.008 85);
+  --primary-hover: oklch(0.878 0.010 85);
+  --primary-fg: oklch(0.192 0.010 70);
+
+  --accent: oklch(0.802 0.105 78);
+  --accent-hover: oklch(0.848 0.100 80);
+  --accent-strong: oklch(0.828 0.098 80);
+  --accent-soft: oklch(0.268 0.036 72);
+  --accent-fg: oklch(0.192 0.020 65);
+
+  --success: oklch(0.762 0.132 158);
+  --success-soft: oklch(0.268 0.048 158);
+  --success-border: oklch(0.372 0.070 158);
+
+  --warning: oklch(0.802 0.112 82);
+  --warning-soft: oklch(0.278 0.048 80);
+  --warning-border: oklch(0.388 0.072 80);
+
+  --danger: oklch(0.712 0.168 24);
+  --danger-soft: oklch(0.278 0.062 24);
+  --danger-border: oklch(0.388 0.092 24);
+
+  --info: oklch(0.742 0.122 248);
+  --info-soft: oklch(0.272 0.050 248);
+  --info-border: oklch(0.382 0.074 248);
+
+  --ring: oklch(0.762 0.104 76);
+
+  --shadow-sm: 0 1px 2px oklch(0 0 0 / 0.32);
+  --shadow-md: 0 4px 16px -4px oklch(0 0 0 / 0.42);
+  --shadow-pop: 0 16px 48px -12px oklch(0 0 0 / 0.62);
+}
+
+/* Bridge the tokens into Tailwind's utility namespace, so `bg-surface`,
+   `text-muted`, `border-strong` and `rounded-lg` all resolve to the values
+   above. Anything not listed here cannot be reached from a class name, which
+   is deliberate — it is what keeps `bg-slate-100` out of the codebase. */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+
+  --color-line: var(--border);
+  --color-line-strong: var(--border-strong);
+
+  --color-ink: var(--text);
+  --color-muted: var(--text-muted);
+  --color-subtle: var(--text-subtle);
+
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-fg: var(--primary-fg);
+
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-fg: var(--accent-fg);
+
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-success-border: var(--success-border);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-warning-border: var(--warning-border);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-danger-border: var(--danger-border);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-info-border: var(--info-border);
+
+  --color-ring: var(--ring);
+
+  --radius-xs: var(--r-xs);
+  --radius-sm: var(--r-sm);
+  --radius-md: var(--r-md);
+  --radius-lg: var(--r-lg);
+  --radius-xl: var(--r-xl);
+  --radius-pill: var(--r-pill);
+
+  --shadow-sm: var(--shadow-sm);
+  --shadow-md: var(--shadow-md);
+  --shadow-pop: var(--shadow-pop);
+
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-serif: var(--font-instrument-serif), ui-serif, Georgia, serif;
+  --font-mono: var(--font-mono-jb), ui-monospace, SFMono-Regular, monospace;
+
+  /* The type scale. Display sizes carry negative tracking — it is the single
+     most recognisable trait of the reference material, and a 72px headline at
+     default tracking reads as a slide, not a product. */
+  --text-display: 4.5rem;
+  --text-display--line-height: 1.02;
+  --text-display--letter-spacing: -0.035em;
+  --text-display--font-weight: 400;
+
+  --text-hero: 3.5rem;
+  --text-hero--line-height: 1.04;
+  --text-hero--letter-spacing: -0.032em;
+  --text-hero--font-weight: 400;
+
+  --text-title: 2rem;
+  --text-title--line-height: 1.12;
+  --text-title--letter-spacing: -0.026em;
+  --text-title--font-weight: 500;
+
+  --text-h1: 1.5rem;
+  --text-h1--line-height: 1.2;
+  --text-h1--letter-spacing: -0.02em;
+  --text-h1--font-weight: 560;
+
+  --text-h2: 1.125rem;
+  --text-h2--line-height: 1.35;
+  --text-h2--letter-spacing: -0.013em;
+  --text-h2--font-weight: 560;
+
+  --text-h3: 0.9375rem;
+  --text-h3--line-height: 1.45;
+  --text-h3--letter-spacing: -0.008em;
+  --text-h3--font-weight: 580;
+
+  --text-body: 0.9375rem;
+  --text-body--line-height: 1.6;
+
+  --text-sm: 0.875rem;
+  --text-sm--line-height: 1.55;
+
+  /* The floor. There is no tier below this — the surface this replaces had
+     ~120 uses of 10px and 11px text, which is where its legibility went. */
+  --text-xs: 0.8125rem;
+  --text-xs--line-height: 1.5;
+
+  --text-label: 0.75rem;
+  --text-label--line-height: 1.35;
+  --text-label--letter-spacing: 0.045em;
+  --text-label--font-weight: 580;
 }
 
 @layer base {
-  * {
-    @apply border-border outline-ring/50;
+  *,
+  ::before,
+  ::after {
+    border-color: var(--border);
   }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
   body {
-    @apply bg-background text-foreground;
+    background-color: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: var(--text-body);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-feature-settings: "cv11", "ss01";
+    font-variant-ligatures: contextual;
+  }
+
+  /* One ring for the whole product. Applied on `:focus-visible` only, so a
+     pointer click never paints it but a keyboard tab always does. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+    border-radius: var(--r-xs);
+  }
+
+  ::selection {
+    background: var(--accent-soft);
+    color: var(--text);
+  }
+
+  /* Numerals in tabular contexts must not reflow as they tick. Applied to the
+     elements that actually show changing figures rather than globally, since
+     tabular figures look wrong in prose. */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Scrollbars, themed. The default light scrollbar on a dark panel is the
+     kind of detail that makes an interface feel unfinished. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-strong) transparent;
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background-color: var(--border-strong);
+    border-radius: var(--r-pill);
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: var(--text-subtle);
+  }
+}
+
+@layer components {
+  /* A hairline that survives on any surface. Used for section rules where a
+     full-strength border would cut the page in half. */
+  .rule {
+    height: 1px;
+    background: var(--border);
+  }
+
+  /* The eyebrow pill from the reference material: a status dot, a short
+     label, a hairline ring. Used above hero headlines and as a section kicker. */
+  .eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.3125rem 0.75rem 0.3125rem 0.625rem;
+    border-radius: var(--r-pill);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+
+  /* Wide content — tables, diagrams, long code — scrolls inside its own box.
+     The page body must never scroll sideways. */
+  .scroll-x {
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+  }
+}
+
+@layer utilities {
+  /* Grain. A single tiled SVG at very low opacity over the large flat areas
+     of the marketing surface — flat colour at hero scale reads as a rendering
+     artefact, and this is what stops it looking like a placeholder. */
+  .grain::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0.4;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.32'/%3E%3C/svg%3E");
+    mix-blend-mode: soft-light;
+  }
+
+  .animate-in-up {
+    animation: in-up var(--dur-slow) var(--ease) both;
+  }
+
+  @keyframes in-up {
+    from {
+      opacity: 0;
+      transform: translateY(12px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  /* Everything decorative stops for anyone who asked it to. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    ::before,
+    ::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
   }
 }
