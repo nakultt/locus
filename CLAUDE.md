@@ -54,6 +54,7 @@ Backend (from `backend/`, dependencies managed with [uv](https://docs.astral.sh/
 ```bash
 uv sync --extra security          # --extra security installs Semgrep
 uv run main.py                    # the whole backend: HTTP surface + the four loops
+RELOAD=true uv run main.py        # ...with auto-reload; `bun run dev` sets this for you
 uv run pytest tests/ -q
 uv run pytest tests/test_linking.py -q          # single file
 uv run pytest tests/test_linking.py::test_name  # single test

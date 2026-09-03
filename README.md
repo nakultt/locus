@@ -139,6 +139,10 @@ Run it:
 uv run main.py
 ```
 
+Reload is off by default so that deploying this command is safe. For auto-reload
+during development use `RELOAD=true uv run main.py`, or `bun run dev` from the
+repo root, which sets it for you.
+
 ### Frontend
 
 ```bash

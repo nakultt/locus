@@ -28,9 +28,13 @@ def main() -> None:
     port = int(os.getenv("PORT", "8000"))
 
     # Reload is a development convenience and is wrong in production, where it
-    # would run a file watcher over the whole tree and restart the background
-    # loops on any write. Off unless asked for.
-    reload = os.getenv("RELOAD", "true").lower() in {"1", "true", "yes"}
+    # would run a file watcher over the whole tree and restart the four
+    # background loops on any write. Off unless asked for, so the unsafe case
+    # is the one you have to opt into rather than the one you get by default.
+    #
+    # `bun run dev` sets RELOAD=true, which is what makes the documented dev
+    # command reload without making a bare `uv run main.py` unsafe to deploy.
+    reload = os.getenv("RELOAD", "false").lower() in {"1", "true", "yes"}
 
     uvicorn.run("app.main:app", host=host, port=port, reload=reload)
 

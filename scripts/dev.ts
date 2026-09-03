@@ -14,25 +14,44 @@
  */
 
 import { spawn, type Subprocess } from "bun";
+import { fileURLToPath } from "node:url";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+/**
+ * The repository root, as a URL.
+ *
+ * Kept as a URL and converted per path with `fileURLToPath` rather than read
+ * off `.pathname`. On Windows that property yields a POSIX-shaped string with
+ * a leading slash — `/E:/Github/locus/` — which is not a path any process can
+ * be spawned in, so both services would fail to start. `fileURLToPath` returns
+ * `E:\Github\locus` there and the same POSIX path everywhere else.
+ */
+const ROOT = new URL("..", import.meta.url);
+
+/** Resolve a directory beside this repo's root, in the platform's own shape. */
+const dir = (name: string): string => fileURLToPath(new URL(name, ROOT));
 
 type Service = {
   name: string;
   cmd: string[];
   cwd: string;
+  /** Added on top of the inherited environment, not a replacement for it. */
+  env?: Record<string, string>;
 };
 
 const SERVICES: Service[] = [
   {
     name: "backend",
     cmd: ["uv", "run", "main.py"],
-    cwd: `${ROOT}backend`,
+    cwd: dir("backend"),
+    // main.py defaults reload off, so that deploying it is safe. This is the
+    // development command, so it opts in — without this, `bun run dev` would
+    // not pick up backend edits and the loops would only restart by hand.
+    env: { RELOAD: "true" },
   },
   {
     name: "frontend",
     cmd: ["bun", "run", "dev"],
-    cwd: `${ROOT}frontend`,
+    cwd: dir("frontend"),
   },
 ];
 
@@ -62,7 +81,7 @@ for (const service of SERVICES) {
     cmd: service.cmd,
     cwd: service.cwd,
     stdio: ["inherit", "inherit", "inherit"],
-    env: process.env,
+    env: { ...process.env, ...service.env },
 
     // One process dying takes the pair down. Leaving the survivor running
     // hides which half failed behind a wall of connection-refused errors from
