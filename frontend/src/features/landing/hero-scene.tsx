@@ -511,37 +511,48 @@ const MIST = [
 ];
 
 /**
- * Where the sun is. Everything that claims to be lit by it — the rays, the
- * glow, the column on the water — reads this rather than repeating a literal.
+ * Where the light comes from — a point above the top-right corner, off the
+ * canvas entirely.
  *
- * The position took two corrections worth recording. At `y=596` the disc sat
- * *behind* the far ridge, so the rays had no visible source and the sky read as
- * evenly lit from nowhere. Lifted clear of the ridge it then landed squarely
- * behind the word "shipping": the headline is centred in a 56rem column, so the
- * only part of the sky that is reliably clear of type is outside `x≈1200`.
+ * There is deliberately no sun in this picture. The disc drew the eye straight
+ * to the top-right corner, which is the one place on the page nothing is
+ * happening, and it had already cost two corrections getting there: at `y=596`
+ * it sat *behind* the far ridge, and lifted clear of the ridge it landed
+ * squarely behind the word "shipping". Putting the source outside the frame
+ * keeps every consequence of it — the rays, the warm band along the horizon,
+ * the reflections on the water — while giving the composition back to the
+ * valley. Light entering from off-frame is also the more considered choice: a
+ * sun in shot is a postcard, a sun you can only infer is a photograph.
  */
-const SUN = { x: 1296, y: 424 };
+const SUN = { x: 1560, y: -150 };
 
 /**
- * God rays, fanning *down* from the sun into the valley.
+ * God rays, fanning *down* into the valley from off the top-right corner.
  *
  * Down, not up: crepuscular rays are shafts picked out by haze between a high
  * sun and the ground, and a fan pointing up from a low sun is a different
  * effect — a sunset starburst — which is what this drew first. Each wedge has
- * its apex at the sun, so the gradient (opaque at the top of the bounding box,
- * transparent at the bottom) fades them out before they reach the treeline
- * without needing to be clipped there.
+ * its apex at the source, so the gradient (opaque at the top of the bounding
+ * box, transparent at the bottom) fades them out before they reach the treeline
+ * without needing to be clipped there. With the apex now off-canvas there is no
+ * convergence point to hide, which is what the sun's own glow used to be doing.
  *
  * The widths are deliberately uneven. A fan of identical wedges at even angles
  * is a starburst; real shafts are gaps in something and come in irregular.
  */
-const SHAFTS = [11, 19, 27, 36, 44, 52, 60, 68].map((deg, i) => ({
+const SHAFTS = [21, 27, 33, 39, 45, 51, 57].map((deg, i) => ({
   deg,
   w: 10 + ((i * 29) % 26),
   o: 0.34 + ((i * 17) % 9) / 26,
   dur: 9 + i * 1.7,
   delay: -i * 2.4,
 }));
+
+/** Long enough that every wedge still has reach left when it crosses the sky.
+ *  With the apex moved off-canvas the first few hundred units are spent getting
+ *  back into frame, so the 1000 that suited a sun inside the picture left the
+ *  steeper rays petering out around the horizon. */
+const SHAFT_LEN = 1600;
 
 export function HeroScene({ className }: { className?: string }) {
   const still = useReducedMotion();
@@ -579,6 +590,10 @@ export function HeroScene({ className }: { className?: string }) {
       // `-z-10` paints behind its parent's own background under CSS painting
       // order, and an opaque ancestor then covers the whole scene.
       className={`grain pointer-events-none absolute inset-0 z-0 overflow-hidden ${className ?? ""}`}
+      // `globals.css` drops the whole scene when printing and reassigns the
+      // `on-art` tokens to the ordinary text pair, so the headline does not
+      // come out white on white once the browser discards the artwork.
+      data-hero-art=""
       aria-hidden
     >
       <svg
@@ -603,12 +618,6 @@ export function HeroScene({ className }: { className?: string }) {
             <stop offset="49%" stopColor="oklch(0.892 0.070 96)" />
             <stop offset="53%" stopColor="oklch(0.930 0.082 88)" />
           </linearGradient>
-
-          <radialGradient id="s-sun" cx="50%" cy="50%" r="50%">
-            <stop offset="0%" stopColor="oklch(0.985 0.062 92)" stopOpacity="0.96" />
-            <stop offset="32%" stopColor="oklch(0.938 0.088 86)" stopOpacity="0.44" />
-            <stop offset="100%" stopColor="oklch(0.912 0.094 82)" stopOpacity="0" />
-          </radialGradient>
 
           {/* Held bright well past halfway before it falls away. A straight
               linear fade puts most of a ray's length below a third of its
@@ -761,17 +770,17 @@ export function HeroScene({ className }: { className?: string }) {
           ))}
         </g>
 
-        {/* God rays, drawn before the sun so its glow covers the point where
-            they all converge — a blur softens an edge but cannot soften a point,
-            and eight apexes stacked on one spot is a bright wedge with a hard
-            corner otherwise. Clipped above the near treeline as well, so nothing
-            lands on the forest floor. */}
+        {/* God rays, entering from off the top-right corner. Their eight apexes
+            stack on one point, which is a bright wedge with a hard corner that a
+            blur cannot soften — that used to be hidden under the sun's glow and
+            is now simply outside the canvas. Clipped above the near treeline as
+            well, so nothing lands flat on the forest floor. */}
         <g clipPath="url(#s-above)">
           <g filter="url(#s-shaft-blur)">
             {SHAFTS.map((s, i) => (
               <polygon
                 key={i}
-                points={`0,0 ${-s.w},1000 ${s.w},1000`}
+                points={`0,0 ${-s.w},${SHAFT_LEN} ${s.w},${SHAFT_LEN}`}
                 transform={`translate(${SUN.x} ${SUN.y}) rotate(${s.deg})`}
                 fill="url(#s-shaft)"
                 opacity={s.o}
@@ -790,45 +799,6 @@ export function HeroScene({ className }: { className?: string }) {
             ))}
           </g>
         </g>
-
-        {/* The sun: right of centre and clear of the ridgeline. Centred, it
-            becomes a spotlight directly behind the headline; below the ridge —
-            where it started — the rays have no visible source and the sky reads
-            as evenly lit from nowhere.
-
-            It breathes on `scale`, not on `ry`: Framer Motion animates an SVG
-            geometry attribute only when it can read a starting value, and `ry`
-            has no computed one — it resolved to the string "undefined" and the
-            browser rejected the attribute outright. */}
-        {/* Kept tight. A wide glow lights the whole right half of the sky, and
-            the rays are then drawn over their own halo — they were present and
-            invisible at `rx=500` for exactly that reason. Pulling it in gives
-            them a darker sky to cross a few hundred units out. */}
-        <motion.ellipse
-          cx={SUN.x}
-          cy={SUN.y}
-          rx="330"
-          ry="230"
-          fill="url(#s-sun)"
-          style={{ transformBox: "fill-box", transformOrigin: "center" }}
-          {...(still
-            ? {}
-            : {
-                animate: { scaleY: [1, 1.07, 1], opacity: [0.9, 1, 0.9] },
-                transition: { duration: 17, repeat: Infinity, ease: "easeInOut" },
-              })}
-        />
-        {/* The disc itself, small and very bright. The glow above reads as haze
-            without it — light in the air, with nothing making it. */}
-        <circle cx={SUN.x} cy={SUN.y} r="34" fill="oklch(0.99 0.048 94)" opacity="0.9" />
-        <circle
-          cx={SUN.x}
-          cy={SUN.y}
-          r="76"
-          fill="oklch(0.985 0.062 92)"
-          opacity="0.42"
-          filter="url(#s-haze-soft)"
-        />
 
         {/* Cloud strata: long, thin, heavily blurred, so they read as layers of
             air rather than as the cotton wool a cloud-shaped path becomes. */}

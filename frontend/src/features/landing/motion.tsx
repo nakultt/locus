@@ -14,6 +14,15 @@ import type { ReactNode } from "react";
  *
  * Everything reveals on scroll with `once: true`. Content that re-animates each
  * time it re-enters the viewport turns scrolling back up into a slideshow.
+ *
+ * Every wrapper here carries `data-reveal`, and `globals.css` uses it to force
+ * the shown state under `@media print`. A reveal starts at `opacity: 0` and is
+ * lifted by an IntersectionObserver, which only fires for content that actually
+ * enters the viewport — but printing and Save-as-PDF render the whole document
+ * without ever scrolling it, so the observers never fire and everything below
+ * the hero comes out blank. Scrolling a real page is fine, including a jump
+ * straight to the footer and back; it is specifically no-scroll rendering that
+ * breaks, and the attribute is what lets one rule fix it.
  */
 
 const EASE = [0.32, 0.72, 0, 1] as const;
@@ -36,6 +45,7 @@ export function Reveal({
 
   return (
     <Tag
+      data-reveal=""
       className={className}
       initial={still ? false : { opacity: 0, y }}
       whileInView={still ? undefined : { opacity: 1, y: 0 }}
@@ -74,6 +84,7 @@ export function RevealGroup({
 
   return (
     <Tag
+      data-reveal=""
       className={className}
       variants={still ? undefined : variants}
       initial={still ? false : "hidden"}
@@ -101,6 +112,7 @@ export function RevealItem({
 
   return (
     <Tag
+      data-reveal=""
       className={className}
       variants={
         still

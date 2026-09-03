@@ -650,3 +650,45 @@
     }
   }
 }
+
+/* ── Printing, and anything else that renders without scrolling ────────
+   A scroll reveal starts at `opacity: 0` and is lifted by an
+   IntersectionObserver. That is correct for a person, including one who
+   jumps to the footer and scrolls back — but printing, Save-as-PDF and
+   link-preview capture render the whole document without ever scrolling it,
+   so no observer ever fires and every section below the hero comes out
+   blank. `!important` is required: Framer Motion writes the hidden state as
+   an inline style, which nothing else can outrank.
+
+   The hero needs the same treatment for the opposite reason. Its type is
+   near-white because it sits on the painted scene, and browsers drop
+   background graphics when printing — so the artwork disappears and takes
+   the legibility of the headline with it, leaving white on white. Rather
+   than restyle the hero, the two `on-art` tokens are redefined to the
+   ordinary text pair: they exist precisely so that type on artwork is
+   decided in one place, and this is that place deciding differently when
+   there is no artwork. */
+@media print {
+  [data-reveal] {
+    opacity: 1 !important;
+    transform: none !important;
+  }
+
+  [data-hero-art] {
+    display: none !important;
+  }
+
+  :root {
+    --on-art: var(--text);
+    --on-art-muted: var(--text-muted);
+    --on-art-line: var(--border);
+    --on-art-fill: transparent;
+  }
+
+  /* A dark halo drawn for separation against a sky, over a headline that is
+     now dark on paper. */
+  h1,
+  p {
+    text-shadow: none !important;
+  }
+}
