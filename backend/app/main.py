@@ -78,15 +78,34 @@ allowed_origins.extend(
 )
 
 # Any localhost port, for development. Next picks the next free port when 3000
-# is taken, so a fixed list means CORS silently breaks whenever that happens. A
-# regex covers every dev port without loosening production, which still only
-# matches the explicit origins above.
+# is taken, so a fixed list means CORS silently breaks whenever that happens.
 LOCALHOST_ORIGIN_PATTERN = r"http://(localhost|127\.0\.0\.1):\d+"
+
+# ...but only in development.
+#
+# The comment this replaces claimed the regex did not loosen production. It
+# did: it was passed unconditionally, so a deployed instance accepted
+# credentialed cross-origin requests from *any* page served on any localhost
+# port — a locally installed application, a dev server for an untrusted
+# repository, anything on the victim's own machine listening over HTTP.
+#
+# The blast radius today is small, because this API authenticates with a bearer
+# token out of the frontend's own storage rather than a cookie, and a page on a
+# different origin cannot read that. It is still a hole that costs nothing to
+# close, and it stops being small the moment anything here starts using cookies.
+#
+# `ENV` is read rather than inverted from a debug flag so the safe state is the
+# one you get by not configuring anything.
+IS_DEVELOPMENT = os.getenv("ENV", "development").lower() not in {
+    "production",
+    "prod",
+    "staging",
+}
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_origin_regex=LOCALHOST_ORIGIN_PATTERN,
+    allow_origin_regex=LOCALHOST_ORIGIN_PATTERN if IS_DEVELOPMENT else None,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
