@@ -14,8 +14,12 @@
  */
 
 import { spawn, type Subprocess } from "bun";
+import { fileURLToPath } from "node:url";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+// fileURLToPath, not `.pathname`: on Windows the pathname of a file URL keeps a
+// leading slash ("/E:/Github/locus/"), which Bun cannot use as a cwd — the spawn
+// then fails as ENOENT on the *command*, which reads as "uv is not installed".
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 type Service = {
   name: string;
