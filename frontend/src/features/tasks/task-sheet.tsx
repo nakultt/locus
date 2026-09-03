@@ -67,6 +67,25 @@ const SOURCE_CAPTION: Record<string, string> = {
   handed_back: "Handed back to you after the agent ran out of attempts.",
 };
 
+/**
+ * Fill in any list the detail response left out.
+ *
+ * The same reasoning as the board's own normaliser: a dozen reads below call
+ * `.length` or `.map` on these, and a response missing one key takes the sheet
+ * down with a runtime error rather than rendering the parts that did arrive.
+ */
+const normalise = (detail: TaskDetail): TaskDetail => ({
+  ...detail,
+  events: detail.events ?? [],
+  reviews: (detail.reviews ?? []).map((review) => ({
+    ...review,
+    rounds: review.rounds ?? [],
+    pending_asks: review.pending_asks ?? [],
+  })),
+  reviewer_contacts: detail.reviewer_contacts ?? [],
+  qa_recipients: detail.qa_recipients ?? [],
+});
+
 const TRIGGER_LABEL: Record<string, string> = {
   initial: "first attempt",
   changes_requested: "after a reviewer asked for changes",
@@ -98,7 +117,7 @@ export function TaskSheet({
     if (!key) return;
     setLoading(true);
     try {
-      setDetail(await getTaskDetail(key));
+      setDetail(normalise(await getTaskDetail(key)));
     } catch (e) {
       toast.error(
         "Could not load this task",
@@ -110,7 +129,8 @@ export function TaskSheet({
     // A failure here costs the history, never the task: the attempts are
     // context on the mode, and the pipeline is the point of the sheet.
     try {
-      setAttempts(await getTaskAttempts(key));
+      const rows = await getTaskAttempts(key);
+      setAttempts(Array.isArray(rows) ? rows : []);
     } catch {
       setAttempts([]);
     }
@@ -165,7 +185,8 @@ export function TaskSheet({
           run.error ?? "That attempt is spent."
         );
       }
-      setAttempts(await getTaskAttempts(card.key));
+      const rows = await getTaskAttempts(card.key);
+      setAttempts(Array.isArray(rows) ? rows : []);
       onChanged();
     } catch (e) {
       toast.error(
@@ -204,7 +225,7 @@ export function TaskSheet({
     {
       value: "messages" as const,
       label: "Messages",
-      count: detail?.events.length,
+      count: detail?.events.length ?? 0,
     },
     { value: "agent" as const, label: "Agent", count: attempts.length || undefined },
   ];
@@ -390,11 +411,11 @@ function OverviewTab({
   return (
     <div className="space-y-6">
       {/* What is waiting on you, first. */}
-      {card.items.length > 0 && (
+      {(card.items ?? []).length > 0 && (
         <Panel tone="accent" className="p-4">
           <Kicker className="text-accent-strong">Needs you</Kicker>
           <div className="mt-3 space-y-4">
-            {card.items.map((item, i) => (
+            {(card.items ?? []).map((item, i) => (
               <WorklistItemRow key={i} item={item} />
             ))}
           </div>

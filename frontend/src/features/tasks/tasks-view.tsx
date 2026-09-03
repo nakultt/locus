@@ -60,6 +60,23 @@ import { JobRow } from "./runs";
 
 type Filter = "needs_you" | "in_flight" | "done" | "all";
 
+/**
+ * Fill in any list the response left out.
+ *
+ * Normalised once, here, rather than defended against at each of the dozen
+ * places below that call `.length`, `.map` or spread one of these. A response
+ * missing a key — an older backend, a proxy answering 200 with an error body —
+ * otherwise takes the whole board down with a runtime error, which is a far
+ * worse answer than an empty queue.
+ */
+const normalise = (board: TaskBoard): TaskBoard => ({
+  ...board,
+  needs_you: board.needs_you ?? [],
+  in_flight: board.in_flight ?? [],
+  recently_done: board.recently_done ?? [],
+  unavailable: board.unavailable ?? [],
+});
+
 export default function TasksView() {
   const { user } = useAuth();
   const toast = useToast();
@@ -85,9 +102,9 @@ export default function TasksView() {
           getPRAgentSummary(),
           listPRJobs(),
         ]);
-        setBoard(b);
+        setBoard(normalise(b));
         setSummary(s);
-        setJobs(j);
+        setJobs(Array.isArray(j) ? j : []);
       } catch (e) {
         toast.error(
           "Could not load your work",
@@ -114,9 +131,11 @@ export default function TasksView() {
   // hand it the fresh copy of the same card rather than a stale snapshot.
   useEffect(() => {
     if (!selected || !board) return;
-    const fresh = [...board.needs_you, ...board.in_flight, ...(board.recently_done ?? [])].find(
-      (c) => c.key === selected.key
-    );
+    const fresh = [
+      ...board.needs_you,
+      ...board.in_flight,
+      ...board.recently_done,
+    ].find((c) => c.key === selected.key);
     if (fresh && fresh !== selected) setSelected(fresh);
   }, [board, selected]);
 
@@ -124,11 +143,11 @@ export default function TasksView() {
     () => ({
       needs_you: board?.needs_you.length ?? 0,
       in_flight: board?.in_flight.length ?? 0,
-      done: board?.recently_done?.length ?? 0,
+      done: board?.recently_done.length ?? 0,
       all:
         (board?.needs_you.length ?? 0) +
         (board?.in_flight.length ?? 0) +
-        (board?.recently_done?.length ?? 0),
+        (board?.recently_done.length ?? 0),
     }),
     [board]
   );
@@ -141,11 +160,11 @@ export default function TasksView() {
         : filter === "in_flight"
           ? board.in_flight
           : filter === "done"
-            ? (board.recently_done ?? [])
+            ? board.recently_done
             : [
                 ...board.needs_you,
                 ...board.in_flight,
-                ...(board.recently_done ?? []),
+                ...board.recently_done,
               ];
 
     const q = query.trim().toLowerCase();

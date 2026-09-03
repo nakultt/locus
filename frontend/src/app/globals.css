@@ -381,6 +381,12 @@
     mix-blend-mode: soft-light;
   }
 
+  /* `soft-light` over a dark ground reads far stronger than the same texture
+     over paper, so the dark theme takes a lighter dose of it. */
+  .dark .grain::after {
+    opacity: 0.18;
+  }
+
   .animate-in-up {
     animation: in-up var(--dur-slow) var(--ease) both;
   }

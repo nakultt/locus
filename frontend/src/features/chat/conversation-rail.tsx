@@ -32,7 +32,13 @@ export function useConversations() {
     }
     try {
       const response = await getUserConversations();
-      setConversations(response.conversations);
+      // Defaulted rather than trusted. A response missing this key — an older
+      // backend, a proxy returning an error body with a 200 — put `undefined`
+      // into state, and the header below calls `.find` on it, which took the
+      // whole chat page down with a runtime error instead of showing an empty
+      // rail. The list is decoration on the conversation; it must not be able
+      // to break it.
+      setConversations(response?.conversations ?? []);
     } catch {
       // A failed list costs the rail, never the conversation on screen.
     } finally {

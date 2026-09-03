@@ -229,8 +229,13 @@ export default function SchedulerView() {
   const refresh = useCallback(async () => {
     try {
       const data = await getScheduleConflicts();
-      setConflicts(data.conflicts);
-      setTotalEvents(data.total_events);
+      // Defaulted rather than trusted: a response missing `conflicts` put
+      // `undefined` into state and the render below calls `.length` on it,
+      // which takes the whole page down. An unreadable calendar has to degrade
+      // to "nothing to show", the same way it degrades to free rather than
+      // busy everywhere else.
+      setConflicts(data?.conflicts ?? []);
+      setTotalEvents(data?.total_events ?? 0);
       setUnreadable(null);
     } catch (e) {
       setUnreadable(
@@ -245,8 +250,12 @@ export default function SchedulerView() {
     refresh();
     // Both are decoration on the page below. A failure costs the chip or the
     // strip, never the conflicts view that is the point of the page.
-    getAvailability().then(setAvailability).catch(() => setAvailability(null));
-    getInterruptions().then(setInterruptions).catch(() => setInterruptions([]));
+    getAvailability()
+      .then((a) => setAvailability(a?.state ? a : null))
+      .catch(() => setAvailability(null));
+    getInterruptions()
+      .then((rows) => setInterruptions(Array.isArray(rows) ? rows : []))
+      .catch(() => setInterruptions([]));
   }, [refresh]);
 
   const plan = async () => {
@@ -272,15 +281,19 @@ export default function SchedulerView() {
     setApplying(true);
     try {
       const result = await applySchedule(proposal.moves, proposal.additions);
-      if (result.failed.length > 0) {
+      const applied = result?.applied ?? [];
+      const failed = result?.failed ?? [];
+      // A partial apply is reported as a partial apply. Rolling it up as
+      // success would leave someone believing invites went out that did not.
+      if (failed.length > 0) {
         toast.error(
-          `${result.applied.length} applied, ${result.failed.length} failed`,
-          result.failed.join("; ")
+          `${applied.length} applied, ${failed.length} failed`,
+          failed.join("; ")
         );
       } else {
         toast.success(
-          `Calendar updated`,
-          `${result.applied.length} change${result.applied.length === 1 ? "" : "s"} applied.`
+          "Calendar updated",
+          `${applied.length} change${applied.length === 1 ? "" : "s"} applied.`
         );
       }
       setProposal(null);
