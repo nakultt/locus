@@ -109,9 +109,10 @@ export function TaskRow({
           {/* Handles onto the work. Linked branches are hidden once a pull
               request exists: the PR is the better handle on the same work, and
               showing both reads as two separate things happening. */}
-          {(card.pull_requests.length > 0 || card.linked_branches.length > 0) && (
+          {((card.pull_requests ?? []).length > 0 ||
+            (card.linked_branches ?? []).length > 0) && (
             <div className="mt-3 flex flex-wrap items-center gap-1.5">
-              {card.pull_requests.length > 0
+              {(card.pull_requests ?? []).length > 0
                 ? card.pull_requests.map((pr) => {
                     const review = pr.review_state
                       ? REVIEW_STATE[pr.review_state]
@@ -128,7 +129,7 @@ export function TaskRow({
                       </span>
                     );
                   })
-                : card.linked_branches.map((branch) => (
+                : (card.linked_branches ?? []).map((branch) => (
                     <Chip key={branch.name} icon={<GitBranch />}>
                       {branch.name}
                     </Chip>
@@ -136,7 +137,7 @@ export function TaskRow({
             </div>
           )}
 
-          <TaskProgress stages={card.stages} className="mt-4" />
+          <TaskProgress stages={card.stages ?? []} className="mt-4" />
         </div>
 
         <div className="flex shrink-0 flex-col items-end gap-2">

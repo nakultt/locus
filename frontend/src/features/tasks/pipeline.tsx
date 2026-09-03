@@ -58,8 +58,18 @@ export function TaskProgress({
 }) {
   if (stages.length === 0) return null;
 
+  // A *container* query, not a viewport one. This rail renders both across a
+  // full-width board row and inside a 736px sheet on the same screen, so a
+  // `lg:` breakpoint showed nine labels in both and overflowed the narrower of
+  // them. Measuring the box it is actually in is the only thing that answers
+  // the question being asked. It scrolls rather than truncating when even that
+  // is not enough, because a rail with its tail cut off silently misreports
+  // how far the work has got.
   return (
-    <ol className={cn("flex items-center", className)} aria-label="Pipeline progress">
+    <ol
+      className={cn("@container scroll-x flex items-center pb-0.5", className)}
+      aria-label="Pipeline progress"
+    >
       {stages.map((stage, i) => {
         const state = stage.state;
         const isLast = i === stages.length - 1;
@@ -98,7 +108,7 @@ export function TaskProgress({
                   below the rail. */}
               <span
                 className={cn(
-                  "ml-2 hidden whitespace-nowrap text-xs lg:inline",
+                  "ml-2 hidden whitespace-nowrap text-xs @3xl:inline",
                   state === "running"
                     ? "font-medium text-ink"
                     : filled
@@ -114,7 +124,7 @@ export function TaskProgress({
               <span
                 aria-hidden
                 className={cn(
-                  "mx-2 h-px w-4 shrink-0 lg:w-6",
+                  "mx-1 h-px w-2 shrink-0 @sm:mx-2 @sm:w-4 @3xl:w-6",
                   filled ? "bg-success/50" : "bg-line"
                 )}
               />

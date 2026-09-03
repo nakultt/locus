@@ -312,7 +312,8 @@ function SystemTab() {
   // is fetched once rather than on the 15s model-status interval.
   const refreshHealth = useCallback(async () => {
     try {
-      setHealth(await fetchIntegrationHealth());
+      const rows = await fetchIntegrationHealth();
+      setHealth(Array.isArray(rows) ? rows : []);
     } catch {
       // A failure here must not blank the page; the section stays empty.
     }
