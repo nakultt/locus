@@ -459,16 +459,39 @@ export async function getSupportedCommands(): Promise<Record<string, unknown>> {
 // ============== Settings API ==============
 
 /**
- * Status of the local model backend (MoE Model Manager).
- * Locus runs entirely on local models; there are no API keys to manage.
+ * One backend Locus can be pointed at, and whether it is ready to use.
+ * The key itself is never sent to the browser — only whether one is set.
+ */
+export interface LLMProviderOption {
+  id: string;
+  label: string;
+  is_local: boolean;
+  active: boolean;
+  api_key_env: string;
+  api_key_configured: boolean;
+  fast_model: string;
+  smart_model: string;
+}
+
+/**
+ * Status of the configured model backend.
+ *
+ * Locus defaults to the local MoE Model Manager. `LLM_PROVIDER` on the backend
+ * points it at OpenAI, Anthropic or Gemini instead, which changes where the
+ * code the analysis passes read is sent — so the status names the active
+ * provider rather than assuming local.
  */
 export interface LLMStatus {
   available: boolean;
   message: string;
   provider?: string;
+  is_local?: boolean;
   base_url?: string;
   fast_model?: string;
   smart_model?: string;
+  api_key_env?: string | null;
+  api_key_configured?: boolean;
+  providers?: LLMProviderOption[];
 }
 
 export async function checkLLMStatus(): Promise<LLMStatus> {
