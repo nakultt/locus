@@ -1,4 +1,3 @@
-import { formatDateTime } from "@/lib/datetime";
 import type {
   CommChannel,
   CommDirection,
@@ -7,67 +6,93 @@ import type {
   ReviewState,
   SecuritySeverity,
   StageState,
+  TaskStage,
   WorklistKind,
 } from "@/lib/api";
+import { formatDateTime } from "@/lib/datetime";
+import type { DotTone } from "@/components/ui/badge";
 
 /**
- * Style vocabulary shared by the task board and the settings view.
+ * The style vocabulary shared across the work surface.
  *
- * Kept in one module so a severity, a priority and a loop mean the same
- * colour everywhere. A finding that reads red on one panel and orange on
- * another trains people to stop reading the colour at all.
+ * Kept in one module so a severity, a priority and a loop mean the same thing
+ * everywhere. A finding that reads red on one panel and orange on another
+ * trains people to stop reading the colour at all.
+ *
+ * Everything here resolves to a semantic token rather than a Tailwind palette
+ * colour. The version this replaces wrote `bg-red-500/10 text-red-600
+ * dark:text-red-400 border-red-500/30` inline at each site, which is four
+ * chances to get one state wrong and no way to change the danger colour once.
  */
 
-export const SEVERITY_STYLE: Record<SecuritySeverity, string> = {
-  critical: "bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/30",
-  high: "bg-orange-500/10 text-orange-600 dark:text-orange-400 border-orange-500/30",
-  medium: "bg-yellow-500/10 text-yellow-700 dark:text-yellow-400 border-yellow-500/30",
-  low: "bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/30",
-  info: "bg-muted text-muted-foreground border-border",
+/* ── Tones ────────────────────────────────────────────────────────────────
+   `Tone` is the single vocabulary the badges, dots and panels all speak. */
+
+export type Tone = "neutral" | "accent" | "success" | "warning" | "danger" | "info";
+
+export const SEVERITY_TONE: Record<SecuritySeverity, Tone> = {
+  critical: "danger",
+  high: "danger",
+  medium: "warning",
+  low: "info",
+  info: "neutral",
 };
 
-// P1 shares the red of a critical finding: both mean "do not merge".
-export const PRIORITY_STYLE: Record<ReviewPriority, string> = {
-  p1: "bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/30",
-  p2: "bg-orange-500/10 text-orange-600 dark:text-orange-400 border-orange-500/30",
-  p3: "bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/30",
+// P1 shares the tone of a critical finding: both mean "do not merge".
+export const PRIORITY_TONE: Record<ReviewPriority, Tone> = {
+  p1: "danger",
+  p2: "warning",
+  p3: "info",
 };
 
-export const STATUS_STYLE: Record<string, string> = {
-  completed: "bg-green-500/10 text-green-600 dark:text-green-400",
-  failed: "bg-red-500/10 text-red-600 dark:text-red-400",
-  running: "bg-blue-500/10 text-blue-600 dark:text-blue-400",
-  queued: "bg-muted text-muted-foreground",
+export const JOB_STATUS: Record<string, { label: string; tone: Tone; pulse?: boolean }> = {
+  completed: { label: "Completed", tone: "success" },
+  failed: { label: "Failed", tone: "danger" },
+  running: { label: "Running", tone: "info", pulse: true },
+  queued: { label: "Queued", tone: "neutral" },
 };
 
-export const STAGE_ICON: Record<StageState, { glyph: string; tone: string }> = {
-  done: { glyph: "✓", tone: "text-green-500" },
-  failed: { glyph: "✕", tone: "text-red-500" },
-  skipped: { glyph: "—", tone: "text-muted-foreground" },
-  running: { glyph: "●", tone: "text-blue-500 animate-pulse" },
-  pending: { glyph: "○", tone: "text-muted-foreground" },
+export const REVIEW_STATE: Record<ReviewState, { label: string; tone: Tone }> = {
+  awaiting_review: { label: "Awaiting review", tone: "warning" },
+  changes_requested: { label: "Changes requested", tone: "danger" },
+  approved: { label: "Approved", tone: "success" },
+  merged: { label: "Merged", tone: "accent" },
 };
 
-export const REVIEW_STATE_STYLE: Record<
-  ReviewState,
-  { label: string; className: string }
-> = {
-  awaiting_review: {
-    label: "Awaiting review",
-    className: "bg-amber-500/10 text-amber-600 dark:text-amber-400",
-  },
-  changes_requested: {
-    label: "Changes requested",
-    className: "bg-orange-500/10 text-orange-600 dark:text-orange-400",
-  },
-  approved: {
-    label: "Approved",
-    className: "bg-green-500/10 text-green-600 dark:text-green-400",
-  },
-  merged: {
-    label: "Merged",
-    className: "bg-purple-500/10 text-purple-600 dark:text-purple-400",
-  },
+export const LOOP: Record<CommLoop, { label: string; tone: Tone }> = {
+  context: { label: "Context", tone: "neutral" },
+  review: { label: "Review", tone: "info" },
+  qa: { label: "Testing", tone: "success" },
+};
+
+export const KIND: Record<WorklistKind, { label: string; tone: Tone }> = {
+  changes_requested: { label: "Changes requested", tone: "danger" },
+  qa_rejected: { label: "Testing failed", tone: "danger" },
+  qa_unanswered: { label: "No word from testing", tone: "warning" },
+  approved_not_merged: { label: "Approved, not merged", tone: "success" },
+  delivery_failed: { label: "Message not delivered", tone: "warning" },
+  awaiting_review: { label: "Waiting on review", tone: "neutral" },
+};
+
+/**
+ * The stage a task has reached, in words and in a tone.
+ *
+ * `merged` is deliberately not a "done" tone. Merged and done are different
+ * claims, and the whole reason the QA loop exists is that a human still
+ * confirms the second one.
+ */
+export const TASK_STAGE: Record<TaskStage, { label: string; tone: Tone }> = {
+  assigned: { label: "Assigned", tone: "neutral" },
+  authoring: { label: "Being written", tone: "accent" },
+  branch_created: { label: "Branch open", tone: "neutral" },
+  in_progress: { label: "In progress", tone: "info" },
+  analyzed: { label: "Analysed", tone: "info" },
+  in_review: { label: "In review", tone: "info" },
+  changes_requested: { label: "Changes requested", tone: "danger" },
+  approved: { label: "Approved", tone: "success" },
+  merged: { label: "Merged", tone: "accent" },
+  testing: { label: "Testing", tone: "accent" },
+  done: { label: "Done", tone: "success" },
 };
 
 export const OUTCOME_LABEL: Record<string, string> = {
@@ -78,67 +103,25 @@ export const OUTCOME_LABEL: Record<string, string> = {
   resubmitted: "Author pushed changes",
 };
 
-export const KIND_STYLE: Record<
-  WorklistKind,
-  { label: string; className: string; dot: string }
-> = {
-  changes_requested: {
-    label: "Changes requested",
-    className: "text-orange-600 dark:text-orange-400",
-    dot: "bg-orange-500",
-  },
-  qa_rejected: {
-    label: "Testing failed",
-    className: "text-red-600 dark:text-red-400",
-    dot: "bg-red-500",
-  },
-  qa_unanswered: {
-    label: "No word from testing",
-    className: "text-amber-600 dark:text-amber-400",
-    dot: "bg-amber-500",
-  },
-  approved_not_merged: {
-    label: "Approved, not merged",
-    className: "text-green-600 dark:text-green-400",
-    dot: "bg-green-500",
-  },
-  delivery_failed: {
-    label: "Message not delivered",
-    className: "text-yellow-600 dark:text-yellow-400",
-    dot: "bg-yellow-500",
-  },
-  awaiting_review: {
-    label: "Waiting on review",
-    className: "text-muted-foreground",
-    dot: "bg-muted-foreground",
-  },
-};
-
-export const LOOP_STYLE: Record<CommLoop, { label: string; className: string }> = {
-  context: {
-    label: "Context",
-    className: "bg-slate-500/10 text-slate-600 dark:text-slate-300",
-  },
-  review: {
-    label: "Review loop",
-    className: "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400",
-  },
-  qa: {
-    label: "Testing loop",
-    className: "bg-teal-500/10 text-teal-600 dark:text-teal-400",
-  },
-};
-
-export const DIRECTION_GLYPH: Record<CommDirection, { glyph: string; tone: string }> = {
-  searched: { glyph: "🔍", tone: "text-muted-foreground" },
-  sent: { glyph: "↗", tone: "text-blue-500" },
-  received: { glyph: "↙", tone: "text-green-600 dark:text-green-400" },
-};
-
 export const CHANNEL_LABEL: Record<CommChannel, string> = {
   slack: "Slack",
   email: "Email",
   github: "GitHub",
+};
+
+export const DIRECTION_LABEL: Record<CommDirection, string> = {
+  searched: "Searched",
+  sent: "Sent",
+  received: "Received",
+};
+
+/** A pipeline step's state, as a dot tone. */
+export const STAGE_TONE: Record<StageState, DotTone> = {
+  done: "success",
+  failed: "danger",
+  skipped: "neutral",
+  running: "info",
+  pending: "neutral",
 };
 
 /** Which tool calls belong under which pipeline stage. */

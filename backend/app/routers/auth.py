@@ -11,11 +11,39 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app import crud, models, schemas
-from app.core import security
+from app.core import rate_limit, security
 from app.core.database import get_db
 from app.core.dependencies import get_current_user
 
 router = APIRouter()
+
+# Failed sign-ins, throttled.
+#
+# `/auth/login` accepted unlimited password guesses against any address someone
+# knew, at whatever rate they could send them. Ten failures inside fifteen
+# minutes is far above anything a person typing their own password reaches and
+# far below what guessing needs.
+#
+# Keyed by **email, not IP**, which is the important decision here. Behind a
+# load balancer every request carries the proxy's address, so an IP-keyed
+# counter would let one attacker lock out every user of the product at once —
+# turning a brute-force defence into a denial-of-service lever. Reading
+# `X-Forwarded-For` instead would fix that and hand the attacker a header they
+# can set to anything they like. The account being guessed at is the thing
+# actually under attack, so that is what is counted.
+#
+# The residual cost is that someone who knows an address can keep that one
+# account throttled by failing on purpose. That is the standard trade for this
+# control, it expires on its own, and it is strictly better than the
+# alternative of no limit at all.
+MAX_FAILED_LOGINS = 10
+LOGIN_WINDOW_SECONDS = 15 * 60
+
+
+def _login_bucket(email: str) -> str:
+    # Normalised, or `Alice@x.com` and `alice@x.com` would be ten guesses each
+    # against an account that `crud.authenticate_user` treats as one.
+    return f"login:{email.strip().lower()}"
 
 # Services the connect endpoint accepts.
 VALID_SERVICES = frozenset({
@@ -65,12 +93,32 @@ async def login(
     db: Session = Depends(get_db),
 ) -> schemas.UserResponse:
     """Authenticate with email and password, returning a JWT."""
+    bucket = _login_bucket(credentials.email)
+
+    # Checked before the password is verified, so a locked-out attacker cannot
+    # keep spending bcrypt work on the server either.
+    if rate_limit.count(bucket, LOGIN_WINDOW_SECONDS) >= MAX_FAILED_LOGINS:
+        wait = rate_limit.retry_after(bucket, LOGIN_WINDOW_SECONDS)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                "Too many failed sign-in attempts for this account. "
+                f"Try again in {wait} seconds."
+            ),
+            headers={"Retry-After": str(wait)},
+        )
+
     user = crud.authenticate_user(db, credentials.email, credentials.password)
     if not user:
+        rate_limit.record(bucket, LOGIN_WINDOW_SECONDS)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
         )
+
+    # A success clears the history: someone whose password was being guessed at
+    # is not left throttled the moment they get in themselves.
+    rate_limit.clear(bucket)
 
     response = schemas.UserResponse.model_validate(user)
     response.token = security.create_access_token(
