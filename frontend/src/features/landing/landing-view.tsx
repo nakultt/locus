@@ -17,7 +17,7 @@ import {
   X,
 } from "lucide-react";
 import { useAuth } from "@/features/auth/auth-context";
-import { HeroBackdrop } from "@/features/landing/hero-backdrop";
+import { HeroScene } from "@/features/landing/hero-scene";
 import { HeroDemo } from "@/features/landing/hero-demo";
 import { ToolMarquee } from "@/features/landing/marquee";
 import { Reveal, RevealGroup, RevealItem, RevealWords } from "@/features/landing/motion";
@@ -132,7 +132,12 @@ export default function LandingView() {
         />
       )}
 
-      {/* ── Nav ───────────────────────────────────────────────────────────── */}
+      {/* ── Nav ─────────────────────────────────────────────────────────────
+          Two states, because it sits over two different grounds. Unscrolled it
+          floats on the hero painting and everything in it switches to the
+          `on-art` pair; scrolled it is over the page and reverts to the ordinary
+          tokens. Nothing here is a colour literal — a bar that hardcoded white
+          would be unreadable the moment it left the image. */}
       <header
         className={cn(
           "sticky top-0 z-40 transition-colors duration-[--dur]",
@@ -143,18 +148,33 @@ export default function LandingView() {
       >
         <div className="mx-auto flex h-18 max-w-[80rem] items-center gap-4 px-5 sm:px-8">
           <Link href="/" aria-label="Locus home" className="shrink-0">
-            <Wordmark />
+            <Wordmark
+              className={cn(
+                "transition-colors duration-[--dur]",
+                !scrolled && "text-on-art"
+              )}
+            />
           </Link>
 
           <nav
             aria-label="Sections"
-            className="absolute left-1/2 hidden -translate-x-1/2 items-center gap-1 rounded-pill border border-line bg-surface/90 p-1 shadow-sm backdrop-blur md:flex"
+            className={cn(
+              "absolute left-1/2 hidden -translate-x-1/2 items-center gap-1 rounded-pill border p-1 backdrop-blur transition-colors duration-[--dur] md:flex",
+              scrolled
+                ? "border-line bg-surface/90 shadow-sm"
+                : "border-on-art-line bg-on-art-fill"
+            )}
           >
             {SECTIONS.map((s) => (
               <a
                 key={s.href}
                 href={s.href}
-                className="rounded-pill px-4 py-1.5 text-sm font-medium text-muted transition-colors hover:bg-surface-2 hover:text-ink"
+                className={cn(
+                  "rounded-pill px-4 py-1.5 text-sm font-medium transition-colors",
+                  scrolled
+                    ? "text-muted hover:bg-surface-2 hover:text-ink"
+                    : "text-on-art-muted hover:bg-on-art-fill hover:text-on-art"
+                )}
               >
                 {s.label}
               </a>
@@ -162,9 +182,21 @@ export default function LandingView() {
           </nav>
 
           <div className="ml-auto flex items-center gap-2">
-            <Button asChild variant="ghost" size="md" className="hidden sm:inline-flex">
+            <Button
+              asChild
+              variant="ghost"
+              size="md"
+              className={cn(
+                "hidden sm:inline-flex",
+                !scrolled &&
+                  "text-on-art-muted hover:bg-on-art-fill hover:text-on-art"
+              )}
+            >
               <Link href="/login">Sign in</Link>
             </Button>
+            {/* `primary` needs no over-art variant: it is ink on cream in one
+                theme and cream on ink in the other, and both carry against a
+                mid-value sky. */}
             <Button asChild size="md" className="hidden sm:inline-flex">
               <Link href={primary.href}>{primary.label}</Link>
             </Button>
@@ -173,7 +205,12 @@ export default function LandingView() {
               onClick={() => setMenuOpen((v) => !v)}
               aria-expanded={menuOpen}
               aria-label={menuOpen ? "Close menu" : "Open menu"}
-              className="flex size-9.5 items-center justify-center rounded-pill border border-line bg-surface text-ink md:hidden"
+              className={cn(
+                "flex size-9.5 items-center justify-center rounded-pill border backdrop-blur transition-colors md:hidden",
+                scrolled || menuOpen
+                  ? "border-line bg-surface text-ink"
+                  : "border-on-art-line bg-on-art-fill text-on-art"
+              )}
             >
               {menuOpen ? <X className="size-4" /> : <Menu className="size-4" />}
             </button>
@@ -206,13 +243,20 @@ export default function LandingView() {
         )}
       </header>
 
-      {/* ── Hero ──────────────────────────────────────────────────────────── */}
-      <section className="relative overflow-hidden px-5 pb-20 pt-10 sm:px-8 sm:pt-16">
-        <HeroBackdrop />
+      {/* ── Hero ────────────────────────────────────────────────────────────
+          `-mt-18` is the height of the bar above it. The painting has to run to
+          the top of the window — a picture that starts below a strip of page
+          colour reads as a banner someone dropped in, not as the ground the
+          product is standing on — and the bar stays `sticky` for the whole
+          document rather than being nested in here, where it would scroll away
+          after the first screen. The padding puts back exactly what the negative
+          margin took. */}
+      <section className="relative -mt-18 overflow-hidden px-5 pb-24 pt-28 sm:px-8 sm:pt-36">
+        <HeroScene />
 
         <div className="relative z-10 mx-auto max-w-4xl text-center">
           <motion.span
-            className="eyebrow"
+            className="eyebrow eyebrow-art"
             initial={still ? false : { opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.5, ease: [0.32, 0.72, 0, 1] }}
@@ -221,8 +265,15 @@ export default function LandingView() {
             Ticket to sign-off, without the coordination
           </motion.span>
 
-          <h1 className="mt-7 text-balance text-[clamp(2.75rem,7.5vw,5rem)] font-normal leading-[1.02] tracking-[-0.035em] text-ink">
-            <RevealWords text="The work between" className="block text-muted" />
+          {/* Set on the picture, so the type takes the `on-art` pair rather than
+              `ink`/`muted`. The shadow is doing real work rather than styling:
+              the sky behind the headline runs from deep blue to a bright band of
+              sun across its width, and a light letterform crossing that boundary
+              loses its edge exactly where the sun is. Two of them — a tight one
+              for the edge and a wide one for separation — because a single wide
+              shadow strong enough to separate reads as a glow. */}
+          <h1 className="mt-7 text-balance text-[clamp(2.75rem,7.5vw,5rem)] font-normal leading-[1.02] tracking-[-0.035em] text-on-art [text-shadow:0_1px_2px_oklch(0.24_0.05_252/0.34),0_2px_28px_oklch(0.24_0.05_252/0.3)]">
+            <RevealWords text="The work between" className="block text-on-art-muted" />
             <RevealWords
               text="writing it and shipping it"
               className="block"
@@ -231,7 +282,7 @@ export default function LandingView() {
           </h1>
 
           <motion.p
-            className="mx-auto mt-6 max-w-xl text-pretty text-body leading-relaxed text-muted sm:text-lg"
+            className="mx-auto mt-6 max-w-xl text-pretty text-body leading-relaxed text-on-art-muted [text-shadow:0_1px_2px_oklch(0.24_0.05_252/0.4),0_1px_18px_oklch(0.24_0.05_252/0.42)] sm:text-lg"
             initial={still ? false : { opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.6, delay: 0.5, ease: [0.32, 0.72, 0, 1] }}
@@ -252,7 +303,7 @@ export default function LandingView() {
                 on the page shares, which is what makes it findable. */}
             <Link
               href={primary.href}
-              className="group inline-flex h-14 items-center gap-3 rounded-pill bg-primary pl-2 pr-7 text-primary-fg transition-colors hover:bg-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+              className="group inline-flex h-14 items-center gap-3 rounded-pill bg-primary pl-2 pr-7 text-primary-fg shadow-pop transition-colors hover:bg-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
             >
               <span className="flex size-10 items-center justify-center rounded-pill bg-accent text-accent-fg transition-transform duration-[--dur] ease-[--ease] group-hover:translate-x-0.5">
                 <ArrowRight className="size-4.5" aria-hidden />
@@ -260,16 +311,24 @@ export default function LandingView() {
               <span className="text-body font-medium">{primary.label}</span>
             </Link>
 
-            <Button asChild variant="secondary" size="xl" className="w-full sm:w-auto">
-              <a href="#pipeline">See how it works</a>
-            </Button>
+            {/* Glass rather than the `secondary` pill. A filled surface here
+                punches a page-coloured hole in the painting, which is the one
+                thing that makes a hero image look pasted on. */}
+            <a
+              href="#pipeline"
+              className="inline-flex h-14 w-full items-center justify-center rounded-pill border border-on-art-line bg-on-art-fill px-7 text-body font-medium text-on-art backdrop-blur-md transition-colors hover:bg-on-art-line focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:w-auto"
+            >
+              See how it works
+            </a>
           </motion.div>
         </div>
 
         {/* The product, running. Not a screenshot — the same nine stages the
-            board renders, advancing on a timer. */}
+            board renders, advancing on a timer. It overlaps the foreground of
+            the painting deliberately: the panel is opaque and sharp where
+            everything behind it is soft, which is what puts it in front. */}
         <motion.div
-          className="relative z-10 mx-auto mt-16 max-w-4xl"
+          className="relative z-10 mx-auto mt-16 max-w-4xl [&>*]:shadow-pop"
           initial={still ? false : { opacity: 0, y: 28 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.85, delay: 0.75, ease: [0.32, 0.72, 0, 1] }}
