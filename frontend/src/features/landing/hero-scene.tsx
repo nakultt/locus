@@ -589,7 +589,12 @@ export function HeroScene({ className }: { className?: string }) {
       // `z-0` with the content at `z-10`, never a negative z-index: a child at
       // `-z-10` paints behind its parent's own background under CSS painting
       // order, and an opaque ancestor then covers the whole scene.
-      className={`grain pointer-events-none absolute inset-0 z-0 overflow-hidden ${className ?? ""}`}
+      // `hs-layer` is what keeps the animation from touching the rest of the
+      // page: `contain: paint` plus a promoted layer means a selection, a
+      // hover on the CTA or the nav swapping colour repaints that element
+      // rather than re-rasterising a thousand filtered shapes underneath it,
+      // and the scene's own frames stop invalidating the type over it.
+      className={`grain hs-layer pointer-events-none absolute inset-0 z-0 overflow-hidden ${className ?? ""}`}
       // `globals.css` drops the whole scene when printing and reassigns the
       // `on-art` tokens to the ordinary text pair, so the headline does not
       // come out white on white once the browser discards the artwork.
@@ -690,19 +695,19 @@ export function HeroScene({ className }: { className?: string }) {
               bites rather than a few large ones, which is the difference between
               shrubs and dents. */}
           <filter id="s-tuft" x="-8%" y="-8%" width="116%" height="116%">
-            <feTurbulence type="fractalNoise" baseFrequency="0.048 0.068" numOctaves="4" seed="23" result="n" />
+            <feTurbulence type="fractalNoise" baseFrequency="0.048 0.068" numOctaves="2" seed="23" result="n" />
             <feDisplacementMap in="SourceGraphic" in2="n" scale="15" xChannelSelector="R" yChannelSelector="G" />
             <feGaussianBlur stdDeviation="1" />
           </filter>
           <filter id="s-tuft-near" x="-8%" y="-8%" width="116%" height="116%">
-            <feTurbulence type="fractalNoise" baseFrequency="0.038 0.056" numOctaves="5" seed="57" result="n" />
+            <feTurbulence type="fractalNoise" baseFrequency="0.038 0.056" numOctaves="2" seed="57" result="n" />
             <feDisplacementMap in="SourceGraphic" in2="n" scale="24" xChannelSelector="R" yChannelSelector="G" />
             <feGaussianBlur stdDeviation="1.3" />
           </filter>
           {/* Conifers get displacement without much blur: a frayed silhouette is
               the point, a soft one would just look out of focus. */}
           <filter id="s-needle" x="-10%" y="-10%" width="120%" height="120%">
-            <feTurbulence type="fractalNoise" baseFrequency="0.09 0.13" numOctaves="3" seed="71" result="n" />
+            <feTurbulence type="fractalNoise" baseFrequency="0.09 0.13" numOctaves="2" seed="71" result="n" />
             <feDisplacementMap in="SourceGraphic" in2="n" scale="7" xChannelSelector="R" yChannelSelector="G" />
           </filter>
 
@@ -1101,16 +1106,22 @@ export function HeroScene({ className }: { className?: string }) {
           { trees: NEAR_TREES_R, g: gust(21, -13, 0.55, -7) },
         ].map((band, bi) => (
           <g key={bi} {...band.g}>
-            {band.trees.map((t, i) => (
-              <g key={i} {...sway(t.dur, t.delay, 0.75)}>
-                <g filter="url(#s-tuft-near)">
+            {/* The fuzz is one filter over the whole band, not one per tree.
+                Every tree in here is swaying, so a per-tree filter was a
+                per-tree turbulence pass re-run on every frame — the same
+                "group form is a single rasterisation" rule the static bands
+                already follow, which only ever mattered more once the thing
+                being filtered was also moving. */}
+            <g filter="url(#s-tuft-near)">
+              {band.trees.map((t, i) => (
+                <g key={i} {...sway(t.dur, t.delay, 0.75)}>
                   <path d={t.trunk} fill="oklch(0.286 0.034 96)" opacity="0.85" />
                   {t.canopy.map((c, j) => (
                     <ellipse key={j} cx={c.x} cy={c.y} rx={c.rx} ry={c.ry} fill={c.fill} opacity={c.o} />
                   ))}
                 </g>
-              </g>
-            ))}
+              ))}
+            </g>
           </g>
         ))}
 

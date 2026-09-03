@@ -70,6 +70,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               product is a trapdoor. */}
           <Link
             href="/tasks"
+            prefetch={true}
             className="shrink-0 rounded-md transition-opacity hover:opacity-80"
             aria-label="Locus — go to Work"
           >
@@ -91,6 +92,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 <Link
                   key={item.href}
                   href={item.href}
+                  prefetch={true}
                   aria-current={active ? "page" : undefined}
                   className={cn(
                     "relative rounded-pill px-3.5 py-1.5 text-sm font-medium transition-colors",
@@ -100,7 +102,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   {active && (
                     <motion.span
                       layoutId="nav-pill"
-                      transition={{ duration: 0.28, ease: [0.32, 0.72, 0, 1] }}
+                      transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
                       className="absolute inset-0 rounded-pill bg-surface-2"
                     />
                   )}
@@ -196,6 +198,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <Link
                 key={item.href}
                 href={item.href}
+                prefetch={true}
                 aria-current={active ? "page" : undefined}
                 className={cn(
                   "flex items-start gap-3 rounded-md px-3 py-3 transition-colors",

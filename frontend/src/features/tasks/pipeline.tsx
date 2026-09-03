@@ -26,29 +26,6 @@ import { cn } from "@/lib/utils";
 
 /* ── Task progress ────────────────────────────────────────────────────────── */
 
-const NODE = {
-  done: "border-success bg-success text-white",
-  running: "border-accent bg-accent text-accent-fg",
-  failed: "border-danger bg-danger text-white",
-  skipped: "border-line bg-surface-2 text-subtle",
-  pending: "border-line bg-surface text-subtle",
-} as const;
-
-/**
- * Where the work has got to, as a rail.
- *
- * Every stage is rendered, including the ones not yet reached, because the
- * point of the card is to show the whole automated run — from the ticket
- * landing on someone to the testing team signing off. A stepper that only
- * showed the stages already visited would answer "what happened" but not
- * "what happens next", which is the question someone opening the board has.
- *
- * The connector between two nodes is filled only when the *earlier* one is
- * done, so the rail reads as a level rather than as a row of disconnected
- * chips. That is the whole difference between this and the pill strip it
- * replaces, which wrapped onto three lines on a narrow window and lost its
- * order entirely.
- */
 export function TaskProgress({
   stages,
   className,
@@ -58,81 +35,146 @@ export function TaskProgress({
 }) {
   if (stages.length === 0) return null;
 
-  // A *container* query, not a viewport one. This rail renders both across a
-  // full-width board row and inside a 736px sheet on the same screen, so a
-  // `lg:` breakpoint showed nine labels in both and overflowed the narrower of
-  // them. Measuring the box it is actually in is the only thing that answers
-  // the question being asked. It scrolls rather than truncating when even that
-  // is not enough, because a rail with its tail cut off silently misreports
-  // how far the work has got.
-  return (
-    <ol
-      className={cn("@container scroll-x flex items-center pb-0.5", className)}
-      aria-label="Pipeline progress"
-    >
-      {stages.map((stage, i) => {
-        const state = stage.state;
-        const isLast = i === stages.length - 1;
-        const filled = state === "done";
+  const completedCount = stages.filter((s) => s.state === "done").length;
+  const runningStage = stages.find((s) => s.state === "running");
+  const failedStage = stages.find((s) => s.state === "failed");
+  const lastDoneStage = [...stages].reverse().find((s) => s.state === "done");
+  const allDone =
+    stages.length > 0 &&
+    stages.every((s) => s.state === "done" || s.state === "skipped");
 
-        return (
-          <li key={stage.stage} className="flex min-w-0 items-center">
-            <span
-              className="group/node relative flex shrink-0 items-center"
-              title={
-                stage.detail ? `${stage.label} — ${stage.detail}` : stage.label
-              }
+  return (
+    <div className={cn("w-full", className)}>
+      {/* ── Multi-line Wrapped Stepper (No scrollbar, wraps to second line) ── */}
+      <ol
+        className="flex flex-wrap items-center gap-x-2 gap-y-2 py-0.5"
+        aria-label="Pipeline progress"
+      >
+        {stages.map((stage, i) => {
+          const state = stage.state;
+          const isLast = i === stages.length - 1;
+          const isDone = state === "done";
+          const isRunning = state === "running";
+          const isFailed = state === "failed";
+          const isSkipped = state === "skipped";
+
+          return (
+            <li
+              key={stage.stage}
+              className="flex items-center gap-2"
             >
+              {/* Stage Chip with Node Icon and Visible Text */}
               <span
                 className={cn(
-                  "flex size-5 items-center justify-center rounded-pill border transition-colors",
-                  NODE[state] ?? NODE.pending
+                  "inline-flex items-center gap-1.5 rounded-pill transition-colors",
+                  isRunning
+                    ? "border border-accent/40 bg-accent-soft px-2.5 py-1 text-ink shadow-xs"
+                    : "py-0.5"
                 )}
+                title={`${String(i + 1).padStart(2, "0")}. ${stage.label} — ${state}${stage.detail ? ` (${stage.detail})` : ""}`}
               >
-                {state === "done" ? (
-                  <Check className="size-3" strokeWidth={3} aria-hidden />
-                ) : state === "failed" ? (
-                  <X className="size-3" strokeWidth={3} aria-hidden />
-                ) : state === "skipped" ? (
-                  <Minus className="size-3" strokeWidth={3} aria-hidden />
-                ) : state === "running" ? (
-                  <span className="size-1.5 animate-pulse rounded-pill bg-current" />
-                ) : (
-                  <span className="size-1.5 rounded-pill bg-current opacity-40" />
-                )}
+                {/* Node icon circle */}
+                <span
+                  className={cn(
+                    "flex size-4.5 shrink-0 items-center justify-center rounded-pill border transition-all duration-200",
+                    isDone && "border-success bg-success text-white",
+                    isRunning && "border-accent bg-accent text-accent-fg",
+                    isFailed && "border-danger bg-danger text-white",
+                    isSkipped && "border-line bg-surface-2 text-subtle",
+                    state === "pending" && "border-line bg-surface text-subtle/50"
+                  )}
+                >
+                  {isDone ? (
+                    <Check className="size-2.5 stroke-[3]" aria-hidden />
+                  ) : isFailed ? (
+                    <X className="size-2.5 stroke-[3]" aria-hidden />
+                  ) : isSkipped ? (
+                    <Minus className="size-2.5 stroke-[3]" aria-hidden />
+                  ) : isRunning ? (
+                    <span className="size-1.5 rounded-pill bg-current animate-pulse" />
+                  ) : (
+                    <span className="size-1 rounded-pill bg-current opacity-40" />
+                  )}
+                </span>
+
+                {/* Visible Stage Text (Never clipped or hidden) */}
+                <span
+                  className={cn(
+                    "whitespace-nowrap text-xs transition-colors",
+                    isRunning
+                      ? "font-medium text-ink"
+                      : isDone
+                        ? "text-muted"
+                        : isFailed
+                          ? "font-medium text-danger"
+                          : "text-subtle"
+                  )}
+                >
+                  {stage.label}
+                </span>
               </span>
 
-              {/* The label rides under its node on wide screens and is dropped
-                  on narrow ones, where the rail alone still carries progress
-                  and the stage name is available on hover and to the label
-                  below the rail. */}
-              <span
-                className={cn(
-                  "ml-2 hidden whitespace-nowrap text-xs @3xl:inline",
-                  state === "running"
-                    ? "font-medium text-ink"
-                    : filled
-                      ? "text-muted"
-                      : "text-subtle"
-                )}
-              >
-                {stage.label}
+              {/* Directional chevron separator */}
+              {!isLast && (
+                <ChevronRight
+                  className={cn(
+                    "size-3 shrink-0 transition-colors",
+                    isDone ? "text-success/50" : "text-subtle/40"
+                  )}
+                  aria-hidden
+                />
+              )}
+            </li>
+          );
+        })}
+      </ol>
+
+      {/* ── Active Stage Summary Caption ─────────────────────────────────── */}
+      <div className="mt-2 flex items-center justify-between gap-3 text-xs">
+        <div className="min-w-0 flex items-center gap-1.5 truncate">
+          {allDone ? (
+            <span className="flex items-center gap-1.5 text-success font-medium">
+              <Check className="size-3.5 stroke-[2.5]" aria-hidden />
+              <span>Pipeline complete · All {stages.length} stages passed</span>
+            </span>
+          ) : runningStage ? (
+            <span className="flex items-center gap-1.5 text-ink font-medium">
+              <span className="size-1.5 rounded-pill bg-accent animate-pulse" aria-hidden />
+              <span className="truncate">
+                Current: {runningStage.label}
+                {runningStage.detail ? (
+                  <span className="font-normal text-muted"> — {runningStage.detail}</span>
+                ) : null}
               </span>
             </span>
+          ) : failedStage ? (
+            <span className="flex items-center gap-1.5 text-danger font-medium">
+              <X className="size-3.5 stroke-[2.5]" aria-hidden />
+              <span className="truncate">
+                Failed at {failedStage.label}
+                {failedStage.detail ? (
+                  <span className="font-normal text-danger/80"> — {failedStage.detail}</span>
+                ) : null}
+              </span>
+            </span>
+          ) : completedCount > 0 && lastDoneStage ? (
+            <span className="flex items-center gap-1.5 text-muted">
+              <Check className="size-3.5 text-success" aria-hidden />
+              <span className="truncate">
+                Completed: {lastDoneStage.label}
+                {lastDoneStage.detail ? <span> — {lastDoneStage.detail}</span> : null}
+              </span>
+            </span>
+          ) : (
+            <span className="text-subtle">Ready to run</span>
+          )}
+        </div>
 
-            {!isLast && (
-              <span
-                aria-hidden
-                className={cn(
-                  "mx-1 h-px w-2 shrink-0 @sm:mx-2 @sm:w-4 @3xl:w-6",
-                  filled ? "bg-success/50" : "bg-line"
-                )}
-              />
-            )}
-          </li>
-        );
-      })}
-    </ol>
+        <span className="shrink-0 font-mono text-[11px] text-subtle tabular">
+          {completedCount}/{stages.length}
+        </span>
+      </div>
+    </div>
   );
 }
 

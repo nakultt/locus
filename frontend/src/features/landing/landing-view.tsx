@@ -122,6 +122,30 @@ export default function LandingView() {
       ? { href: "/tasks", label: "Open your board" }
       : { href: "/signup", label: "Get started" };
 
+  const scrollToSection = (e: React.MouseEvent<HTMLAnchorElement>, href: string) => {
+    if (!href.startsWith("#")) return;
+    const targetId = href.slice(1);
+    const targetEl = document.getElementById(targetId);
+    if (!targetEl) return;
+
+    e.preventDefault();
+    setMenuOpen(false);
+
+    if (still) {
+      targetEl.scrollIntoView();
+      return;
+    }
+
+    const headerHeight = 72;
+    const top = targetEl.getBoundingClientRect().top + window.scrollY - headerHeight;
+    window.scrollTo({
+      top,
+      behavior: "smooth",
+    });
+
+    history.pushState(null, "", href);
+  };
+
   return (
     <div className="min-h-dvh bg-bg">
       {!still && (
@@ -159,9 +183,15 @@ export default function LandingView() {
           <nav
             aria-label="Sections"
             className={cn(
-              "absolute left-1/2 hidden -translate-x-1/2 items-center gap-1 rounded-pill border p-1 backdrop-blur transition-colors duration-[--dur] md:flex",
+              "absolute left-1/2 hidden -translate-x-1/2 items-center gap-1 rounded-pill border p-1 transition-colors duration-[--dur] md:flex",
+              // The blur is only worth its cost over the page. Over the hero
+              // it is a backdrop filter sampling a region that is animating
+              // every frame, so the browser re-blurs the forest behind this
+              // pill continuously — and it re-blurs it again on hover, which
+              // is what made the nav and the CTA feel like they were catching
+              // on something. Translucency alone reads the same at this size.
               scrolled
-                ? "border-line bg-surface/90 shadow-sm"
+                ? "border-line bg-surface/90 shadow-sm backdrop-blur"
                 : "border-on-art-line bg-on-art-fill"
             )}
           >
@@ -169,6 +199,7 @@ export default function LandingView() {
               <a
                 key={s.href}
                 href={s.href}
+                onClick={(e) => scrollToSection(e, s.href)}
                 className={cn(
                   "rounded-pill px-4 py-1.5 text-sm font-medium transition-colors",
                   scrolled
@@ -206,9 +237,9 @@ export default function LandingView() {
               aria-expanded={menuOpen}
               aria-label={menuOpen ? "Close menu" : "Open menu"}
               className={cn(
-                "flex size-9.5 items-center justify-center rounded-pill border backdrop-blur transition-colors md:hidden",
+                "flex size-9.5 items-center justify-center rounded-pill border transition-colors md:hidden",
                 scrolled || menuOpen
-                  ? "border-line bg-surface text-ink"
+                  ? "border-line bg-surface text-ink backdrop-blur"
                   : "border-on-art-line bg-on-art-fill text-on-art"
               )}
             >
@@ -224,7 +255,7 @@ export default function LandingView() {
                 <a
                   key={s.href}
                   href={s.href}
-                  onClick={() => setMenuOpen(false)}
+                  onClick={(e) => scrollToSection(e, s.href)}
                   className="block rounded-md px-3 py-2.5 text-sm text-ink hover:bg-surface-2"
                 >
                   {s.label}
@@ -273,15 +304,6 @@ export default function LandingView() {
         />
 
         <div className="relative z-10 mx-auto max-w-4xl text-center">
-          <motion.span
-            className="eyebrow eyebrow-art"
-            initial={still ? false : { opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.5, ease: [0.32, 0.72, 0, 1] }}
-          >
-            <span className="size-1.5 rounded-pill bg-accent" aria-hidden />
-            Ticket to sign-off, without the coordination
-          </motion.span>
 
           {/* Set on the picture, so the type takes the `on-art` pair rather than
               `ink`/`muted`. The shadow is doing real work rather than styling:
@@ -326,12 +348,21 @@ export default function LandingView() {
                 on the page shares, which is what makes it findable. */}
             <Link
               href={primary.href}
-              className="group inline-flex h-14 items-center gap-3 rounded-pill bg-primary pl-2 pr-7 text-primary-fg shadow-pop transition-colors hover:bg-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+              className="group inline-flex h-14 items-center gap-3 rounded-pill bg-primary pl-2 pr-7 text-primary-fg shadow-pop transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] hover:scale-[1.02] hover:bg-primary-hover hover:shadow-lg active:scale-[0.98] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring motion-reduce:transform-none motion-reduce:transition-none"
             >
-              <span className="flex size-10 items-center justify-center rounded-pill bg-accent text-accent-fg transition-transform duration-[--dur] ease-[--ease] group-hover:translate-x-0.5">
-                <ArrowRight className="size-4.5" aria-hidden />
+              <span className="relative flex size-10 items-center justify-center overflow-hidden rounded-pill bg-accent text-accent-fg transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] group-hover:scale-105 group-hover:bg-accent-hover motion-reduce:transform-none">
+                <ArrowRight
+                  className="size-4.5 shrink-0 transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] group-hover:translate-x-7 group-hover:opacity-0 motion-reduce:transform-none"
+                  aria-hidden
+                />
+                <ArrowRight
+                  className="absolute size-4.5 shrink-0 -translate-x-7 opacity-0 transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] group-hover:translate-x-0 group-hover:opacity-100 motion-reduce:transform-none"
+                  aria-hidden
+                />
               </span>
-              <span className="text-body font-medium">{primary.label}</span>
+              <span className="text-body font-medium transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] group-hover:translate-x-0.5 motion-reduce:transform-none">
+                {primary.label}
+              </span>
             </Link>
 
             {/* Glass rather than the `secondary` pill. A filled surface here
@@ -339,7 +370,13 @@ export default function LandingView() {
                 thing that makes a hero image look pasted on. */}
             <a
               href="#pipeline"
-              className="inline-flex h-14 w-full items-center justify-center rounded-pill border border-on-art-line bg-on-art-fill px-7 text-body font-medium text-on-art backdrop-blur-md transition-colors hover:bg-on-art-line focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:w-auto"
+              onClick={(e) => scrollToSection(e, "#pipeline")}
+              // No `backdrop-blur` here either, for the reason on the nav
+              // pill: it sits directly on the moving artwork, so the blur was
+              // recomputed on every frame of the wind and again on every
+              // hover. The `on-art` fill is translucent, which is what was
+              // doing the visible work.
+              className="inline-flex h-14 w-full items-center justify-center rounded-pill border border-on-art-line bg-on-art-fill px-7 text-body font-medium text-on-art transition-colors hover:bg-on-art-line focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:w-auto"
             >
               See how it works
             </a>
@@ -371,7 +408,7 @@ export default function LandingView() {
       </section>
 
       {/* ── Pipeline ──────────────────────────────────────────────────────── */}
-      <section id="pipeline" className="px-5 py-24 sm:px-8">
+      <section id="pipeline" className="scroll-mt-20 px-5 py-24 sm:px-8">
         <div className="mx-auto max-w-[80rem]">
           <Reveal className="max-w-2xl">
             <span className="eyebrow">
@@ -407,7 +444,7 @@ export default function LandingView() {
       {/* ── Surfaces ──────────────────────────────────────────────────────── */}
       <section
         id="surfaces"
-        className="border-t border-line bg-surface-2/50 px-5 py-24 sm:px-8"
+        className="scroll-mt-20 border-t border-line bg-surface-2/50 px-5 py-24 sm:px-8"
       >
         <div className="mx-auto max-w-[80rem]">
           <Reveal className="max-w-2xl">
@@ -445,7 +482,7 @@ export default function LandingView() {
           authoring, which is opt-in per ticket. Saying so plainly on the
           marketing page is the only place it is worth anything — nobody reads
           a changelog to find out where their code went. */}
-      <section id="trust" className="border-t border-line px-5 py-24 sm:px-8">
+      <section id="trust" className="scroll-mt-20 border-t border-line px-5 py-24 sm:px-8">
         <div className="mx-auto grid max-w-[80rem] gap-12 lg:grid-cols-2 lg:gap-20">
           <Reveal>
             <span className="eyebrow">
@@ -507,12 +544,21 @@ export default function LandingView() {
           <div className="mt-9 flex justify-center">
             <Link
               href={primary.href}
-              className="group inline-flex h-14 items-center gap-3 rounded-pill bg-primary pl-2 pr-7 text-primary-fg transition-colors hover:bg-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+              className="group inline-flex h-14 items-center gap-3 rounded-pill bg-primary pl-2 pr-7 text-primary-fg transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] hover:scale-[1.02] hover:bg-primary-hover hover:shadow-lg active:scale-[0.98] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring motion-reduce:transform-none motion-reduce:transition-none"
             >
-              <span className="flex size-10 items-center justify-center rounded-pill bg-accent text-accent-fg transition-transform duration-[--dur] ease-[--ease] group-hover:translate-x-0.5">
-                <ArrowRight className="size-4.5" aria-hidden />
+              <span className="relative flex size-10 items-center justify-center overflow-hidden rounded-pill bg-accent text-accent-fg transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] group-hover:scale-105 group-hover:bg-accent-hover motion-reduce:transform-none">
+                <ArrowRight
+                  className="size-4.5 shrink-0 transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] group-hover:translate-x-7 group-hover:opacity-0 motion-reduce:transform-none"
+                  aria-hidden
+                />
+                <ArrowRight
+                  className="absolute size-4.5 shrink-0 -translate-x-7 opacity-0 transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] group-hover:translate-x-0 group-hover:opacity-100 motion-reduce:transform-none"
+                  aria-hidden
+                />
               </span>
-              <span className="text-body font-medium">{primary.label}</span>
+              <span className="text-body font-medium transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] group-hover:translate-x-0.5 motion-reduce:transform-none">
+                {primary.label}
+              </span>
             </Link>
           </div>
         </Reveal>

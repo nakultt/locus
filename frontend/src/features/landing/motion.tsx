@@ -176,12 +176,12 @@ export function RevealWords({
       {text.split(" ").map((word, i) => (
         <Fragment key={`${word}-${i}`}>
           {i > 0 ? " " : null}
-          <span className="inline-block overflow-hidden align-bottom">
+          <span className="inline-block overflow-hidden align-bottom pb-[0.25em] -mb-[0.25em]">
             <motion.span
               aria-hidden
               className="inline-block"
               variants={{
-                hidden: { y: "108%" },
+                hidden: { y: "135%" },
                 shown: { y: 0, transition: { duration: 0.75, ease: EASE } },
               }}
             >
