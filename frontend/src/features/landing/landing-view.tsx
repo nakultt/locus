@@ -254,6 +254,24 @@ export default function LandingView() {
       <section className="relative -mt-18 overflow-hidden px-5 pb-24 pt-28 sm:px-8 sm:pt-36">
         <HeroScene />
 
+        {/* A scrim between the painting and the type.
+            The hero text is near-white because it sits on artwork, and the
+            artwork is not uniformly dark: a band of bright mist runs across the
+            horizon exactly where the description sits, and light grey on pale
+            gold is unreadable. Reaching for a darker text colour would fix that
+            line and break the headline against the deep blue above it. A soft
+            radial wash under the whole text column instead gives every line the
+            same ground, and at this opacity it reads as depth in the sky rather
+            than as a panel. */}
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-x-0 top-0 z-[1] h-[52rem]"
+          style={{
+            background:
+              "radial-gradient(ellipse 82% 58% at 50% 32%, oklch(0.26 0.048 250 / 0.46), oklch(0.26 0.048 250 / 0.2) 52%, transparent 76%)",
+          }}
+        />
+
         <div className="relative z-10 mx-auto max-w-4xl text-center">
           <motion.span
             className="eyebrow eyebrow-art"
@@ -272,7 +290,12 @@ export default function LandingView() {
               loses its edge exactly where the sun is. Two of them — a tight one
               for the edge and a wide one for separation — because a single wide
               shadow strong enough to separate reads as a glow. */}
-          <h1 className="mt-7 text-balance text-[clamp(2.75rem,7.5vw,5rem)] font-normal leading-[1.02] tracking-[-0.035em] text-on-art [text-shadow:0_1px_2px_oklch(0.24_0.05_252/0.34),0_2px_28px_oklch(0.24_0.05_252/0.3)]">
+          {/* `break-words` is a backstop, not the fix — the wrapping bug was in
+              `RevealWords` and is fixed there. This is what stops a word longer
+              than the column (a fallback font measuring wider than Inter, a
+              viewport narrower than any tested) from overflowing rather than
+              breaking, which is the only way this line can still be clipped. */}
+          <h1 className="mt-7 text-balance break-words text-[clamp(2.75rem,7.5vw,5rem)] font-normal leading-[1.02] tracking-[-0.035em] text-on-art [text-shadow:0_1px_2px_oklch(0.24_0.05_252/0.34),0_2px_28px_oklch(0.24_0.05_252/0.3)]">
             <RevealWords text="The work between" className="block text-on-art-muted" />
             <RevealWords
               text="writing it and shipping it"

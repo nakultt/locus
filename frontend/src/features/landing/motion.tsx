@@ -1,7 +1,7 @@
 "use client";
 
 import { motion, useReducedMotion, type Variants } from "framer-motion";
-import type { ReactNode } from "react";
+import { Fragment, type ReactNode } from "react";
 
 /**
  * The landing page's motion vocabulary.
@@ -134,6 +134,23 @@ export function RevealItem({
  * Per-word rather than per-letter. Letters arriving one at a time is a effect
  * people have seen a thousand times and it makes a long headline unreadable
  * while it plays; words land fast enough to read as one motion.
+ *
+ * **The spaces between the words are real, breaking spaces, and that is
+ * load-bearing.** Each word is an `inline-block` so it can be masked and slid
+ * up, which makes it an *atomic inline*, and the guaranteed soft-wrap
+ * opportunity between two atomic inlines is whitespace between them. The first
+ * version had neither: the outer spans were butted directly against each other,
+ * and the only space in the markup was a **non-breaking** one (U+00A0) sealed
+ * inside the masked box at the end of each word. A NBSP does not merely fail to
+ * offer a break — it forbids one. Blink breaks between adjacent atomic inlines
+ * anyway, so the headline wrapped correctly in every test here; an engine that
+ * does not is entitled not to, and there the headline is a single unbreakable
+ * line that can only overflow its column. On a phone that renders as the first
+ * and last letters sliced off by the screen edges, which is exactly what it did.
+ *
+ * The space also does not belong inside an `overflow-hidden` box: it is the gap
+ * between two words, not part of either, and keeping it there padded every
+ * word's measured width with a space the box then clipped.
  */
 export function RevealWords({
   text,
@@ -157,19 +174,21 @@ export function RevealWords({
       aria-label={text}
     >
       {text.split(" ").map((word, i) => (
-        <span key={`${word}-${i}`} className="inline-block overflow-hidden align-bottom">
-          <motion.span
-            aria-hidden
-            className="inline-block"
-            variants={{
-              hidden: { y: "108%" },
-              shown: { y: 0, transition: { duration: 0.75, ease: EASE } },
-            }}
-          >
-            {word}
-            {" "}
-          </motion.span>
-        </span>
+        <Fragment key={`${word}-${i}`}>
+          {i > 0 ? " " : null}
+          <span className="inline-block overflow-hidden align-bottom">
+            <motion.span
+              aria-hidden
+              className="inline-block"
+              variants={{
+                hidden: { y: "108%" },
+                shown: { y: 0, transition: { duration: 0.75, ease: EASE } },
+              }}
+            >
+              {word}
+            </motion.span>
+          </span>
+        </Fragment>
       ))}
     </motion.span>
   );
