@@ -10,7 +10,7 @@ import {
   ChevronDown,
   Cpu,
   FileText,
-  Github,
+  GitPullRequest,
   Loader2,
   Mail,
   MessagesSquare,
@@ -99,7 +99,7 @@ const SERVICE_ICON: Record<string, React.ReactNode> = {
   slides: <FileText className={ICON_CLASS} />,
   drive: <FileText className={ICON_CLASS} />,
   forms: <FileText className={ICON_CLASS} />,
-  github: <Github className={ICON_CLASS} />,
+  github: <GitPullRequest className={ICON_CLASS} />,
 };
 
 const iconFor = (service: string): React.ReactNode =>

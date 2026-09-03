@@ -489,8 +489,10 @@ def jira_create_project(
         
         if lead_account_id:
             project_data["leadAccountId"] = lead_account_id
-        
-        result = jira.create_project(**project_data)
+
+        # atlassian-python-api 5 dropped `create_project(**fields)`; the raw-JSON
+        # form is what it built internally and takes the same body.
+        jira.create_project_from_raw_json(project_data)
         
         return f"""✅ Created Jira project
 📁 Name: {name}
