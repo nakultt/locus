@@ -115,6 +115,45 @@ def document_url(
     return f"https://docs.google.com/document/d/{report.document_id}/edit"
 
 
+def document_urls_for(
+    db: Session, *, owner_id: int
+) -> tuple[dict[str, str], dict[tuple[str, int], str]]:
+    """
+    Every document this owner has, indexed for a board-wide lookup.
+
+    One query rather than `document_url` per card. The board renders every
+    assigned work item, so calling the single-row lookup in that loop is a
+    query per row on the page a person refreshes most often.
+
+    Returns the same two-step keying `find_report` uses -- by ticket, then by
+    pull request -- so a caller resolves a card the way that function would:
+    ticket first, falling back to `(repo, pr_number)` for rows written before
+    documents belonged to work items.
+
+    Strictly read-only. `find_report(adopt=True)` claims a PR-keyed row for a
+    ticket, which is a write, and the board must never do that: it renders on
+    every refresh, and the rule that keeps this safe is that listing a task
+    never changes it. Creating is `ensure_for_ticket`, called from the detail
+    view and nowhere else, for the same reason.
+    """
+    by_ticket: dict[str, str] = {}
+    by_pr: dict[tuple[str, int], str] = {}
+
+    rows = (
+        db.query(models.PRReport)
+        .filter(models.PRReport.owner_id == owner_id)
+        .all()
+    )
+    for row in rows:
+        url = f"https://docs.google.com/document/d/{row.document_id}/edit"
+        if row.ticket_key:
+            by_ticket[row.ticket_key] = url
+        if row.repo and row.pr_number is not None:
+            by_pr[(row.repo, row.pr_number)] = url
+
+    return by_ticket, by_pr
+
+
 def _last_analysis(
     db: Session, *, owner_id: int, repo: str, pr_number: int
 ) -> schemas.PRAnalysisResult | None:

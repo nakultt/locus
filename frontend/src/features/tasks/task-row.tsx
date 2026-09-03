@@ -1,6 +1,13 @@
 "use client";
 
-import { AlertTriangle, ChevronRight, GitBranch, GitPullRequest } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowUpRight,
+  ChevronRight,
+  FileText,
+  GitBranch,
+  GitPullRequest,
+} from "lucide-react";
 import type { TaskCard } from "@/lib/api";
 import { Badge, Chip, Dot } from "@/components/ui/badge";
 import { TaskProgress } from "./pipeline";
@@ -32,19 +39,30 @@ export function TaskRow({
   const settled = card.stage === "done";
 
   return (
-    <button
-      type="button"
-      onClick={onOpen}
-      aria-label={`Open ${card.key}: ${card.title}`}
+    /* A container with a stretched button rather than one big <button>.
+       The row carries a link to the report document, and an anchor inside a
+       button is invalid markup that browsers recover from unpredictably — the
+       link either swallows the row's click or the row swallows the link's.
+       The button covers the card as an overlay, the content sits above it and
+       ignores the pointer, and the one thing that needs its own click takes
+       the pointer back. */
+    <div
       className={cn(
-        "group relative block w-full rounded-lg border bg-surface p-5 text-left",
-        "transition-[border-color,background-color,transform] duration-[--dur-fast] ease-[--ease]",
+        "group relative rounded-lg border bg-surface p-5",
+        "transition-[border-color,background-color] duration-[--dur-fast] ease-[--ease]",
         "hover:border-line-strong hover:bg-surface-2/40",
-        "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+        "focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-ring",
         card.needs_you ? "border-accent/45" : "border-line",
         settled && "opacity-75 hover:opacity-100"
       )}
     >
+      <button
+        type="button"
+        onClick={onOpen}
+        aria-label={`Open ${card.key}: ${card.title}`}
+        className="absolute inset-0 z-0 rounded-lg outline-none"
+      />
+
       {/* A hairline down the leading edge rather than a full coloured border.
           Tinting the whole outline made a queue of things needing attention
           read as a wall of warnings; a 3px marker says the same thing without
@@ -52,11 +70,11 @@ export function TaskRow({
       {card.needs_you && (
         <span
           aria-hidden
-          className="absolute inset-y-4 left-0 w-[3px] rounded-pill bg-accent"
+          className="absolute inset-y-4 left-0 z-10 w-[3px] rounded-pill bg-accent"
         />
       )}
 
-      <div className="flex items-start gap-4">
+      <div className="pointer-events-none relative z-10 flex items-start gap-4">
         <div className="min-w-0 flex-1">
           {/* Identity line */}
           <div className="flex flex-wrap items-center gap-2">
@@ -138,6 +156,27 @@ export function TaskRow({
           )}
 
           <TaskProgress stages={card.stages ?? []} className="mt-4" />
+
+          {/* The written record, reachable from the row.
+              This is the link that goes to the senior dev and the testing
+              team — the one artefact the pipeline produces for other people —
+              and it used to be two clicks deep inside the sheet. It is a real
+              anchor rather than part of the row button, so it opens the
+              document instead of the task. */}
+          {card.doc_url && (
+            <span className="pointer-events-auto mt-3 flex">
+              <a
+                href={card.doc_url}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1.5 rounded-pill border border-line bg-surface-2 px-2.5 py-1 text-xs font-medium text-accent-strong transition-colors hover:border-accent/40 hover:bg-accent-soft focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+              >
+                <FileText className="size-3.5" aria-hidden />
+                Report doc
+                <ArrowUpRight className="size-3" aria-hidden />
+              </a>
+            </span>
+          )}
         </div>
 
         <div className="flex shrink-0 flex-col items-end gap-2">
@@ -152,6 +191,6 @@ export function TaskRow({
           />
         </div>
       </div>
-    </button>
+    </div>
   );
 }
