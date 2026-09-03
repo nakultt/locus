@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 import {
   Check,
   FileSearch,
@@ -34,6 +34,17 @@ import { cn } from "@/lib/utils";
  *
  * And nothing here is a number. A hero that counts up to "12,000 pull requests
  * reviewed" is inventing a metric; this shows the mechanism, which is true.
+ *
+ * **The panel's height never changes, and that is the fourth rule.** The log
+ * used to mount each line as the step landed and unmount all seven when the
+ * cycle wrapped, which grew and collapsed the panel by ~540px every twenty
+ * seconds. The hero section is sized by this panel, and `HeroScene` is
+ * `absolute inset-0` inside it drawing with `preserveAspectRatio="slice"` — so
+ * a panel that changes height rescales and re-crops the painting behind it,
+ * which is what read as the background zooming and jumping on its own. Every
+ * step is therefore always in the DOM and reserves its space; the unreached
+ * ones are drawn at `opacity: 0`. Nothing animates layout, so nothing above or
+ * behind it reflows.
  */
 
 interface Step {
@@ -119,8 +130,6 @@ export function HeroDemo() {
     return () => clearTimeout(timer);
   }, [active, still, visible]);
 
-  const done = STEPS.slice(0, active + 1);
-
   return (
     <div ref={hostRef} className="relative">
       {/* The glow tracks the panel rather than the page, so the whole thing
@@ -163,57 +172,61 @@ export function HeroDemo() {
         <div className="grid gap-0 md:grid-cols-[1fr_minmax(0,20rem)]">
           {/* ── The log ─────────────────────────────────────────────────── */}
           <div
-            className="min-h-[19rem] border-b border-line p-4 sm:p-5 md:border-b-0 md:border-r"
+            className="border-b border-line p-4 sm:p-5 md:border-b-0 md:border-r"
             // The list rewrites itself on a timer; a screen reader announcing
             // each line as it lands would talk over the page indefinitely.
             aria-hidden
           >
             <ol className="space-y-2.5">
-              <AnimatePresence initial={false} mode="popLayout">
-                {done.map((step, i) => {
-                  const Icon = step.icon;
-                  const current = i === active;
-                  return (
-                    <motion.li
-                      key={step.label}
-                      layout
-                      initial={still ? false : { opacity: 0, x: -12 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      exit={{ opacity: 0 }}
-                      transition={{ duration: 0.45, ease: EASE }}
+              {STEPS.map((step, i) => {
+                const Icon = step.icon;
+                const current = i === active;
+                const reached = i <= active;
+                return (
+                  <motion.li
+                    key={step.label}
+                    // Opacity and a transform only. A line that has not landed
+                    // yet still occupies its row, so the panel — and with it
+                    // the hero and the painting behind it — never resizes.
+                    initial={false}
+                    animate={
+                      still
+                        ? { opacity: 1, x: 0 }
+                        : { opacity: reached ? 1 : 0, x: reached ? 0 : -12 }
+                    }
+                    transition={{ duration: 0.45, ease: EASE }}
+                    className={cn(
+                      "flex items-start gap-3 rounded-md border px-3 py-2.5 transition-colors",
+                      current
+                        ? "border-accent/40 bg-accent-soft"
+                        : "border-transparent bg-surface-2/50"
+                    )}
+                  >
+                    <span
                       className={cn(
-                        "flex items-start gap-3 rounded-md border px-3 py-2.5 transition-colors",
+                        "mt-px flex size-6 shrink-0 items-center justify-center rounded-pill",
                         current
-                          ? "border-accent/40 bg-accent-soft"
-                          : "border-transparent bg-surface-2/50"
+                          ? "bg-accent text-accent-fg"
+                          : "bg-success/15 text-success"
                       )}
                     >
-                      <span
-                        className={cn(
-                          "mt-px flex size-6 shrink-0 items-center justify-center rounded-pill",
-                          current
-                            ? "bg-accent text-accent-fg"
-                            : "bg-success/15 text-success"
-                        )}
-                      >
-                        {current ? (
-                          <Icon className="size-3.5" />
-                        ) : (
-                          <Check className="size-3.5" strokeWidth={3} />
-                        )}
+                      {current ? (
+                        <Icon className="size-3.5" />
+                      ) : (
+                        <Check className="size-3.5" strokeWidth={3} />
+                      )}
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block text-sm font-medium text-ink">
+                        {step.label}
                       </span>
-                      <span className="min-w-0">
-                        <span className="block text-sm font-medium text-ink">
-                          {step.label}
-                        </span>
-                        <span className="block truncate text-xs text-muted">
-                          {step.detail}
-                        </span>
+                      <span className="block truncate text-xs text-muted">
+                        {step.detail}
                       </span>
-                    </motion.li>
-                  );
-                })}
-              </AnimatePresence>
+                    </span>
+                  </motion.li>
+                );
+              })}
             </ol>
           </div>
 

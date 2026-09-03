@@ -306,6 +306,14 @@
 
   html {
     -webkit-text-size-adjust: 100%;
+    scroll-behavior: smooth;
+    scroll-padding-top: 5rem;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
   }
 
   body {
@@ -472,9 +480,28 @@
      takes its transform origin from the viewBox origin by default, so
      `transform-origin: 50% 100%` without it pivots the tree about the top-left
      corner of the canvas and swings it across the sky. */
+  /* The scene's own layer.
+     `contain: paint` plus a promoted layer is what stops the artwork and the
+     page from invalidating each other. Without it the hero is one paint
+     region: every wind frame re-rasterised the headline and the panel over it,
+     and — the other direction, which is what showed — a text selection or a
+     hover colour change on the CTA re-ran a thousand filtered shapes and a
+     stack of turbulence passes underneath, which is where the stutter came
+     from. This is the one place in the product that promotes a layer by hand;
+     it is earned by ~1400 SVG nodes and 70-odd animations behind live type. */
+  .hs-layer {
+    contain: paint;
+    transform: translateZ(0);
+    backface-visibility: hidden;
+  }
+
+  /* `will-change` deliberately absent from every class below.
+     It was on all ~74 animated nodes, and an SVG child cannot be composited
+     out of its parent's raster anyway — so the hint bought nothing and asked
+     the compositor for 74 layers it would not create. The containment above is
+     what actually isolates the work. */
   .hs-anim {
     transform-box: fill-box;
-    will-change: transform;
   }
 
   /* Foliage and trees pivot at the base, the way anything rooted does. */
@@ -522,7 +549,6 @@
     transform-box: fill-box;
     animation: hs-drift var(--hs-dur, 60s) ease-in-out infinite;
     animation-delay: var(--hs-delay, 0s);
-    will-change: transform, opacity;
   }
   @keyframes hs-drift {
     0%,
@@ -542,7 +568,6 @@
     transform-box: fill-box;
     animation: hs-mote var(--hs-dur, 18s) linear infinite;
     animation-delay: var(--hs-delay, 0s);
-    will-change: transform, opacity;
   }
   @keyframes hs-mote {
     0% {
@@ -570,7 +595,6 @@
     transform-box: fill-box;
     animation: hs-leaf var(--hs-dur, 22s) linear infinite;
     animation-delay: var(--hs-delay, 0s);
-    will-change: transform, opacity;
   }
   @keyframes hs-leaf {
     0% {
