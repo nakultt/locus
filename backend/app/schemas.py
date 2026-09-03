@@ -892,6 +892,20 @@ class TaskCard(BaseModel):
     # that work has started, and without it the card reads as untouched.
     linked_branches: list[LinkedBranch] = Field(default_factory=list)
 
+    # The work item's written record, when one exists.
+    #
+    # Carried on the card rather than only on the detail response because this
+    # is the link handed to the senior dev and the testing team -- the thing
+    # someone opens the board to fetch and paste. Requiring them to expand a
+    # task first to find it made the one artefact the pipeline produces for
+    # other people the hardest thing on the page to reach.
+    #
+    # Null until a document exists. The board never creates one: that is
+    # `report_sync.ensure_for_ticket`, called from the detail view, because
+    # creating from a listing would open a document for every assigned item
+    # the first time anybody loaded the page.
+    doc_url: str | None = None
+
     # Reused verbatim from `worklist.build` so the board and the worklist
     # cannot disagree about what needs attention.
     items: list[WorklistItem] = Field(default_factory=list)

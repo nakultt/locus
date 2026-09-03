@@ -270,7 +270,9 @@ function Composer({
   };
 
   return (
-    <div className="rounded-xl border border-line bg-surface p-2 shadow-sm transition-colors focus-within:border-accent focus-within:ring-[3px] focus-within:ring-accent/20">
+    // A defined box, not a hairline. This is the one control on the page and
+    // the default border let it dissolve into the ground beneath it.
+    <div className="rounded-xl border border-line-strong bg-surface p-2 shadow-md transition-[border-color,box-shadow] focus-within:border-accent focus-within:ring-[3px] focus-within:ring-accent/20">
       <textarea
         ref={ref}
         rows={1}
@@ -590,8 +592,13 @@ export function ChatInterface({
       )}
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        {/* ── Conversation bar ────────────────────────────────────────── */}
-        <div className="flex items-center gap-2 border-b border-line px-4 py-2.5 sm:px-6">
+        {/* ── Conversation bar ──────────────────────────────────────────
+            No bottom rule. This bar sits immediately under the application
+            header, which draws its own, so a border here produced two
+            horizontal lines a few pixels apart with a row of icons trapped
+            between them. The transcript below has enough air to separate
+            itself. */}
+        <div className="flex items-center gap-2 px-4 py-2.5 sm:px-6">
           {!railPinned && (
             <IconButton
               label="Show conversations"
@@ -679,8 +686,22 @@ export function ChatInterface({
           </div>
         </div>
 
-        {/* ── Composer ────────────────────────────────────────────────── */}
-        <div className="border-t border-line bg-bg px-4 py-4 sm:px-6">
+        {/* ── Composer ──────────────────────────────────────────────────
+            No rule above it either. The composer is a defined box sitting on
+            the ground; a full-width line behind it just draws the same
+            separation twice, less well. */}
+        <div className="relative bg-bg px-4 pb-4 pt-2 sm:px-6">
+          {/* A fade, where a rule used to be.
+              The transcript scrolls under the composer, and a hard line across
+              the window said "the page ends here" — which is wrong, there is
+              more above. Dissolving the last few rows into the ground says the
+              true thing instead: content continues, it is just passing behind
+              this. It sits outside the padded box and ignores the pointer, so
+              the composer under it stays fully clickable. */}
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-x-0 -top-12 h-12 bg-gradient-to-b from-transparent to-bg"
+          />
           <div className="mx-auto max-w-3xl">
             <Composer
               value={input}
