@@ -572,3 +572,90 @@ class TestSuggestedFixRendersInTheReport:
         text = full_report.render(result)
         assert "y = 2" in text
         assert "SuggestedFix" not in text
+
+
+# --------------------------------------------------------------------------
+# Git must never wait for a human.
+# --------------------------------------------------------------------------
+
+
+class TestGitIsNonInteractive:
+    """
+    The driver pushed to a bare `origin`, relying on whatever credential helper
+    happened to be installed. On Windows that opens an account picker, so the
+    push blocked until the attempt timed out -- spending it on a dialog nobody
+    was awake to see. On a server there is no helper at all and the prompt
+    fails in a way that reads like a rejected push.
+
+    An agent that runs unattended cannot answer either, so prompting is
+    disabled and authentication is explicit.
+    """
+
+    def test_a_credential_in_a_url_is_redacted(self):
+        from app.services.authoring import workspace as ws
+        msg = "fatal: unable to access https://x-access-token:ghp_SECRET@github.com/a/b.git/"
+        out = ws.redact(msg)
+        assert "ghp_SECRET" not in out
+        assert "***:***" in out
+        assert "github.com/a/b.git" in out
+
+    def test_redaction_leaves_ordinary_text_alone(self):
+        from app.services.authoring import workspace as ws
+        assert ws.redact("Push rejected: non-fast-forward") == (
+            "Push rejected: non-fast-forward"
+        )
+
+    def test_a_network_call_fails_fast_instead_of_prompting(self, tmp_path):
+        """The whole point: no dialog, no hang, a prompt-disabled error."""
+        from app.services.authoring import workspace as ws
+        ws.run_git(["init", "-q"], tmp_path)
+        result = ws.run_git(
+            ["fetch", "https://github.com/nakultt/does-not-exist-locus-test.git"],
+            tmp_path, check=False, timeout=60,
+        )
+        assert result.returncode != 0
+        assert "terminal prompts disabled" in (result.stderr or "").lower()
+
+    def test_an_https_remote_gets_the_token(self, tmp_path):
+        from app.services.authoring import workspace as ws
+        ws.run_git(["init", "-q"], tmp_path)
+        ws.run_git(["remote", "add", "origin", "https://github.com/acme/api.git"], tmp_path)
+        assert ws.authenticated_remote(tmp_path, "TKN") == (
+            "https://x-access-token:TKN@github.com/acme/api.git"
+        )
+
+    def test_the_host_is_taken_from_the_remote_not_assumed(self, tmp_path):
+        """GitHub Enterprise lives somewhere else."""
+        from app.services.authoring import workspace as ws
+        ws.run_git(["init", "-q"], tmp_path)
+        ws.run_git(
+            ["remote", "add", "origin", "https://ghe.acme.internal/acme/api.git"],
+            tmp_path,
+        )
+        assert ws.authenticated_remote(tmp_path, "TKN").startswith(
+            "https://x-access-token:TKN@ghe.acme.internal/"
+        )
+
+    def test_existing_credentials_are_not_doubled_up(self, tmp_path):
+        from app.services.authoring import workspace as ws
+        ws.run_git(["init", "-q"], tmp_path)
+        ws.run_git(
+            ["remote", "add", "origin", "https://old:secret@github.com/acme/api.git"],
+            tmp_path,
+        )
+        out = ws.authenticated_remote(tmp_path, "TKN")
+        assert out == "https://x-access-token:TKN@github.com/acme/api.git"
+        assert "old:secret" not in out
+
+    def test_a_non_https_remote_is_left_alone(self, tmp_path):
+        """ssh and local paths carry their own credentials, or need none."""
+        from app.services.authoring import workspace as ws
+        ws.run_git(["init", "-q"], tmp_path)
+        ws.run_git(["remote", "add", "origin", "git@github.com:acme/api.git"], tmp_path)
+        assert ws.authenticated_remote(tmp_path, "TKN") == "origin"
+
+    def test_no_token_means_no_rewriting(self, tmp_path):
+        from app.services.authoring import workspace as ws
+        ws.run_git(["init", "-q"], tmp_path)
+        ws.run_git(["remote", "add", "origin", "https://github.com/acme/api.git"], tmp_path)
+        assert ws.authenticated_remote(tmp_path, None) == "origin"

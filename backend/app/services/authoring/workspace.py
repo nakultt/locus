@@ -20,6 +20,7 @@ working in destroys their afternoon and looks like a successful run.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -68,22 +69,91 @@ class Workspace:
     in_place: bool = False
 
 
+# A credential in a URL, as `scheme://user:secret@host`. Matched so it can be
+# kept out of an error message: the push URL carries the GitHub token, and a
+# failed push otherwise copies it verbatim into `AuthoringAttempt.error`,
+# where it is rendered in the UI and stored in the clear.
+_CREDENTIAL_IN_URL = re.compile(r"(?<=://)[^/\s:@]+:[^/\s@]+(?=@)")
+
+
+def redact(text: str) -> str:
+    """A git message with any embedded credential removed."""
+    return _CREDENTIAL_IN_URL.sub("***:***", text or "")
+
+
 def run_git(
     args: list[str], cwd: Path | str, *, check: bool = True, timeout: int | None = None
 ) -> subprocess.CompletedProcess:
-    """Run one git command, with output captured so failures can be reported."""
+    """
+    Run one git command, with output captured so failures can be reported.
+
+    **Never interactive.** An agent running unattended has nobody to answer a
+    credential prompt, and git's default behaviour is to ask: on Windows the
+    credential manager opens an account picker and the push blocks until the
+    attempt times out, spending it on a dialog nobody saw. On a server there is
+    no helper at all and the prompt fails in a way that reads like a rejected
+    push. Both are disabled here rather than at each call site, because the
+    failure mode of missing one is a run that hangs.
+
+    Authentication therefore has to be explicit -- an authenticated URL -- for
+    every git command that touches the network.
+    """
+    env = {
+        **os.environ,
+        # Refuse to prompt on a terminal, and offer no askpass program.
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_ASKPASS": "",
+        "SSH_ASKPASS": "",
+        # Git Credential Manager's own switch, for the Windows dialog.
+        "GCM_INTERACTIVE": "never",
+    }
     result = subprocess.run(
-        ["git", *args],
+        # An empty helper overrides the configured one for this call only, so
+        # nothing consults the user's credential store.
+        ["git", "-c", "credential.helper=", *args],
         cwd=str(cwd),
         capture_output=True,
         text=True,
         timeout=timeout or GIT_TIMEOUT_SECONDS,
+        env=env,
     )
     if check and result.returncode != 0:
         raise WorkspaceError(
-            f"git {' '.join(args)} failed: {(result.stderr or result.stdout).strip()}"
+            redact(
+                f"git {' '.join(args)} failed: "
+                f"{(result.stderr or result.stdout).strip()}"
+            )
         )
     return result
+
+
+def authenticated_remote(path: Path | str, token: str | None) -> str:
+    """
+    The remote to reach the network through, carrying credentials if it needs to.
+
+    Returns the literal string "origin" for anything that is not an https
+    remote -- ssh, a local path, a mirror -- because those either carry their
+    own credentials or need none, and rewriting them would break setups this
+    has no business touching. An https remote gets the token inlined, because
+    prompting is disabled (see `run_git`) and an agent running unattended has
+    no other way to authenticate.
+
+    The host is taken from the configured remote rather than assumed to be
+    github.com, so GitHub Enterprise keeps working.
+    """
+    if not token:
+        return "origin"
+
+    url = run_git(["remote", "get-url", "origin"], path, check=False).stdout.strip()
+    if not url.startswith("https://"):
+        return "origin"
+
+    rest = url[len("https://"):]
+    # Drop any credentials already in the URL rather than doubling them up.
+    host, _, tail = rest.partition("/")
+    if "@" in host:
+        host = host.split("@", 1)[1]
+    return f"https://x-access-token:{token}@{host}/{tail}"
 
 
 def locus_root() -> Path:

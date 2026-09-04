@@ -34,7 +34,9 @@ from app.services.authoring.workspace import (
     Workspace,
     WorkspaceError,
     allow_in_place,
+    authenticated_remote,
     prune_old_workspaces,
+    redact,
     resolve_source,
     run_git,
     workspace_root,
@@ -167,7 +169,22 @@ def prepare_workspace(
     # Fetch once, under the caller's per-repo lock, then cut the worktree. The
     # fetch is what makes a rework build on what the reviewer already read
     # rather than on a stale local base.
-    run_git(["fetch", "origin", "--prune"], source, check=False)
+    # Fetched from the authenticated URL rather than the bare remote name.
+    # The source checkout's own `origin` is an unauthenticated https URL, and
+    # with prompting disabled that fetch simply fails -- silently, since this
+    # is check=False -- leaving the rework to branch from a stale base. The
+    # refspec is required when fetching from a URL: without it the remote
+    # tracking refs are not updated and `_checkout` cannot find origin/<base>.
+    run_git(
+        [
+            "fetch",
+            _remote_for(source, clone_url),
+            "+refs/heads/*:refs/remotes/origin/*",
+            "--prune",
+        ],
+        source,
+        check=False,
+    )
 
     # Clear registrations whose directory is gone, before adding one back.
     # Removing a worktree directory with `shutil.rmtree` -- which the block
@@ -189,6 +206,20 @@ def prepare_workspace(
         run_git(["worktree", "add", "-b", branch, str(target), start], source)
 
     return Workspace(path=target, branch=branch, base_branch=base, source=source)
+
+
+def _remote_for(source: Path, clone_url: str | None) -> str:
+    """
+    What to fetch from: the authenticated clone URL, or the plain remote.
+
+    The clone URL already carries the token, so it is preferred when the
+    checkout's own remote is https and would otherwise need a credential
+    helper. A local or ssh remote is left alone -- see `authenticated_remote`.
+    """
+    if not clone_url:
+        return "origin"
+    url = run_git(["remote", "get-url", "origin"], source, check=False).stdout.strip()
+    return clone_url if url.startswith("https://") else "origin"
 
 
 def _default_branch(path: Path) -> str:
@@ -938,14 +969,31 @@ class OpenCodeDriver:
             # exception. Stamp the attribution onto whatever it did write.
             stamp_attribution(workspace, base_branch, self.name, model, request.attempt)
 
+            # Pushed to an authenticated URL, not to `origin`. The worktree
+            # inherits the source checkout's remote, which is unauthenticated,
+            # so this used to depend on whatever credential helper happened to
+            # be installed -- a dialog on a developer's machine and nothing at
+            # all on a server. An agent that runs unattended cannot answer
+            # either. No upstream is set, deliberately: the token would be
+            # written into the worktree's .git/config.
             push = run_git(
-                ["push", "-u", "origin", workspace.branch], workspace.path, check=False
+                [
+                    "push",
+                    authenticated_remote(workspace.path, token),
+                    f"{workspace.branch}:{workspace.branch}",
+                ],
+                workspace.path,
+                check=False,
             )
             if push.returncode != 0:
                 # The branch moved under us. Recorded; the next attempt
                 # re-fetches rather than force-pushing over whatever landed.
+                #
+                # Redacted: the URL above carries the token, and git echoes the
+                # remote it failed to reach. Unredacted this wrote the token
+                # into `AuthoringAttempt.error`, which the UI renders.
                 return failed(
-                    f"Push rejected: {(push.stderr or push.stdout).strip()}",
+                    redact(f"Push rejected: {(push.stderr or push.stdout).strip()}"),
                     files_changed=files,
                     lines_changed=lines,
                     workspace_path=str(workspace.path),
