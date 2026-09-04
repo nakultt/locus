@@ -112,3 +112,64 @@ def summary(db: Session, *, owner_id: int) -> list[dict]:
         }
         for row in sorted(rows, key=lambda r: r.service_name)
     ]
+
+# Which third party each pipeline stage actually talks to.
+#
+# The stage list is the one place every integration call already reports its
+# own outcome, with a stable key and a done/failed/skipped state. Recording
+# from it means a new stage is instrumented by adding one line here, rather
+# than by remembering to wrap its call site -- and the failure mode of
+# forgetting is a service missing from the panel, not a wrong claim about it.
+STAGE_SERVICES: dict[str, str] = {
+    "read_pr": "github",
+    "github_issues": "github",
+    "pr_comment": "github",
+    "inline_comments": "github",
+    "jira": "jira",
+    "slack_search": "slack",
+    "slack_post": "slack",
+    "docs_read": "docs",
+    "docs_export": "docs",
+}
+
+
+def record_stages(db: Session, *, owner_id: int, stages) -> None:
+    """
+    Record one run's integration outcomes from its pipeline stages.
+
+    Only `done` and `failed` are recorded. A `skipped` stage is a service that
+    was never attempted -- no credential, nothing to search -- and the rule
+    that absence means "never attempted" is what makes the panel readable.
+    Writing a success for it would be a claim nothing supports; writing a
+    failure would be worse.
+
+    A service that both succeeded and failed within one run is recorded as
+    failed, since the failure is the part someone has to act on.
+
+    Never raises. Same rule as the rest of this module: a run that did its work
+    must not be reported as broken because the record could not be written.
+    """
+    try:
+        outcomes: dict[str, tuple[bool, str]] = {}
+        for stage in stages or []:
+            service = STAGE_SERVICES.get(getattr(stage, "key", None))
+            if not service:
+                continue
+            state = getattr(stage, "state", None)
+            state = getattr(state, "value", state)
+            if state == "failed":
+                outcomes[service] = (
+                    False, str(getattr(stage, "detail", "") or "failed")
+                )
+            elif state == "done" and service not in outcomes:
+                outcomes[service] = (True, "")
+
+        for service, (ok, detail) in outcomes.items():
+            if ok:
+                record_success(db, owner_id=owner_id, service=service)
+            else:
+                record_failure(
+                    db, owner_id=owner_id, service=service, error=detail
+                )
+    except Exception:
+        logger.debug("Could not record stage health", exc_info=True)

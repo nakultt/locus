@@ -21,6 +21,7 @@ model that can act on what it reads.
 import asyncio
 import json
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -64,6 +65,42 @@ def _find_binary(name: str) -> str | None:
     return shutil.which(name)
 
 
+def _describe(exc: BaseException) -> str:
+    """
+    A message for an exception, even when it has none.
+
+    `NotImplementedError` -- what an event loop without subprocess support
+    raises -- stringifies to "". Interpolated straight into an error it
+    produced "semgrep failed: " with nothing after the colon, which named
+    neither the cause nor anything to search for. The class name always says
+    something.
+    """
+    return str(exc) or exc.__class__.__name__
+
+
+async def _run_binary(argv: list[str], timeout: int) -> subprocess.CompletedProcess:
+    """
+    Run a scanner off the event loop thread.
+
+    Deliberately `subprocess.run` in a worker thread rather than
+    `asyncio.create_subprocess_exec`. On Windows the latter needs a
+    ProactorEventLoop, and uvicorn selects a SelectorEventLoop whenever it
+    manages subprocesses of its own -- which `reload=True` turns on, so the
+    development default silently disabled every deterministic scan. The
+    failure surfaced as an empty `NotImplementedError` while the PR comment
+    still read "No issues detected", so nothing about it looked broken.
+
+    A thread has no such requirement and behaves the same on every platform.
+    """
+    return await asyncio.to_thread(
+        subprocess.run,
+        argv,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
 def semgrep_available() -> bool:
     """Whether the semgrep binary can be found."""
     return _find_binary("semgrep") is not None
@@ -104,24 +141,23 @@ async def run_semgrep(files: dict[str, str]) -> tuple[list[SecurityFinding], str
             target.write_text(content, encoding="utf-8", errors="replace")
 
         try:
-            process = await asyncio.create_subprocess_exec(
-                semgrep_bin,
-                "--config", "p/security-audit",
-                "--config", "p/secrets",
-                "--json",
-                "--quiet",
-                "--no-git-ignore",
-                str(root),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            completed = await _run_binary(
+                [
+                    semgrep_bin,
+                    "--config", "p/security-audit",
+                    "--config", "p/secrets",
+                    "--json",
+                    "--quiet",
+                    "--no-git-ignore",
+                    str(root),
+                ],
+                timeout=SEMGREP_TIMEOUT_SECONDS,
             )
-            stdout, _ = await asyncio.wait_for(
-                process.communicate(), timeout=SEMGREP_TIMEOUT_SECONDS
-            )
-        except TimeoutError:
+            stdout = completed.stdout or b""
+        except subprocess.TimeoutExpired:
             return [], "semgrep timed out"
         except Exception as e:
-            return [], f"semgrep failed: {e}"
+            return [], f"semgrep failed: {_describe(e)}"
 
         temp_root = str(root)
 
@@ -185,21 +221,21 @@ async def run_gitleaks(diff_text: str) -> tuple[list[SecurityFinding], str | Non
         target.write_text(diff_text, encoding="utf-8")
 
         try:
-            process = await asyncio.create_subprocess_exec(
-                gitleaks_bin, "detect",
-                "--source", str(target),
-                "--no-git",
-                "--report-format", "json",
-                "--report-path", str(report),
-                "--exit-code", "0",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            await _run_binary(
+                [
+                    gitleaks_bin, "detect",
+                    "--source", str(target),
+                    "--no-git",
+                    "--report-format", "json",
+                    "--report-path", str(report),
+                    "--exit-code", "0",
+                ],
+                timeout=60,
             )
-            await asyncio.wait_for(process.communicate(), timeout=60)
-        except TimeoutError:
+        except subprocess.TimeoutExpired:
             return [], "gitleaks timed out"
         except Exception as e:
-            return [], f"gitleaks failed: {e}"
+            return [], f"gitleaks failed: {_describe(e)}"
 
         if not report.exists():
             return [], None

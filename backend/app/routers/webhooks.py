@@ -219,7 +219,20 @@ async def github_webhook(
     elif action == "closed":
         # "closed" with merged=true is the only signal GitHub gives for a merge.
         if not pr.get("merged"):
-            return {"message": "Ignoring closed-without-merge"}
+            # Not a merge, but not nothing either. Recorded rather than
+            # discarded: an abandoned pull request that never leaves the review
+            # loop stays "in flight" and pins its task's stage on the board.
+            #
+            # Written here rather than queued as a job because there is no
+            # analysis to run -- the change did not land and the diff is not
+            # going to be looked at again.
+            review_flow.record_closed(
+                db,
+                owner_id=registration.owner_id,
+                repo=repo_full_name,
+                pr_number=pr.get("number"),
+            )
+            return {"message": "Recorded closed-without-merge"}
         action = MERGE_ACTION
     elif action not in ANALYZED_ACTIONS:
         return {"message": f"Ignoring action: {action}"}

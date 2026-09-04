@@ -336,8 +336,13 @@ class TestCommand:
         monkeypatch.setenv("LOCUS_OPENCODE_CMD", "my-agent --file {prompt}")
         monkeypatch.delenv("LOCUS_OPENCODE_MODEL", raising=False)
 
-        assert driver.build_command(Path("/tmp/p.md"), Path("/tmp/w")) == [
-            "my-agent", "--file", "/tmp/p.md"
+        # The rendered path is compared as the platform writes it. Hard-coding
+        # the POSIX form asserted the separator rather than the template, and
+        # failed on Windows -- where this driver is expected to run, since the
+        # source root and workspace root are both native paths.
+        prompt = Path("/tmp/p.md")
+        assert driver.build_command(prompt, Path("/tmp/w")) == [
+            "my-agent", "--file", str(prompt)
         ]
 
     def test_the_model_is_opencode_own_unless_pinned(self, monkeypatch):

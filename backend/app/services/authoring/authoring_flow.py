@@ -87,13 +87,29 @@ async def maybe_retry(
         models.PRReview.pr_number == pr_number,
     ).first()
 
+    # A QA rejection opens a new pull request on a new branch; a rework
+    # continues the branch the reviewer has already read.
+    #
+    # This used to pass None for both, which meant the branch name picked up
+    # the attempt number and every rework opened a *second* pull request. The
+    # reviewer's changes-requested review then sat on a PR that never received
+    # the fix, `PRReview.round_number` stopped tracking the round trip, and the
+    # abandoned PR -- still unmerged, still `changes_requested` -- pinned the
+    # task board's stage forever, because `_derive_stage` reads the furthest
+    # state among *unmerged* pull requests.
+    continue_branch = (
+        await _head_branch(repo, pr_number, integration_configs)
+        if trigger == "changes_requested"
+        else None
+    )
+
     request = authoring.AuthoringRequest(
         ticket_key=ticket_key,
-        title=(review.pr_title if review else None) or ticket_key,
+        title=_bare_title(
+            (review.pr_title if review else None) or ticket_key, ticket_key
+        ),
         repo=repo,
-        # A QA rejection opens a new pull request on a new branch; a rework
-        # continues the branch the reviewer has already read.
-        existing_branch=None,
+        existing_branch=continue_branch,
         context=_context(db, owner_id, repo, pr_number, ticket_key),
         asks=authoring.gather_asks(db, owner_id=owner_id, ticket_key=ticket_key),
         rejection=rejection,
@@ -251,6 +267,50 @@ async def _hand_back(
         outcome="handed_back",
         succeeded=sent,
     )
+
+
+def _bare_title(title: str, ticket_key: str) -> str:
+    """
+    The pull request title without the ticket key the driver re-adds.
+
+    The driver builds its title as `f"{ticket_key}: {title}"`, and the stored
+    `PRReview.pr_title` is a previous run's output, which already carries that
+    prefix. Passing it back unchanged produced "KEY: KEY: Title" on the second
+    attempt and would have added a third on the next one.
+    """
+    prefix = f"{ticket_key}: "
+    while title.startswith(prefix):
+        title = title[len(prefix):]
+    return title or ticket_key
+
+
+async def _head_branch(
+    repo: str, pr_number: int, integration_configs: dict
+) -> str | None:
+    """
+    The branch this pull request is on, so a rework can push to it.
+
+    Read from GitHub rather than reconstructed from the ticket key and attempt
+    number: the branch may have been created by a human, by the Development
+    panel, or by an earlier attempt, and only GitHub knows which. A failure
+    returns None, which falls back to the previous behaviour of cutting a new
+    branch -- worse, but not a lost attempt.
+    """
+    config = integration_configs.get("github") or {}
+    token = config.get("api_key") or config.get("token")
+    if not token:
+        return None
+    try:
+        details = await github_pr.get_pull_request(token, repo, pr_number)
+    except Exception as exc:
+        logger.warning("Could not read the head branch for %s#%s: %s", repo, pr_number, exc)
+        return None
+    if not isinstance(details, dict):
+        return None
+    # GitHub returns an explicit null for optional objects, so guard the value
+    # rather than the key's presence.
+    head = details.get("head") or {}
+    return (head.get("ref") or None) if isinstance(head, dict) else None
 
 
 def _context(

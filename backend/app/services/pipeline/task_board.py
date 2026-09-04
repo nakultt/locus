@@ -141,9 +141,15 @@ def _derive_stage(
         for r in reviews
     )
 
-    in_flight = [
-        r for r in reviews if r.state != schemas.ReviewState.merged.value
-    ]
+    # In flight means open, not merely un-merged. A pull request closed
+    # without merging is abandoned work: it is not going to advance, and
+    # letting it stay in this list pinned the task at whatever state it was
+    # abandoned in -- forever, and regardless of how far its replacement got.
+    finished = {
+        schemas.ReviewState.merged.value,
+        schemas.ReviewState.closed.value,
+    }
+    in_flight = [r for r in reviews if r.state not in finished]
 
     if not in_flight:
         if qa is not None:
@@ -152,7 +158,10 @@ def _derive_stage(
                 else schemas.TaskStage.testing
             ), had_changes
 
-        if reviews:
+        # Only an actual merge reports as merged. Every pull request having
+        # been closed unmerged means the work was abandoned, not landed, so
+        # the task falls back to what the evidence below it supports.
+        if any(r.state == schemas.ReviewState.merged.value for r in reviews):
             return schemas.TaskStage.merged, had_changes
 
         if analyzed:

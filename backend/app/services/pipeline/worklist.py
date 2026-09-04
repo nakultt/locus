@@ -101,11 +101,18 @@ def build(db: Session, *, owner_id: int) -> schemas.Worklist:
     Ordering is decided here rather than in the client: the API and the UI must
     not be able to disagree about what is most urgent.
     """
+    # Merged and closed are both finished: nobody is waiting on either. A
+    # pull request closed without merging was abandoned, and listing it as
+    # blocked on you forever is exactly the noise that trains people to stop
+    # reading the list.
     reviews = (
         db.query(models.PRReview)
         .filter(
             models.PRReview.owner_id == owner_id,
-            models.PRReview.state != schemas.ReviewState.merged.value,
+            models.PRReview.state.notin_([
+                schemas.ReviewState.merged.value,
+                schemas.ReviewState.closed.value,
+            ]),
         )
         .all()
     )

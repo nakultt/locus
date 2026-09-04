@@ -14,12 +14,66 @@
  */
 
 import { spawn, type Subprocess } from "bun";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 // fileURLToPath, not `.pathname`: on Windows the pathname of a file URL keeps a
 // leading slash ("/E:/Github/locus/"), which Bun cannot use as a cwd — the spawn
 // then fails as ENOENT on the *command*, which reads as "uv is not installed".
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
+
+/**
+ * The environment for a child, without anything the repo-root `.env` defined.
+ *
+ * Bun loads the root `.env` automatically and `Bun.spawn` inherits it, so every
+ * variable in that file arrived in the backend as though an operator had
+ * exported it. `backend/.env` is then powerless to correct it: python-dotenv's
+ * `load_dotenv()` does not override variables already present in the
+ * environment.
+ *
+ * That is not hypothetical. The root file is a leftover from the pre-Next,
+ * pre-Postgres stack and still carries `LLM_PROVIDER=gemini` beside a stale
+ * `GOOGLE_API_KEY`, so the backend resolved its model backend to Google and
+ * sent every diff, Slack thread and ticket body it analysed to a third party --
+ * exactly what "the analysis models run locally" exists to prevent. Nothing
+ * leaked only because the key was long dead and every call 400'd.
+ *
+ * Stripping the file's keys rather than a hand-written denylist is deliberate:
+ * a denylist has to be updated every time somebody adds a variable, and the
+ * failure mode of forgetting is silent. Each half already reads its own `.env`
+ * from its own directory, so nothing here needs a root variable to start. A
+ * value genuinely exported by the operator's shell is kept, since that is the
+ * one case where overriding the file is the point.
+ */
+function childEnv(root: string): Record<string, string | undefined> {
+  const env = { ...process.env } as Record<string, string | undefined>;
+
+  let contents: string;
+  try {
+    contents = readFileSync(`${root}.env`, "utf8");
+  } catch {
+    return env; // No root .env: nothing to strip.
+  }
+
+  const shellExported = new Set(
+    (process.env.LOCUS_KEEP_ROOT_ENV ?? "")
+      .split(",")
+      .map((name) => name.trim())
+      .filter(Boolean),
+  );
+
+  for (const line of contents.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq <= 0) continue;
+    const name = trimmed.slice(0, eq).trim().replace(/^export\s+/, "");
+    if (!name || shellExported.has(name)) continue;
+    delete env[name];
+  }
+
+  return env;
+}
 
 type Service = {
   name: string;
@@ -66,7 +120,7 @@ for (const service of SERVICES) {
     cmd: service.cmd,
     cwd: service.cwd,
     stdio: ["inherit", "inherit", "inherit"],
-    env: process.env,
+    env: childEnv(ROOT),
 
     // One process dying takes the pair down. Leaving the survivor running
     // hides which half failed behind a wall of connection-refused errors from

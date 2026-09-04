@@ -390,6 +390,57 @@ def record_merged(
     return review
 
 
+def record_closed(
+    db: Session,
+    owner_id: int,
+    repo: str,
+    pr_number: int,
+) -> models.PRReview | None:
+    """
+    Record that a pull request was closed without merging.
+
+    GitHub sends the same `closed` action for a merge and an abandonment and
+    distinguishes them only by `merged`. The merge half was always handled; the
+    other half was dropped on the floor, so nothing ever left the review loop
+    except by merging.
+
+    That is what made an abandoned pull request permanent on the task board.
+    `task_board._derive_stage` reads the furthest state among the pull requests
+    still in flight -- deliberately, so a reopened ticket is not reported as
+    merged -- and "in flight" meant "not merged". A superseded PR sitting in
+    `changes_requested` therefore pinned its task there forever, however far the
+    replacement got.
+
+    A merged pull request is never walked back to closed: GitHub closes it on
+    merge, and the merge is the outcome that matters. Returns None when the PR
+    was never reviewed, the same rule `record_merged` follows -- there is no
+    record worth inventing for a pull request nobody looked at.
+    """
+    review = (
+        db.query(models.PRReview)
+        .filter(
+            models.PRReview.repo == repo,
+            models.PRReview.pr_number == pr_number,
+            models.PRReview.owner_id == owner_id,
+        )
+        .first()
+    )
+
+    if review is None:
+        return None
+
+    if review.state == schemas.ReviewState.merged.value:
+        return review
+
+    review.state = schemas.ReviewState.closed.value
+    # Nobody is waiting on these any more. Leaving them set would keep the pull
+    # request in the "blocked on you" list it no longer belongs in.
+    review.pending_asks = None
+    db.commit()
+    db.refresh(review)
+    return review
+
+
 def asks_for_qa(
     db: Session,
     owner_id: int,

@@ -34,6 +34,7 @@ from app.schemas import (
     StageState,
     ToolInvocation,
 )
+from app.services import integration_health
 from app.services.integrations import github_pr, google_auth, google_docs_context
 from app.services.pipeline import (
     assigned,
@@ -903,6 +904,71 @@ def _render_review_findings(findings: list[ReviewFinding]) -> str:
     return "\n".join(lines)
 
 
+def work_item_keys(context, repo: str) -> list[str]:
+    """
+    The work items a pull request belongs to, in one place.
+
+    A tracker key when there is a tracker, and otherwise the GitHub issue the
+    pull request closes -- a repo with no Jira still has work items, they are
+    just numbered differently. The issue is qualified by its repository,
+    because a bare "#5" is ambiguous across repos and cannot be matched against
+    an assigned issue, which the board identifies as "owner/name#5".
+
+    This exists because there were two of these. `comms["ticket_keys"]` had the
+    issue fallback and the Google Docs export did not, so on a repo with no
+    tracker the export saw no work item, skipped the ticket-keyed lookup in
+    `report_sync.find_report`, and created a fresh document per pull request.
+    The document the board linked -- the one created from the ticket, before
+    any PR existed -- was never written to again, so it still read "No pull
+    request has been opened for this work yet" long after the work had merged.
+    """
+    return (
+        [t.key for t in context.tickets]
+        or [
+            f"{repo}#{i.number}"
+            for i in context.linked_issues
+            if i.relation == "closes"
+        ]
+    )
+
+
+# Which pipeline errors belong to which section of the comment. Matched on the
+# prefix each pass writes, so a pass that forgets to register here still shows
+# up in the notes rather than being silently attributed to the wrong section.
+_SECURITY_ERROR_PREFIXES = ("semgrep", "gitleaks", "llm review")
+_REVIEW_ERROR_PREFIXES = ("code review",)
+
+
+def _errors_for(errors: list[str], prefixes: tuple[str, ...]) -> list[str]:
+    return [e for e in errors if e.lower().startswith(prefixes)]
+
+
+def _incomplete_notice(
+    heading: str, errors: list[str], has_findings: bool
+) -> str:
+    """
+    Say plainly that a section's analysis did not finish.
+
+    Rendered whether or not the section found anything. A partial list is the
+    more dangerous of the two: findings present with a scanner dead reads as a
+    complete result, and nothing else in the output contradicts it.
+    """
+    if has_findings:
+        lead = (
+            "⚠️ **This section is incomplete** — part of the analysis "
+            "failed, so what is listed above is not the whole picture."
+        )
+    else:
+        lead = (
+            "⚠️ **This analysis did not complete.** Nothing is listed "
+            "because it did not run, which is not the same as finding nothing."
+        )
+    lines = [f"### {heading}", "", lead, ""]
+    lines += [f"- {e}" for e in errors]
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _render_findings(findings: list[SecurityFinding], heading: str, caveat: str) -> str:
     """Render one findings table."""
     if not findings:
@@ -1018,7 +1084,21 @@ def render_pr_comment(result: PRAnalysisResult) -> str:
     if unverified:
         parts.append(unverified)
 
-    if not result.confirmed_findings and not result.unverified_findings:
+    # A pass that failed must never render as a pass that found nothing.
+    # These are different claims and only one of them is evidence about the
+    # code. Reporting the second when the first is true is what let a dead
+    # scanner sit unnoticed: the headline said "No issues detected" while the
+    # collapsed notes below said semgrep never ran.
+    security_errors = _errors_for(result.errors, _SECURITY_ERROR_PREFIXES)
+    review_errors = _errors_for(result.errors, _REVIEW_ERROR_PREFIXES)
+
+    if security_errors:
+        parts.append(_incomplete_notice(
+            "🔒 Security",
+            security_errors,
+            bool(result.confirmed_findings or result.unverified_findings),
+        ))
+    elif not result.confirmed_findings and not result.unverified_findings:
         parts.append("### 🔒 Security\n\nNo issues detected in the changed code.\n")
 
     # Code review, kept apart from security so "no vulnerabilities" is never
@@ -1026,7 +1106,11 @@ def render_pr_comment(result: PRAnalysisResult) -> str:
     review = _render_review_findings(result.review_findings)
     if review:
         parts.append(review)
-    else:
+    if review_errors:
+        parts.append(_incomplete_notice(
+            "Code review", review_errors, bool(result.review_findings)
+        ))
+    elif not review:
         parts.append("### Code review\n\nNo issues raised.\n")
 
     if result.errors:
@@ -1634,10 +1718,8 @@ async def analyze_pull_request(
                 # The work item, if this pull request has one. It decides both
                 # which history the document carries and which document this
                 # is -- a task spanning three PRs keeps one record.
-                report_ticket_key = (
-                    result.context.ticket_keys[0]
-                    if result.context.ticket_keys else None
-                )
+                keys = work_item_keys(result.context, repo)
+                report_ticket_key = keys[0] if keys else None
 
                 timeline_events = []
                 review_row = None
@@ -1739,6 +1821,14 @@ async def analyze_pull_request(
     # Pydantic copied the list at that point rather than aliasing it.
     result.stages = stages
 
+    # What each integration actually did this run, so a persistently broken one
+    # has somewhere to surface. The loops swallow their own failures by design,
+    # which is why this has to be recorded rather than raised -- and why it is
+    # read off the stages, the one place every integration call already
+    # reported its outcome. Recording never fails the run it describes.
+    if db is not None and owner_id is not None:
+        integration_health.record_stages(db, owner_id=owner_id, stages=stages)
+
     if comms is not None:
         # The work items this PR belongs to, for keying the log and grouping
         # pull requests into tasks. Issue references count: a repo with no
@@ -1747,10 +1837,6 @@ async def analyze_pull_request(
         # ambiguous across repos and, more concretely, cannot be matched
         # against an assigned issue -- which the task board identifies as
         # "owner/name#5", the same shape worklist._task_key falls back to.
-        comms["ticket_keys"] = (
-            [t.key for t in context.tickets]
-            or [f"{repo}#{i.number}" for i in context.linked_issues
-                if i.relation == "closes"]
-        )
+        comms["ticket_keys"] = work_item_keys(context, repo)
 
     return result

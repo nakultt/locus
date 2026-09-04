@@ -617,6 +617,12 @@ class ReviewState(str, Enum):
     changes_requested = "changes_requested"
     approved = "approved"
     merged = "merged"
+    # Closed without merging: superseded, abandoned, or opened by mistake.
+    # Distinct from `merged` because the change did not land, and distinct
+    # from the live states because nobody is waiting on it. Without this the
+    # only way to leave the loop was to merge, so an abandoned pull request
+    # stayed "in flight" forever and pinned its task's stage on the board.
+    closed = "closed"
 
 
 class ReviewOutcome(str, Enum):

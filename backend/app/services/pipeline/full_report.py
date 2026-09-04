@@ -68,6 +68,37 @@ def _local(stamp: datetime | None, timezone_name: str | None = None) -> str:
     return stamp.astimezone(zone).strftime("%d %b %Y, %H:%M %Z")
 
 
+def _render_fix(fix) -> list[str]:
+    """
+    A suggested fix as lines of plain text.
+
+    `suggested_fix` is a `SuggestedFix`, not a string. Passing the object
+    straight to `_clip` raised `'SuggestedFix' object has no attribute
+    'strip'`, and because `report_sync.refresh` swallows its own failure and
+    returns the stored URL -- deliberately, so a broken export cannot stop the
+    notification it decorates -- the document silently stopped being updated
+    from the review and QA paths while every link to it kept working.
+
+    Both halves are rendered. `replacement` is the literal code and is absent
+    whenever the fix cannot be expressed as an in-place line replacement, which
+    is exactly when `explanation` carries the whole answer.
+    """
+    out: list[str] = []
+    replacement = getattr(fix, "replacement", None)
+    explanation = getattr(fix, "explanation", "") or ""
+
+    if replacement:
+        start = getattr(fix, "start_line", None)
+        end = getattr(fix, "end_line", None)
+        where = f" (lines {start}-{end})" if start and end else ""
+        out.append(f"    Suggested replacement{where}:")
+        out.append(_quote(_clip(replacement, 800)))
+    if explanation:
+        out.append("    Why:")
+        out.append(_quote(_clip(explanation, 800)))
+    return out
+
+
 def _clip(text: str | None, limit: int = MAX_BODY_CHARS) -> str:
     """Trim a body, saying so rather than ending mid-sentence in silence."""
     if not text:
@@ -314,9 +345,9 @@ def render(
                 )
             if finding.description:
                 out.append(f"    {finding.description}")
-            if getattr(finding, "suggested_fix", None):
-                out.append("    Suggested replacement:")
-                out.append(_quote(_clip(finding.suggested_fix, 800)))
+            fix = getattr(finding, "suggested_fix", None)
+            if fix is not None:
+                out.extend(_render_fix(fix))
             out.append("")
     else:
         out.append("  Nothing flagged.")
