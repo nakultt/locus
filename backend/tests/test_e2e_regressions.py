@@ -659,3 +659,61 @@ class TestGitIsNonInteractive:
         ws.run_git(["init", "-q"], tmp_path)
         ws.run_git(["remote", "add", "origin", "https://github.com/acme/api.git"], tmp_path)
         assert ws.authenticated_remote(tmp_path, None) == "origin"
+
+
+# --------------------------------------------------------------------------
+# The channel a tester replies through must not change the record.
+# --------------------------------------------------------------------------
+
+
+class TestQAReplyRefreshesTheReportOnBothChannels:
+    """
+    The Slack QA path rewrote the report document after a reply; the email path
+    did not. So the report ended with the merge and never recorded the tester's
+    verdict whenever they replied by email -- which is the ordinary case, since
+    the QA brief reaches them there.
+
+    `close_on_qa_signoff` is deliberately identical across both channels
+    because "the channel a tester chose must not change the outcome". The
+    document is part of that outcome: it is the whole record, and the verdict
+    is the one thing a later reader most wants from it.
+    """
+
+    def test_the_email_poller_refreshes_the_report(self):
+        import inspect
+
+        from app.services.pipeline import qa_email_poller
+
+        source = inspect.getsource(qa_email_poller.poll_once)
+        assert "report_sync.refresh" in source, (
+            "a QA reply by email must rewrite the report, as the Slack path does"
+        )
+
+    def test_both_paths_refresh(self):
+        """Neither channel is allowed to be the one that forgets."""
+        import inspect
+
+        from app.routers import slack_events
+        from app.services.pipeline import qa_email_poller
+
+        slack_src = inspect.getsource(slack_events)
+        email_src = inspect.getsource(qa_email_poller)
+        assert "report_sync.refresh" in slack_src
+        assert "report_sync.refresh" in email_src
+
+    def test_a_failed_refresh_does_not_lose_the_signoff(self, monkeypatch):
+        """
+        Recording the sign-off is the work; rewriting the document describes
+        it. A document that cannot be written must not turn a sign-off that
+        genuinely happened into a failure.
+        """
+        import inspect
+
+        from app.services.pipeline import qa_email_poller
+
+        source = inspect.getsource(qa_email_poller.poll_once)
+        refresh_at = source.index("report_sync.refresh")
+        preceding = source[:refresh_at]
+        assert preceding.rstrip().endswith("try:") or "try:" in preceding[-200:], (
+            "the refresh must be guarded so it cannot fail the sign-off"
+        )

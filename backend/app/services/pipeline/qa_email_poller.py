@@ -23,7 +23,7 @@ from app.core.database import SessionLocal
 from app.core.dependencies import get_integration_configs
 from app.services import integration_health
 from app.services.integrations import google_auth
-from app.services.pipeline import comms_log
+from app.services.pipeline import comms_log, report_sync
 from app.services.pipeline.agent_settings import resolve_settings
 from app.services.pipeline.qa_feedback import handle_qa_reply
 
@@ -287,6 +287,34 @@ async def poll_once() -> int:
                 if outcome["verdict"] == "works":
                     thread.resolved = 1
                     db.commit()
+
+                # The tester's answer is the last thing that happens to a
+                # change, and it is exactly what someone reading the record
+                # later wants: whether it actually worked.
+                #
+                # The Slack path has always done this. This one did not, so
+                # the report was complete or missing its ending depending on
+                # which channel the tester happened to reply through -- and
+                # a tester who replies by email is the ordinary case, since
+                # the brief reaches them there. `close_on_qa_signoff` is
+                # careful to behave identically across both channels for
+                # exactly this reason; the document has to as well.
+                #
+                # Failure is swallowed: refresh already returns the stored URL
+                # rather than raising, and a sign-off that genuinely happened
+                # must not be reported as failed because a document could not
+                # be rewritten.
+                try:
+                    await report_sync.refresh(
+                        db, owner_id=thread.owner_id, repo=thread.repo,
+                        pr_number=thread.pr_number,
+                        integration_configs=integration_configs,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Could not refresh the report for %s#%s after a QA email",
+                        thread.repo, thread.pr_number, exc_info=True,
+                    )
 
         return processed
 
