@@ -9,7 +9,7 @@ import type {
   TaskStage,
   WorklistKind,
 } from "@/lib/api";
-import { formatDateTime } from "@/lib/datetime";
+import { formatDateTime, parseInstant } from "@/lib/datetime";
 import type { DotTone } from "@/components/ui/badge";
 
 /**
@@ -148,3 +148,22 @@ export const ageLabel = (hours: number) => {
  * other, so the wall clock has to be the same for everyone reading it.
  */
 export const timeOf = (iso?: string | null) => formatDateTime(iso);
+
+/**
+ * How long ago an instant was, in the shortest honest form.
+ *
+ * Used for a run that is still going, so it counts up rather than describing
+ * an age. Seconds matter for the first minute — a run that has just started
+ * showing "0m" reads as stalled.
+ */
+export const elapsedLabel = (iso: string | null | undefined) => {
+  if (!iso) return "";
+  const started = parseInstant(iso);
+  if (!started) return "";
+  const seconds = Math.max(0, (Date.now() - started.getTime()) / 1000);
+  if (seconds < 60) return `${Math.floor(seconds)}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+};

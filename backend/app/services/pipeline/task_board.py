@@ -28,9 +28,11 @@ import asyncio
 import json
 import logging
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app import models, schemas
+from app.services.authoring import authoring
 from app.services.integrations import issue_links
 from app.services.pipeline import (
     assigned,
@@ -87,6 +89,23 @@ def _ticket_keys(review: models.PRReview) -> list[str]:
     ]
 
 
+def _matches_qa(
+    thread: models.QAThread,
+    pr_idents: set[tuple[str, int]],
+    ticket_key: str,
+) -> bool:
+    if thread.repo and thread.pr_number and (thread.repo, thread.pr_number) in pr_idents:
+        return True
+    if thread.ticket_keys_json:
+        try:
+            keys = json.loads(thread.ticket_keys_json)
+            if ticket_key in keys:
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def _derive_stage(
     reviews: list[models.PRReview],
     qa: models.QAThread | None,
@@ -94,6 +113,9 @@ def _derive_stage(
     has_pr: bool = False,
     has_branch: bool = False,
     has_attempt: bool = False,
+    merged_idents: set[tuple[str, int]] | None = None,
+    has_qa_event: bool = False,
+    item_status: str | None = None,
 ) -> tuple[schemas.TaskStage, bool]:
     """
     How far this task has travelled, and whether changes were ever requested.
@@ -141,6 +163,10 @@ def _derive_stage(
         for r in reviews
     )
 
+    merged_set = set(merged_idents or ())
+    if qa is not None and qa.repo and qa.pr_number:
+        merged_set.add((qa.repo, qa.pr_number))
+
     # In flight means open, not merely un-merged. A pull request closed
     # without merging is abandoned work: it is not going to advance, and
     # letting it stay in this list pinned the task at whatever state it was
@@ -149,7 +175,10 @@ def _derive_stage(
         schemas.ReviewState.merged.value,
         schemas.ReviewState.closed.value,
     }
-    in_flight = [r for r in reviews if r.state not in finished]
+    in_flight = [
+        r for r in reviews
+        if r.state not in finished and (r.repo, r.pr_number) not in merged_set
+    ]
 
     if not in_flight:
         if qa is not None:
@@ -158,11 +187,27 @@ def _derive_stage(
                 else schemas.TaskStage.testing
             ), had_changes
 
+        if has_qa_event:
+            return schemas.TaskStage.testing, had_changes
+
         # Only an actual merge reports as merged. Every pull request having
         # been closed unmerged means the work was abandoned, not landed, so
         # the task falls back to what the evidence below it supports.
-        if any(r.state == schemas.ReviewState.merged.value for r in reviews):
+        if (
+            any(r.state == schemas.ReviewState.merged.value for r in reviews)
+            or any((r.repo, r.pr_number) in merged_set for r in reviews)
+        ):
             return schemas.TaskStage.merged, had_changes
+
+        if item_status:
+            normalized = item_status.strip().lower()
+            if normalized in {"done", "closed", "resolved", "released"}:
+                return schemas.TaskStage.done, had_changes
+            if normalized in {
+                "qa", "in qa", "testing", "test", "ready for qa",
+                "ready for test", "qa in progress", "under test",
+            }:
+                return schemas.TaskStage.testing, had_changes
 
         if analyzed:
             return schemas.TaskStage.analyzed, False
@@ -444,12 +489,6 @@ async def build(
     """
     items, unavailable = await fetch_assigned(integration_configs)
 
-    # Every report document this owner has, in one query, so the per-card
-    # resolution below is a dict lookup rather than a round trip each.
-    docs_by_ticket, docs_by_pr = report_sync.document_urls_for(
-        db, owner_id=owner_id
-    )
-
     # Work that finished recently, rendered in its own section.
     #
     # Both source queries above ask only for unfinished work, so a ticket
@@ -474,22 +513,141 @@ async def build(
     github_token = (integration_configs.get("github") or {}).get("api_key") or ""
     links_by_key = await issue_links.fetch(github_token, items)
 
-    reviews = (
-        db.query(models.PRReview)
+    # Collect PR identifiers known to be associated with this user's assigned items
+    # and authoring attempts, so team-registered webhooks or co-authored PRs are
+    # correctly visible on this user's task board.
+    user_pr_idents: set[tuple[str, int]] = set()
+    user_ticket_keys: set[str] = {item.key for item in items}
+    for links in links_by_key.values():
+        for pr in links.pull_requests:
+            if pr.repo and pr.pr_number:
+                user_pr_idents.add((pr.repo, pr.pr_number))
+
+    for row in (
+        db.query(
+            models.AuthoringAttempt.ticket_key,
+            models.AuthoringAttempt.repo,
+            models.AuthoringAttempt.pr_number,
+        )
+        .filter(models.AuthoringAttempt.owner_id == owner_id)
+        .all()
+    ):
+        if row.ticket_key:
+            user_ticket_keys.add(row.ticket_key)
+        if row.repo and row.pr_number:
+            user_pr_idents.add((row.repo, row.pr_number))
+
+    for rev in (
+        db.query(
+            models.PRReview.repo,
+            models.PRReview.pr_number,
+            models.PRReview.ticket_keys,
+        )
         .filter(models.PRReview.owner_id == owner_id)
         .all()
+    ):
+        if rev.repo and rev.pr_number:
+            user_pr_idents.add((rev.repo, rev.pr_number))
+        if rev.ticket_keys:
+            for k in rev.ticket_keys.splitlines():
+                if k.strip():
+                    user_ticket_keys.add(k.strip())
+
+    # Every report document this owner has or associated with their PRs/tickets,
+    # in one query, so the per-card resolution below is a dict lookup rather
+    # than a round trip each.
+    docs_by_ticket, docs_by_pr = report_sync.document_urls_for(
+        db, owner_id=owner_id, pr_idents=user_pr_idents, ticket_keys=user_ticket_keys
     )
+
+    review_clauses = [models.PRReview.owner_id == owner_id]
+    for r, p in user_pr_idents:
+        review_clauses.append(
+            (models.PRReview.repo == r) & (models.PRReview.pr_number == p)
+        )
+    reviews = (
+        db.query(models.PRReview)
+        .filter(or_(*review_clauses))
+        .all()
+    )
+    for rev in reviews:
+        if rev.repo and rev.pr_number:
+            user_pr_idents.add((rev.repo, rev.pr_number))
+
     qa_threads = (
         db.query(models.QAThread)
-        .filter(models.QAThread.owner_id == owner_id)
         .order_by(models.QAThread.created_at.desc())
         .all()
     )
+
+    system_merged_idents: set[tuple[str, int]] = {
+        (t.repo, t.pr_number)
+        for t in qa_threads
+        if t.repo and t.pr_number
+    } | {
+        (r.repo, r.pr_number)
+        for r in db.query(models.PRReview.repo, models.PRReview.pr_number)
+        .filter(models.PRReview.state == schemas.ReviewState.merged.value)
+        .all()
+        if r.repo and r.pr_number
+    } | {
+        (j.repo, j.pr_number)
+        for j in db.query(models.PRJob.repo, models.PRJob.pr_number)
+        .filter(
+            models.PRJob.action == "merged",
+            models.PRJob.status == schemas.PRJobStatus.completed.value,
+        )
+        .all()
+        if j.repo and j.pr_number
+    } | {
+        (e.repo, e.pr_number)
+        for e in db.query(models.CommunicationEvent.repo, models.CommunicationEvent.pr_number)
+        .filter(
+            models.CommunicationEvent.loop == "qa",
+            models.CommunicationEvent.direction == "sent",
+            models.CommunicationEvent.outcome == "ready_to_test",
+            models.CommunicationEvent.succeeded == 1,
+        )
+        .all()
+        if e.repo and e.pr_number
+    }
+
+    qa_event_prs: set[tuple[str, int]] = {
+        (e.repo, e.pr_number)
+        for e in db.query(models.CommunicationEvent.repo, models.CommunicationEvent.pr_number)
+        .filter(
+            models.CommunicationEvent.loop == "qa",
+            models.CommunicationEvent.direction == "sent",
+            models.CommunicationEvent.outcome == "ready_to_test",
+            models.CommunicationEvent.succeeded == 1,
+        )
+        .all()
+        if e.repo and e.pr_number
+    }
+    qa_event_tickets: set[str] = {
+        e.ticket_key
+        for e in db.query(models.CommunicationEvent.ticket_key)
+        .filter(
+            models.CommunicationEvent.loop == "qa",
+            models.CommunicationEvent.direction == "sent",
+            models.CommunicationEvent.outcome == "ready_to_test",
+            models.CommunicationEvent.succeeded == 1,
+            models.CommunicationEvent.ticket_key.isnot(None),
+        )
+        .all()
+        if e.ticket_key
+    }
+
+    job_clauses = [models.PRJob.owner_id == owner_id]
+    for r, p in user_pr_idents:
+        job_clauses.append(
+            (models.PRJob.repo == r) & (models.PRJob.pr_number == p)
+        )
     analyzed_prs = {
         (job.repo, job.pr_number)
         for job in db.query(models.PRJob)
         .filter(
-            models.PRJob.owner_id == owner_id,
+            or_(*job_clauses),
             models.PRJob.status == schemas.PRJobStatus.completed.value,
         )
         .all()
@@ -499,6 +657,15 @@ async def build(
     # recorded. A `PRReview` row only appears once a review is requested, so
     # without this an open, analyzed pull request is invisible to the join and
     # its task reads as "assigned" -- as though nobody had started.
+    comm_clauses = [models.CommunicationEvent.owner_id == owner_id]
+    for r, p in user_pr_idents:
+        comm_clauses.append(
+            (models.CommunicationEvent.repo == r)
+            & (models.CommunicationEvent.pr_number == p)
+        )
+    for k in user_ticket_keys:
+        comm_clauses.append(models.CommunicationEvent.ticket_key == k)
+
     prs_by_key: dict[str, set[tuple[str, int]]] = {}
     for event in (
         db.query(
@@ -507,7 +674,7 @@ async def build(
             models.CommunicationEvent.pr_number,
         )
         .filter(
-            models.CommunicationEvent.owner_id == owner_id,
+            or_(*comm_clauses),
             models.CommunicationEvent.ticket_key.isnot(None),
         )
         .distinct()
@@ -530,6 +697,10 @@ async def build(
     ).all():
         attempts_by_key[row.ticket_key] = attempts_by_key.get(row.ticket_key, 0) + 1
 
+    # Which work items the driver is mid-run on. One query for the whole board,
+    # for the same reason as the counts above.
+    running_by_key = authoring.running_attempts(db, owner_id=owner_id)
+
     cards: list[schemas.TaskCard] = []
     for item in items:
         links = links_by_key.get(item.key)
@@ -547,14 +718,33 @@ async def build(
         linked_prs = {(pr.repo, pr.pr_number) for pr in (links.pull_requests if links else [])}
         pr_idents |= linked_prs
 
+        card_merged_idents = set(system_merged_idents)
+        if links:
+            for pr in links.pull_requests:
+                if (pr.merged or pr.state == "merged") and pr.repo and pr.pr_number:
+                    card_merged_idents.add((pr.repo, pr.pr_number))
+
+        for r in matched:
+            if (
+                (r.repo, r.pr_number) in card_merged_idents
+                and r.state != schemas.ReviewState.merged.value
+                and r.state != schemas.ReviewState.changes_requested.value
+            ):
+                r.state = schemas.ReviewState.merged.value
+                r.pending_asks = None
+                try:
+                    db.commit()
+                except Exception:
+                    db.rollback()
+
         qa = next(
             (
                 thread for thread in qa_threads
-                if (thread.repo, thread.pr_number) in pr_idents
-                or item.key in json.loads(thread.ticket_keys_json or "[]")
+                if _matches_qa(thread, pr_idents, item.key)
             ),
             None,
         )
+        has_qa_event = bool(pr_idents & qa_event_prs or item.key in qa_event_tickets)
         analyzed = bool(pr_idents & analyzed_prs)
 
         if links is not None:
@@ -581,7 +771,23 @@ async def build(
             has_pr=bool(pr_idents),
             has_branch=bool(branches),
             has_attempt=bool(attempts),
+            merged_idents=card_merged_idents,
+            has_qa_event=has_qa_event,
+            item_status=item.status,
         )
+        if item.key in done_keys:
+            stage = schemas.TaskStage.done
+
+        # A run happening right now outranks the derived stage only while
+        # nothing further along exists. A rework runs against a pull request
+        # that is already in review, and reporting that card as "writing it"
+        # would walk it backwards -- the same rule that keeps a linked branch
+        # below every pull-request stage.
+        if item.key in running_by_key and stage in (
+            schemas.TaskStage.assigned,
+            schemas.TaskStage.authoring,
+        ):
+            stage = schemas.TaskStage.authoring
         task = by_key.get(item.key)
 
         # Every pull request on this work item: the reviewed ones with their
@@ -626,6 +832,15 @@ async def build(
                 if doc_url:
                     break
 
+        card_items = [
+            i for i in (task.items if task else [])
+            if not (
+                stage in (schemas.TaskStage.testing, schemas.TaskStage.merged, schemas.TaskStage.done)
+                and i.kind == schemas.WorklistKind.approved_not_merged
+            )
+        ]
+        card_needs_you = any(i.blocked_on_you for i in card_items)
+
         cards.append(schemas.TaskCard(
             key=item.key,
             source=item.source,
@@ -646,9 +861,9 @@ async def build(
             pull_requests=pull_requests,
             linked_branches=branches,
             doc_url=doc_url,
-            items=task.items if task else [],
-            needs_you=task.needs_you if task else False,
-            blocked_reason=_blocked_reason(task.items) if task else None,
+            items=card_items,
+            needs_you=card_needs_you,
+            blocked_reason=_blocked_reason(card_items) if card_items else None,
             age_hours=task.age_hours if task else 0.0,
             round_number=max((r.round_number for r in matched), default=1),
             authoring_mode=schemas.AuthoringMode(item_settings.authoring_mode),
@@ -656,6 +871,11 @@ async def build(
             handed_back=item_settings.handed_back,
             handed_back_reason=item_settings.handed_back_reason,
             authoring_attempts=attempts,
+            authoring_active=item.key in running_by_key,
+            authoring_started_at=(
+                running_by_key[item.key].created_at
+                if item.key in running_by_key else None
+            ),
         ))
 
     # Needs-you first, then staleness -- a task that has been round-tripping
@@ -672,8 +892,6 @@ async def build(
             c for c in cards if not c.needs_you and c.key not in done_keys
         ],
         recently_done=[c for c in cards if c.key in done_keys],
-        # Counts open work only, so the badge still answers "how much is on my
-        # plate" rather than growing every time something ships.
         total=len([c for c in cards if c.key not in done_keys]),
         github_available="github" not in unavailable,
         jira_available="jira" not in unavailable,
@@ -726,6 +944,16 @@ def detail_for(
             .order_by(models.PRJob.created_at.desc())
             .first()
         )
+        if job is None:
+            job = (
+                db.query(models.PRJob)
+                .filter(
+                    models.PRJob.repo == repo,
+                    models.PRJob.pr_number == number,
+                )
+                .order_by(models.PRJob.created_at.desc())
+                .first()
+            )
         if job is not None:
             job_status = job.status
             job_error = job.error
@@ -739,11 +967,17 @@ def detail_for(
                     # endpoint; the rest of the card is still useful.
                     analysis = None
 
+    qa_clauses = [models.QAThread.owner_id == owner_id]
+    if pr_idents:
+        for r, p in pr_idents:
+            qa_clauses.append(
+                (models.QAThread.repo == r) & (models.QAThread.pr_number == p)
+            )
     qa = next(
         (
             thread
             for thread in db.query(models.QAThread)
-            .filter(models.QAThread.owner_id == owner_id)
+            .filter(or_(*qa_clauses))
             .order_by(models.QAThread.created_at.desc())
             .all()
             if (thread.repo, thread.pr_number) in pr_idents
@@ -800,6 +1034,15 @@ def _review_detail(
         )
         .first()
     )
+    if review is None:
+        review = (
+            db.query(models.PRReview)
+            .filter(
+                models.PRReview.repo == repo,
+                models.PRReview.pr_number == pr_number,
+            )
+            .first()
+        )
     return review_flow.to_detail(review) if review else None
 
 
@@ -825,7 +1068,21 @@ def _registration_for(
     if not repo:
         return None
 
-    return db.query(models.RepoWebhook).filter(
-        models.RepoWebhook.repo == repo,
-        models.RepoWebhook.owner_id == owner_id,
-    ).first()
+    reg = (
+        db.query(models.RepoWebhook)
+        .filter(
+            models.RepoWebhook.repo == repo,
+            models.RepoWebhook.owner_id == owner_id,
+        )
+        .first()
+    )
+    if reg is None:
+        reg = (
+            db.query(models.RepoWebhook)
+            .filter(
+                models.RepoWebhook.repo == repo,
+                models.RepoWebhook.enabled == 1,
+            )
+            .first()
+        )
+    return reg

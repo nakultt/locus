@@ -1004,6 +1004,14 @@ class TaskCard(BaseModel):
     handed_back: bool = False
     handed_back_reason: str | None = None
     authoring_attempts: int = 0
+    # Whether the authoring driver is running against this work item right
+    # now. Derived from an `AuthoringAttempt` row in the `running` state, not
+    # stored on the card: the run takes minutes and the board is polled, so
+    # the card has to be able to say "the agent is writing this" rather than
+    # showing `assigned` throughout.
+    authoring_active: bool = False
+    # When that run started, so the UI can show how long it has been going.
+    authoring_started_at: datetime | None = None
 
 
 class TaskBoard(BaseModel):

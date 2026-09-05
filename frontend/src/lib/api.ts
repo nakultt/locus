@@ -158,6 +158,15 @@ async function apiRequest<T>(
   }
 
   const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+    // The backend sends no cache headers, so a browser applies heuristic
+    // freshness and answers repeated GETs from its own cache. The board polls
+    // one unchanging URL every ten seconds, so that froze a card at whatever
+    // the pipeline had reached when the tab was opened -- the API returning
+    // "with the testing team" while the page still read "pull request opened",
+    // with nothing on either side looking broken. Set here rather than at the
+    // call sites: every request in this file goes through this one fetch, and
+    // a caller that forgot would fail exactly this silently.
+    cache: "no-store",
     ...options,
     headers,
   });
@@ -1354,6 +1363,17 @@ export interface TaskCard {
   handed_back: boolean;
   handed_back_reason?: string | null;
   authoring_attempts: number;
+  /**
+   * The driver is running against this work item right now.
+   *
+   * A run takes minutes, and the board is polled rather than pushed, so
+   * without this a card sits on its previous stage throughout — which reads
+   * as nothing happening. Derived by the backend from an attempt row in the
+   * `running` state, never stored on the card.
+   */
+  authoring_active: boolean;
+  /** When that run started, so the row can count up while it works. */
+  authoring_started_at?: string | null;
 }
 
 /** The authoring mode a run on one work item would use, and where it came from. */

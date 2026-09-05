@@ -721,6 +721,14 @@ class PRAgentDefaults(Base):
     allow_in_place = Column(Integer, nullable=True)
     workspace_ttl_days = Column(Integer, nullable=True)
 
+    # GitHub logins asked to review the pull requests the agent opens, one per
+    # line. Deliberately separate from `reviewers`, which addresses the review
+    # loop's Slack pings: that list names who is *expected* to review, and
+    # turning it into a GitHub review request would start notifying people who
+    # only ever consented to being mentioned. NULL means the agent opens the
+    # pull request and requests nobody, which is what it did before this.
+    autonomous_pr_reviewers = Column(Text, nullable=True)
+
     # ---- the calendar agent ------------------------------------------------
     # Per-user dials on a per-user agent. The sweep interval is how often this
     # account's calendars are checked; the loop still ticks on its own clock.
@@ -820,6 +828,20 @@ class AuthoringAttempt(Base):
     source_path = Column(Text, nullable=True)
     workspace_path = Column(Text, nullable=True)
 
+    # running | finished. Written `running` before the driver is invoked and
+    # updated when it returns.
+    #
+    # The row used to be inserted only on the way out, which had two costs. The
+    # board could not say the agent was working -- a card sat on `assigned` for
+    # the ten minutes a run takes, indistinguishable from one nobody had
+    # started. And a process that died mid-run left no row at all, so the
+    # attempt was never consumed: "every failure consumes an attempt" held for
+    # every failure the driver reported and not for the one that killed it.
+    #
+    # `finished` is the default so rows written before this column existed read
+    # correctly rather than appearing to be stuck mid-run forever.
+    state = Column(String(16), nullable=False, default="finished", index=True)
+
     opened = Column(Integer, nullable=False, default=0)
     error = Column(Text, nullable=True)
     files_changed = Column(Integer, nullable=False, default=0)
@@ -827,11 +849,15 @@ class AuthoringAttempt(Base):
     duration_seconds = Column(Float, nullable=False, default=0.0)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    # When the driver actually returned. Distinct from `created_at`, which is
+    # now when it started -- the gap between them is how long the agent has
+    # been working, which is what a live card counts up.
+    finished_at = Column(DateTime(timezone=True), nullable=True)
 
     def __repr__(self) -> str:
         return (
             f"<AuthoringAttempt(ticket={self.ticket_key}, attempt={self.attempt}, "
-            f"opened={bool(self.opened)})>"
+            f"state={self.state}, opened={bool(self.opened)})>"
         )
 
 

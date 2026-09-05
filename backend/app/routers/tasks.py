@@ -29,14 +29,25 @@ router = APIRouter()
 
 # The board polls, and each refresh would otherwise cost two third-party calls
 # per user. Cached briefly so a dashboard left open does not burn a GitHub rate
-# limit; the pull request, review and message halves stay live from the
-# database, so everything Locus itself produced is never stale.
+# limit.
+#
+# The cache holds the whole board, third-party halves and locally-derived
+# halves together, so anything Locus itself knows is served up to a minute
+# stale. That is fine for a stage that changes once per event and wrong for a
+# state that is *happening* -- the client polls every ten seconds, and an
+# "agent working" badge that appears fifty seconds after the run starts and
+# lingers fifty seconds after it ends is worse than none, because it is
+# describing the present and getting it wrong.
+#
+# So the live fields are re-stamped from the database on every cache hit. One
+# indexed query against `authoring_attempts`, no third-party calls, which is
+# what the cache exists to avoid.
 ASSIGNED_TTL_SECONDS = 60
 
 _assigned_cache: dict[int, tuple[float, schemas.TaskBoard]] = {}
 
 
-def _cached_board(owner_id: int) -> schemas.TaskBoard | None:
+def _cached_board(db: Session, owner_id: int) -> schemas.TaskBoard | None:
     entry = _assigned_cache.get(owner_id)
     if entry is None:
         return None
@@ -44,6 +55,31 @@ def _cached_board(owner_id: int) -> schemas.TaskBoard | None:
     if time.monotonic() - stored_at > ASSIGNED_TTL_SECONDS:
         _assigned_cache.pop(owner_id, None)
         return None
+    return _restamp_live(db, owner_id, board)
+
+
+def _restamp_live(
+    db: Session, owner_id: int, board: schemas.TaskBoard
+) -> schemas.TaskBoard:
+    """
+    Refresh the fields that describe something in progress right now.
+
+    Only what the database alone can answer. A card's stage, its pull requests
+    and its messages all come from the same cached snapshot and stay there --
+    re-deriving those would mean redoing the work the cache exists to skip.
+
+    Failure returns the board untouched: a stale badge is a much smaller
+    problem than a board that will not load.
+    """
+    try:
+        running = authoring.running_attempts(db, owner_id=owner_id)
+    except Exception:
+        return board
+
+    for card in board.needs_you + board.in_flight + board.recently_done:
+        attempt = running.get(card.key)
+        card.authoring_active = attempt is not None
+        card.authoring_started_at = attempt.created_at if attempt else None
     return board
 
 
@@ -70,7 +106,7 @@ async def get_task_board(
     different things to someone deciding what to work on.
     """
     if not refresh:
-        cached = _cached_board(current_user.id)
+        cached = _cached_board(db, current_user.id)
         if cached is not None:
             return cached
 
@@ -532,9 +568,16 @@ async def author_task(
         },
     ).scoped()
 
+    # Marked as running before the driver is invoked: the call below takes
+    # minutes, and until it returns the board would otherwise show this work
+    # item as merely `assigned` -- indistinguishable from one nobody started.
+    started = authoring.begin_attempt(
+        db, owner_id=current_user.id, request=request
+    )
     result = await driver.author(request, integration_configs)
     authoring.record_attempt(
-        db, owner_id=current_user.id, request=request, result=result
+        db, owner_id=current_user.id, request=request, result=result,
+        started=started,
     )
 
     if result.hand_back_reason:

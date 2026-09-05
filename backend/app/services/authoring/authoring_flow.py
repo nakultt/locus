@@ -125,6 +125,10 @@ async def maybe_retry(
         },
     ).scoped()
 
+    # Same reason as the board path: a rework takes minutes, and the card has
+    # to be able to say so.
+    started = authoring.begin_attempt(db, owner_id=owner_id, request=request)
+
     try:
         result = await driver.author(request, integration_configs)
     except Exception as exc:
@@ -133,7 +137,9 @@ async def maybe_retry(
             opened=False, error=f"The driver raised: {exc}", driver=driver.name
         )
 
-    authoring.record_attempt(db, owner_id=owner_id, request=request, result=result)
+    authoring.record_attempt(
+        db, owner_id=owner_id, request=request, result=result, started=started
+    )
 
     if result.hand_back_reason:
         await _hand_back(

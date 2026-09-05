@@ -169,12 +169,77 @@ def get_driver(name: str | None = None) -> AuthoringDriver:
     return NoneDriver()
 
 
+def begin_attempt(
+    db: Session,
+    *,
+    owner_id: int,
+    request: AuthoringRequest,
+) -> models.AuthoringAttempt | None:
+    """
+    Record that an attempt has started, before the driver is invoked.
+
+    Two things depend on this row existing early. The board can say the agent
+    is working -- without it a card reads `assigned` for the ten minutes a run
+    takes, which is indistinguishable from one nobody has started. And the
+    attempt is consumed even if this process dies: `record_attempt` only ever
+    ran on the way out, so a crash mid-run left no row and the bound silently
+    did not count it, which is the one failure "every failure consumes an
+    attempt" did not cover.
+
+    Returns None rather than raising if the row cannot be written. The run is
+    the work; losing the marker must not lose the run.
+    """
+    try:
+        row = models.AuthoringAttempt(
+            owner_id=owner_id,
+            ticket_key=request.ticket_key,
+            repo=request.repo,
+            attempt=request.attempt,
+            trigger=request.trigger,
+            driver=get_driver().name,
+            state="running",
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        return row
+    except Exception:
+        db.rollback()
+        return None
+
+
+def running_attempts(
+    db: Session, *, owner_id: int, ticket_keys: list[str] | None = None
+) -> dict[str, models.AuthoringAttempt]:
+    """
+    The work items whose driver is running right now, keyed by ticket.
+
+    Read by the board so a card can show that the agent is mid-run. A stale
+    `running` row -- left by a process that died -- reads as still working
+    until the next attempt supersedes it, which is the honest reading: nothing
+    else knows whether that run is still going, and claiming it stopped would
+    be a guess.
+    """
+    query = db.query(models.AuthoringAttempt).filter(
+        models.AuthoringAttempt.owner_id == owner_id,
+        models.AuthoringAttempt.state == "running",
+    )
+    if ticket_keys:
+        query = query.filter(models.AuthoringAttempt.ticket_key.in_(ticket_keys))
+
+    latest: dict[str, models.AuthoringAttempt] = {}
+    for row in query.order_by(models.AuthoringAttempt.created_at):
+        latest[row.ticket_key] = row
+    return latest
+
+
 def record_attempt(
     db: Session,
     *,
     owner_id: int,
     request: AuthoringRequest,
     result: AuthoringResult,
+    started: models.AuthoringAttempt | None = None,
 ) -> models.AuthoringAttempt:
     """
     Append one attempt to the history.
@@ -187,25 +252,34 @@ def record_attempt(
     Recording never raises on its own account -- the caller has usually just
     done real work, and losing the record must not lose that too.
     """
-    row = models.AuthoringAttempt(
-        owner_id=owner_id,
-        ticket_key=request.ticket_key,
-        repo=request.repo,
-        pr_number=result.pr_number,
-        attempt=request.attempt,
-        trigger=request.trigger,
-        driver=result.driver,
-        model=result.model,
-        context_mode=result.context_mode,
-        source_path=result.source_path,
-        workspace_path=result.workspace_path,
-        opened=1 if result.opened else 0,
-        error=result.error,
-        files_changed=result.files_changed,
-        lines_changed=result.lines_changed,
-        duration_seconds=result.duration_seconds,
-    )
-    db.add(row)
+    # The row `begin_attempt` wrote, when there is one. Updated rather than
+    # appended so one run is one row -- two rows would double-count against
+    # the bound, which is the thing the history exists to make real.
+    row = started
+    if row is None:
+        row = models.AuthoringAttempt(
+            owner_id=owner_id,
+            ticket_key=request.ticket_key,
+            repo=request.repo,
+            attempt=request.attempt,
+            trigger=request.trigger,
+        )
+        db.add(row)
+
+    row.pr_number = result.pr_number
+    row.driver = result.driver
+    row.model = result.model
+    row.context_mode = result.context_mode
+    row.source_path = result.source_path
+    row.workspace_path = result.workspace_path
+    row.opened = 1 if result.opened else 0
+    row.error = result.error
+    row.files_changed = result.files_changed
+    row.lines_changed = result.lines_changed
+    row.duration_seconds = result.duration_seconds
+    row.state = "finished"
+    row.finished_at = datetime.now(UTC)
+
     db.commit()
     db.refresh(row)
     return row

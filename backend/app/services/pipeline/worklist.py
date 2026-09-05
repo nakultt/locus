@@ -24,9 +24,11 @@ which do not actually need you is ignored within a week, and once ignored it
 is very hard to win back. The sources below are deliberately few.
 """
 
+import json
 import logging
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app import models, schemas
@@ -88,8 +90,26 @@ def _thread_key(db: Session, thread: models.QAThread) -> str:
         .first()
     )
 
+    if review is None:
+        review = (
+            db.query(models.PRReview)
+            .filter(
+                models.PRReview.repo == thread.repo,
+                models.PRReview.pr_number == thread.pr_number,
+            )
+            .first()
+        )
+
     if review is not None:
         return _task_key(review)
+
+    if thread.ticket_keys_json:
+        try:
+            keys = json.loads(thread.ticket_keys_json)
+            if keys and keys[0]:
+                return keys[0]
+        except Exception:
+            pass
 
     return f"{thread.repo}#{thread.pr_number}"
 
@@ -101,6 +121,41 @@ def build(db: Session, *, owner_id: int) -> schemas.Worklist:
     Ordering is decided here rather than in the client: the API and the UI must
     not be able to disagree about what is most urgent.
     """
+    # Pull requests that are already merged or sent to QA across the system.
+    # A PR sent to QA has already merged; treating it as "approved, not merged"
+    # keeps the card stuck in needs_you on the review loop.
+    merged_idents: set[tuple[str, int]] = {
+        (t.repo, t.pr_number)
+        for t in db.query(models.QAThread.repo, models.QAThread.pr_number).all()
+        if t.repo and t.pr_number
+    } | {
+        (r.repo, r.pr_number)
+        for r in db.query(models.PRReview.repo, models.PRReview.pr_number)
+        .filter(models.PRReview.state == schemas.ReviewState.merged.value)
+        .all()
+        if r.repo and r.pr_number
+    } | {
+        (j.repo, j.pr_number)
+        for j in db.query(models.PRJob.repo, models.PRJob.pr_number)
+        .filter(
+            models.PRJob.action == "merged",
+            models.PRJob.status == schemas.PRJobStatus.completed.value,
+        )
+        .all()
+        if j.repo and j.pr_number
+    } | {
+        (e.repo, e.pr_number)
+        for e in db.query(models.CommunicationEvent.repo, models.CommunicationEvent.pr_number)
+        .filter(
+            models.CommunicationEvent.loop == "qa",
+            models.CommunicationEvent.direction == "sent",
+            models.CommunicationEvent.outcome == "ready_to_test",
+            models.CommunicationEvent.succeeded == 1,
+        )
+        .all()
+        if e.repo and e.pr_number
+    }
+
     # Merged and closed are both finished: nobody is waiting on either. A
     # pull request closed without merging was abandoned, and listing it as
     # blocked on you forever is exactly the noise that trains people to stop
@@ -116,6 +171,21 @@ def build(db: Session, *, owner_id: int) -> schemas.Worklist:
         )
         .all()
     )
+
+    # Reconcile any reviews known to be merged
+    for r in reviews:
+        if (
+            (r.repo, r.pr_number) in merged_idents
+            and r.state != schemas.ReviewState.changes_requested.value
+        ):
+            r.state = schemas.ReviewState.merged.value
+            r.pending_asks = None
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+
+    reviews = [r for r in reviews if r.state != schemas.ReviewState.merged.value]
 
     # Merged PRs still matter when QA rejected them, so those come from the
     # QA side rather than the review state.
@@ -155,6 +225,12 @@ def build(db: Session, *, owner_id: int) -> schemas.Worklist:
 
     # --- Review loop -----------------------------------------------------
     for review in reviews:
+        if (review.repo, review.pr_number) in merged_idents or review.state in (
+            schemas.ReviewState.merged.value,
+            schemas.ReviewState.closed.value,
+        ):
+            continue
+
         key = _task_key(review)
         task = task_for(key, review.repo, review.pr_title)
         if review.pr_number not in task.pull_requests:
@@ -260,13 +336,28 @@ def build(db: Session, *, owner_id: int) -> schemas.Worklist:
     # better for being quieter. Only unresolved threads count: a resolved one
     # got its answer.
     stale_cutoff = datetime.now(UTC) - timedelta(days=QA_SILENT_DAYS)
+    user_pr_idents = {
+        (r.repo, r.pr_number)
+        for r in db.query(models.PRReview.repo, models.PRReview.pr_number)
+        .filter(models.PRReview.owner_id == owner_id)
+        .all()
+        if r.repo and r.pr_number
+    }
+    silent_clauses = [
+        (models.QAThread.owner_id == owner_id)
+        & (models.QAThread.resolved == 0)
+        & (models.QAThread.created_at < stale_cutoff)
+    ]
+    for r, p in user_pr_idents:
+        silent_clauses.append(
+            (models.QAThread.repo == r)
+            & (models.QAThread.pr_number == p)
+            & (models.QAThread.resolved == 0)
+            & (models.QAThread.created_at < stale_cutoff)
+        )
     silent_threads = (
         db.query(models.QAThread)
-        .filter(
-            models.QAThread.owner_id == owner_id,
-            models.QAThread.resolved == 0,
-            models.QAThread.created_at < stale_cutoff,
-        )
+        .filter(or_(*silent_clauses))
         .all()
     )
 

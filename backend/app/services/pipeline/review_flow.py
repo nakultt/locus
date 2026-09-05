@@ -92,6 +92,16 @@ def _get_or_create_review(
     )
 
     if review is None:
+        review = (
+            db.query(models.PRReview)
+            .filter(
+                models.PRReview.repo == repo,
+                models.PRReview.pr_number == pr_number,
+            )
+            .first()
+        )
+
+    if review is None:
         review = models.PRReview(
             repo=repo,
             pr_number=pr_number,
@@ -370,24 +380,29 @@ def record_merged(
     reappear in a review queue. Returns None if the PR was never reviewed --
     a merge without a review is a fact worth not inventing a record for.
     """
-    review = (
+    reviews = (
         db.query(models.PRReview)
         .filter(
             models.PRReview.repo == repo,
             models.PRReview.pr_number == pr_number,
-            models.PRReview.owner_id == owner_id,
         )
-        .first()
+        .all()
     )
 
-    if review is None:
+    if not reviews:
         return None
 
-    review.state = schemas.ReviewState.merged.value
-    review.pending_asks = None
+    target = None
+    for rev in reviews:
+        rev.state = schemas.ReviewState.merged.value
+        rev.pending_asks = None
+        if rev.owner_id == owner_id:
+            target = rev
+
     db.commit()
-    db.refresh(review)
-    return review
+    for rev in reviews:
+        db.refresh(rev)
+    return target or reviews[0]
 
 
 def record_closed(
@@ -416,29 +431,30 @@ def record_closed(
     was never reviewed, the same rule `record_merged` follows -- there is no
     record worth inventing for a pull request nobody looked at.
     """
-    review = (
+    reviews = (
         db.query(models.PRReview)
         .filter(
             models.PRReview.repo == repo,
             models.PRReview.pr_number == pr_number,
-            models.PRReview.owner_id == owner_id,
         )
-        .first()
+        .all()
     )
 
-    if review is None:
+    if not reviews:
         return None
 
-    if review.state == schemas.ReviewState.merged.value:
-        return review
+    target = None
+    for rev in reviews:
+        if rev.state != schemas.ReviewState.merged.value:
+            rev.state = schemas.ReviewState.closed.value
+            rev.pending_asks = None
+        if rev.owner_id == owner_id:
+            target = rev
 
-    review.state = schemas.ReviewState.closed.value
-    # Nobody is waiting on these any more. Leaving them set would keep the pull
-    # request in the "blocked on you" list it no longer belongs in.
-    review.pending_asks = None
     db.commit()
-    db.refresh(review)
-    return review
+    for rev in reviews:
+        db.refresh(rev)
+    return target or reviews[0]
 
 
 def asks_for_qa(

@@ -257,7 +257,7 @@ def ticket_timeline(
     context -- including the QA rejection that caused it to exist -- rather
     than from nothing.
     """
-    return (
+    events = (
         db.query(models.CommunicationEvent)
         .filter(
             models.CommunicationEvent.ticket_key == ticket_key,
@@ -269,6 +269,17 @@ def ticket_timeline(
         )
         .all()
     )
+    if not events:
+        events = (
+            db.query(models.CommunicationEvent)
+            .filter(models.CommunicationEvent.ticket_key == ticket_key)
+            .order_by(
+                models.CommunicationEvent.created_at,
+                models.CommunicationEvent.id,
+            )
+            .all()
+        )
+    return events
 
 
 def _ordering(event: models.CommunicationEvent) -> tuple[datetime, int]:
@@ -298,15 +309,8 @@ def work_item_history(
     Deliberately wider than `timeline`, which inherits only Slack discussion
     from sibling pull requests because that is the context the analysis
     genuinely reused and marking anything else as inherited would imply it was
-    found on this PR. The document has the opposite requirement: it is one file
-    per work item, rewritten in place, so it must carry every attempt.
-
-    Without this the retry case silently lost history. QA rejects a merged
-    change, the fix opens as a fresh pull request, its analysis rewrites the
-    same document -- and the first attempt's QA brief, the tester's rejection
-    and every message in both loops were gone, because they were recorded
-    against a pull request number the render no longer asked about. The link
-    people already had then pointed at a document that had quietly forgotten
+    read when it was not. The report document is the record, so it records
+    everything: the earlier runs, the prior review rounds, and the QA thread
     why the work came back.
 
     Rows carrying this pull request's number are included whether or not they
@@ -322,6 +326,15 @@ def work_item_history(
         )
         .all()
     )
+    if not own:
+        own = (
+            db.query(models.CommunicationEvent)
+            .filter(
+                models.CommunicationEvent.repo == repo,
+                models.CommunicationEvent.pr_number == pr_number,
+            )
+            .all()
+        )
     for event in own:
         event.inherited = False
 
@@ -334,14 +347,22 @@ def work_item_history(
         # would read as several people having said it.
         seen_links = {e.permalink for e in own if e.permalink}
 
-        for event in (
+        inherited_events = (
             db.query(models.CommunicationEvent)
             .filter(
                 models.CommunicationEvent.owner_id == owner_id,
                 models.CommunicationEvent.ticket_key == ticket_key,
             )
             .all()
-        ):
+        )
+        if not inherited_events:
+            inherited_events = (
+                db.query(models.CommunicationEvent)
+                .filter(models.CommunicationEvent.ticket_key == ticket_key)
+                .all()
+            )
+
+        for event in inherited_events:
             if event.id in seen_ids:
                 continue
             if event.permalink and event.permalink in seen_links:
@@ -384,6 +405,15 @@ def timeline(
         )
         .all()
     )
+    if not own:
+        own = (
+            db.query(models.CommunicationEvent)
+            .filter(
+                models.CommunicationEvent.repo == repo,
+                models.CommunicationEvent.pr_number == pr_number,
+            )
+            .all()
+        )
     for event in own:
         event.inherited = False
 
@@ -402,6 +432,18 @@ def timeline(
             )
             .all()
         )
+        if not inherited:
+            inherited = (
+                db.query(models.CommunicationEvent)
+                .filter(
+                    models.CommunicationEvent.ticket_key == ticket_key,
+                    models.CommunicationEvent.pr_number != pr_number,
+                    models.CommunicationEvent.channel == "slack",
+                    models.CommunicationEvent.direction == "received",
+                    models.CommunicationEvent.body.isnot(None),
+                )
+                .all()
+            )
         # Deduplicated against what this PR already recorded: the same Slack
         # message can be stored under two PRs on the same ticket, and showing
         # it twice would read as two people saying it.

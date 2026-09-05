@@ -21,6 +21,7 @@ it: the review rounds, and every message sent and received.
 import json
 import logging
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app import models, schemas
@@ -65,6 +66,13 @@ def find_report(
             .order_by(models.PRReport.created_at)
             .first()
         )
+        if by_ticket is None:
+            by_ticket = (
+                db.query(models.PRReport)
+                .filter(models.PRReport.ticket_key == ticket_key)
+                .order_by(models.PRReport.created_at)
+                .first()
+            )
         if by_ticket is not None:
             return by_ticket
 
@@ -77,6 +85,15 @@ def find_report(
         )
         .first()
     )
+    if by_pr is None and repo and pr_number is not None:
+        by_pr = (
+            db.query(models.PRReport)
+            .filter(
+                models.PRReport.repo == repo,
+                models.PRReport.pr_number == pr_number,
+            )
+            .first()
+        )
 
     if by_pr is not None and ticket_key and adopt and not by_pr.ticket_key:
         by_pr.ticket_key = ticket_key
@@ -116,7 +133,11 @@ def document_url(
 
 
 def document_urls_for(
-    db: Session, *, owner_id: int
+    db: Session,
+    *,
+    owner_id: int,
+    pr_idents: set[tuple[str, int]] | None = None,
+    ticket_keys: set[str] | None = None,
 ) -> tuple[dict[str, str], dict[tuple[str, int], str]]:
     """
     Every document this owner has, indexed for a board-wide lookup.
@@ -139,9 +160,19 @@ def document_urls_for(
     by_ticket: dict[str, str] = {}
     by_pr: dict[tuple[str, int], str] = {}
 
+    clauses = [models.PRReport.owner_id == owner_id]
+    if pr_idents:
+        for r, p in pr_idents:
+            clauses.append(
+                (models.PRReport.repo == r) & (models.PRReport.pr_number == p)
+            )
+    if ticket_keys:
+        for k in ticket_keys:
+            clauses.append(models.PRReport.ticket_key == k)
+
     rows = (
         db.query(models.PRReport)
-        .filter(models.PRReport.owner_id == owner_id)
+        .filter(or_(*clauses))
         .all()
     )
     for row in rows:

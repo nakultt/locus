@@ -213,6 +213,59 @@ class TestCloseDeferredToSignoff:
         assert spies["github"] == [8]
 
 
+class TestReopenIsNotGatedOnClosing:
+    """
+    The reopen undoes GitHub's close, so it must not read `close_issues`.
+
+    That setting says whether *Locus* closes an issue. GitHub closes it anyway
+    on `Closes #N`, which the authoring driver always writes. Gated on both,
+    the two most cautious settings on the form -- leave issues alone, and wait
+    for a tester -- combined into the one outcome neither asks for: the ticket
+    closed at merge and nothing reopened it.
+    """
+
+    @pytest.fixture
+    def spies(self, monkeypatch):
+        calls = {"closed": [], "reopened": []}
+
+        async def fake_close(token, repo, number, pr_number):
+            calls["closed"].append(number)
+            return True, f"Closed #{number}"
+
+        async def fake_reopen(token, repo, number, pr_number):
+            calls["reopened"].append(number)
+            return True, f"Reopened #{number}"
+
+        monkeypatch.setattr(merge_actions, "close_github_issue", fake_close)
+        monkeypatch.setattr(merge_actions, "reopen_for_qa", fake_reopen)
+        return calls
+
+    @pytest.mark.asyncio
+    async def test_reopens_with_closing_off(self, spies):
+        await merge_actions.run_merge_actions(
+            TestCloseDeferredToSignoff._result(),
+            {"github": {"api_key": "t"}},
+            close_issues=False,
+            close_on_qa_signoff=True,
+        )
+
+        assert spies["reopened"] == [8]
+        assert spies["closed"] == []
+
+    @pytest.mark.asyncio
+    async def test_closing_off_without_deferral_touches_nothing(self, spies):
+        """`close_issues=False` alone still means Locus leaves issues alone."""
+        await merge_actions.run_merge_actions(
+            TestCloseDeferredToSignoff._result(),
+            {"github": {"api_key": "t"}},
+            close_issues=False,
+            close_on_qa_signoff=False,
+        )
+
+        assert spies["reopened"] == []
+        assert spies["closed"] == []
+
+
 class TestEmailDeliveryIsReportedHonestly:
     """
     A rejected QA email must not be recorded as delivered.

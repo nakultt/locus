@@ -11,7 +11,7 @@ import {
 import type { TaskCard } from "@/lib/api";
 import { Badge, Chip, Dot } from "@/components/ui/badge";
 import { TaskProgress } from "./pipeline";
-import { REVIEW_STATE, TASK_STAGE, ageLabel } from "./shared";
+import { REVIEW_STATE, TASK_STAGE, ageLabel, elapsedLabel } from "./shared";
 import { cn } from "@/lib/utils";
 
 /**
@@ -82,6 +82,32 @@ export function TaskRow({
               {card.key}
             </span>
             <Badge tone={stage.tone}>{stage.label}</Badge>
+
+            {/* The agent is mid-run on this item.
+                Placed before "Needs you" and given the pulsing dot because it
+                is the only badge on the row describing something happening
+                right now rather than a state something has settled into — a
+                run takes minutes, and without this the card sits on its
+                previous stage throughout, which reads as nothing happening.
+                The elapsed time is what distinguishes a run that started
+                thirty seconds ago from one that has been going twenty
+                minutes and is probably wedged. */}
+            {card.authoring_active && (
+              <Badge
+                tone="info"
+                title={`The authoring agent has been working on this for ${
+                  elapsedLabel(card.authoring_started_at) || "a moment"
+                }`}
+              >
+                <Dot tone="info" pulse />
+                Agent working
+                {elapsedLabel(card.authoring_started_at) && (
+                  <span className="ml-1 tabular-nums opacity-70">
+                    {elapsedLabel(card.authoring_started_at)}
+                  </span>
+                )}
+              </Badge>
+            )}
 
             {card.needs_you && (
               <Badge tone="accent">

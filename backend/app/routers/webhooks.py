@@ -1970,7 +1970,13 @@ async def run_pr_job(job_id: int) -> None:
             # Record the thread so a tester's reply can be traced back to the
             # work items it should reopen -- a Slack reply carries none of that.
             merge = result.merge_actions
-            if merge and (merge.qa_thread_ts or merge.qa_email_message_id):
+            if merge and (
+                merge.qa_thread_ts
+                or merge.qa_email_message_id
+                or merge_out.qa_slack_text
+                or merge_out.qa_email_body
+                or settings.close_on_qa_signoff
+            ):
                 db.add(models.QAThread(
                     repo=job.repo,
                     pr_number=job.pr_number,

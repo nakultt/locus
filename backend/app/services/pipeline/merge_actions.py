@@ -551,10 +551,18 @@ async def run_merge_actions(
 
     # The other half of deferring the close: undo GitHub's own.
     #
+    # Deliberately not gated on `close_issues`, which the branch above is.
+    # That setting governs whether *Locus* closes an issue; this reopen undoes
+    # a close GitHub performed on its own, which happens whatever the setting
+    # says. Gated on both, the two most cautious choices on the form -- leave
+    # issues alone, and wait for a tester -- combined into the outcome neither
+    # asks for: GitHub closed the ticket at merge and nothing reopened it, so
+    # the work vanished from the board before any tester saw it.
+    #
     # Not raised past the merge -- a completed merge must not read as failed
     # because an issue could not be reopened, the same rule the board move
     # follows.
-    elif close_issues and close_on_qa_signoff and github_token:
+    elif close_on_qa_signoff and github_token:
         for issue in ctx.linked_issues:
             if issue.relation != "closes":
                 continue

@@ -19,7 +19,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import models, schemas
-from app.services.pipeline import task_board
+from app.services.pipeline import comms_log, review_flow, task_board
 
 REPO, OWNER = "acme/widget", 1
 
@@ -550,3 +550,70 @@ class TestAuthoringStage:
 
         step = next(s for s in stages if s.stage is schemas.TaskStage.authoring)
         assert step.detail == "3 attempts"
+
+
+class TestSeniorDevApprovedMergedAndSentToQA:
+    """
+    When a senior dev approves a PR, merges it, and sends it to the QA team,
+    the task board card must move out of 'needs you' / 'approved' and into
+    'testing' (with the testing team).
+    """
+
+    @pytest.mark.asyncio
+    async def test_approved_then_merged_and_sent_to_qa_moves_to_testing(self, db, monkeypatch):
+        # PR review was approved
+        _review(db, pr=1, state="approved", tickets="LOC-1")
+        # PR is merged and QA thread opened
+        db.add(models.QAThread(
+            repo=REPO, pr_number=1, pr_url="https://github.com/test/repo/pull/1",
+            ticket_keys_json=json.dumps(["LOC-1"]), owner_id=OWNER,
+        ))
+        db.commit()
+
+        board = await _build(db, [_item("LOC-1")], monkeypatch=monkeypatch)
+        card = (board.needs_you + board.in_flight)[0]
+
+        assert card.stage is schemas.TaskStage.testing
+        assert card.needs_you is False
+        assert card in board.in_flight
+
+    @pytest.mark.asyncio
+    async def test_approved_then_sent_to_qa_comms_event_moves_to_testing(self, db, monkeypatch):
+        _review(db, pr=2, state="approved", tickets="LOC-2")
+        comms_log.record(
+            db, owner_id=OWNER, repo=REPO, pr_number=2, ticket_key="LOC-2",
+            loop="qa", direction="sent", channel="slack",
+            outcome="ready_to_test", succeeded=True,
+        )
+        board = await _build(db, [_item("LOC-2")], monkeypatch=monkeypatch)
+        card = (board.needs_you + board.in_flight)[0]
+
+        assert card.stage is schemas.TaskStage.testing
+        assert card.needs_you is False
+        assert card in board.in_flight
+
+    @pytest.mark.asyncio
+    async def test_approved_then_merged_moves_to_merged(self, db, monkeypatch):
+        _review(db, pr=3, state="approved", tickets="LOC-3")
+        review_flow.record_merged(db, owner_id=OWNER, repo=REPO, pr_number=3)
+
+        board = await _build(db, [_item("LOC-3")], monkeypatch=monkeypatch)
+        card = (board.needs_you + board.in_flight)[0]
+
+        assert card.stage is schemas.TaskStage.merged
+        assert card.needs_you is False
+        assert card in board.in_flight
+
+    @pytest.mark.asyncio
+    async def test_qa_signoff_moves_to_done(self, db, monkeypatch):
+        _review(db, pr=4, state="approved", tickets="LOC-4")
+        db.add(models.QAThread(
+            repo=REPO, pr_number=4, pr_url="https://github.com/test/repo/pull/4",
+            ticket_keys_json=json.dumps(["LOC-4"]), owner_id=OWNER, resolved=1,
+        ))
+        db.commit()
+
+        board = await _build(db, [_item("LOC-4")], monkeypatch=monkeypatch)
+        card = (board.needs_you + board.in_flight)[0]
+
+        assert card.stage is schemas.TaskStage.done

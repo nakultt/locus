@@ -717,3 +717,121 @@ class TestQAReplyRefreshesTheReportOnBothChannels:
         assert preceding.rstrip().endswith("try:") or "try:" in preceding[-200:], (
             "the refresh must be guarded so it cannot fail the sign-off"
         )
+
+
+# --------------------------------------------------------------------------
+# The board can say the agent is working.
+# --------------------------------------------------------------------------
+
+
+class TestAuthoringAttemptHasAState:
+    """
+    The attempt row was written only once the driver returned, which cost two
+    things.
+
+    The board could not say the agent was working: a card read `assigned` for
+    the ten minutes a run takes, indistinguishable from one nobody had
+    started. And a process that died mid-run left no row at all, so the bound
+    never counted it -- "every failure consumes an attempt" held for every
+    failure the driver reported, and not for the one that killed it.
+    """
+
+    def _request(self, **kw):
+        from app.services.authoring.authoring import AuthoringRequest
+        base = dict(
+            ticket_key="acme/api#1", title="Do the thing", repo="acme/api",
+            attempt=1, trigger="initial",
+        )
+        base.update(kw)
+        return AuthoringRequest(**base)
+
+    def _result(self, **kw):
+        from app.services.authoring.authoring import AuthoringResult
+        base = dict(opened=True, pr_number=7, driver="opencode")
+        base.update(kw)
+        return AuthoringResult(**base)
+
+    def test_begin_marks_the_attempt_running(self, db):
+        from app.services.authoring import authoring
+        row = authoring.begin_attempt(db, owner_id=OWNER, request=self._request())
+        assert row is not None
+        assert row.state == "running"
+        assert row.finished_at is None
+
+    def test_a_running_attempt_is_visible_to_the_board(self, db):
+        from app.services.authoring import authoring
+        authoring.begin_attempt(db, owner_id=OWNER, request=self._request())
+        running = authoring.running_attempts(db, owner_id=OWNER)
+        assert "acme/api#1" in running
+
+    def test_recording_updates_the_same_row(self, db):
+        """
+        One run is one row. Two would double-count against the bound, which is
+        the thing the history exists to make real.
+        """
+        from app import models
+        from app.services.authoring import authoring
+
+        started = authoring.begin_attempt(db, owner_id=OWNER, request=self._request())
+        authoring.record_attempt(
+            db, owner_id=OWNER, request=self._request(),
+            result=self._result(), started=started,
+        )
+        rows = db.query(models.AuthoringAttempt).filter(
+            models.AuthoringAttempt.ticket_key == "acme/api#1"
+        ).all()
+        assert len(rows) == 1
+        assert rows[0].state == "finished"
+        assert rows[0].finished_at is not None
+        assert rows[0].pr_number == 7
+
+    def test_a_finished_attempt_is_no_longer_running(self, db):
+        from app.services.authoring import authoring
+        started = authoring.begin_attempt(db, owner_id=OWNER, request=self._request())
+        authoring.record_attempt(
+            db, owner_id=OWNER, request=self._request(),
+            result=self._result(), started=started,
+        )
+        assert authoring.running_attempts(db, owner_id=OWNER) == {}
+
+    def test_recording_without_a_start_still_works(self, db):
+        """
+        Backwards compatible: a caller that never called `begin_attempt`
+        inserts, exactly as before.
+        """
+        from app import models
+        from app.services.authoring import authoring
+
+        authoring.record_attempt(
+            db, owner_id=OWNER, request=self._request(), result=self._result(),
+        )
+        rows = db.query(models.AuthoringAttempt).all()
+        assert len(rows) == 1
+        assert rows[0].state == "finished"
+
+    def test_a_crash_mid_run_still_consumes_the_attempt(self, db):
+        """
+        The row exists from the moment the driver is invoked, so a process
+        that dies leaves evidence and the bound counts it.
+        """
+        from app.services.authoring import authoring
+        authoring.begin_attempt(db, owner_id=OWNER, request=self._request())
+        # No record_attempt -- the process died here.
+        assert len(authoring.attempts_for(db, OWNER, "acme/api#1")) == 1
+
+    def test_begin_never_raises(self, db, monkeypatch):
+        """The run is the work; losing the marker must not lose the run."""
+        from app.services.authoring import authoring
+
+        def boom(*a, **k):
+            raise RuntimeError("database is gone")
+
+        monkeypatch.setattr(db, "commit", boom)
+        assert authoring.begin_attempt(
+            db, owner_id=OWNER, request=self._request()
+        ) is None
+
+    def test_running_is_scoped_to_the_owner(self, db):
+        from app.services.authoring import authoring
+        authoring.begin_attempt(db, owner_id=OWNER, request=self._request())
+        assert authoring.running_attempts(db, owner_id=OWNER + 99) == {}
