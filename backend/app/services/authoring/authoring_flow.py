@@ -115,7 +115,10 @@ async def maybe_retry(
         repo=repo,
         existing_branch=continue_branch,
         context=_context(db, owner_id, repo, pr_number, ticket_key),
-        asks=authoring.gather_asks(db, owner_id=owner_id, ticket_key=ticket_key),
+        asks=authoring.gather_asks(
+            db, owner_id=owner_id, ticket_key=ticket_key,
+            repo=repo, pr_number=pr_number,
+        ),
         rejection=rejection,
         attempt=attempt,
         trigger=trigger,

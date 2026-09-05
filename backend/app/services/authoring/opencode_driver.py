@@ -431,6 +431,25 @@ Commit your work. Do not push, do not open a pull request, and do not merge --
 that is handled for you once you exit.
 """.strip()
 
+REWORK_SCOPE_INSTRUCTIONS = """
+## Scope
+
+Focus on implementing the reviewer's requested changes. Specifically:
+
+- Address every change requested by the reviewer completely and accurately.
+- Work ONLY on the reviewer asks listed in "What reviewers have asked for".
+- Do NOT work on Locus's internal PR analysis, automated scan findings, code review findings, or bot inline suggestions.
+- Do not implement or modify features from linked issues or background tickets unless explicitly requested by the reviewer.
+- Do not make unrelated changes outside what the reviewer asked for.
+- Do not reformat, re-indent or reorganise files the change does not need.
+- Do not add a dependency without saying why in the commit message.
+- Do not edit CI workflows, environment files, or anything holding a secret.
+- Keep the diff focused and small enough for one person to review in a sitting.
+
+Commit your work. Do not push, do not open a pull request, and do not merge --
+that is handled for you once you exit.
+""".strip()
+
 
 def build_prompt(request: AuthoringRequest) -> str:
     """
@@ -439,26 +458,76 @@ def build_prompt(request: AuthoringRequest) -> str:
     Written to a file rather than passed as an argument: a context brief runs
     to thousands of characters and will exceed command-line limits on Windows.
 
-    Order matters. The ticket first, then the accumulated context, then every
-    reviewer ask oldest first -- a request satisfied in round two is still
-    something this rework must not undo -- then the QA rejection when this
-    follows a failure, then the scope rules.
+    Order matters. For a rework or QA rejection, the requested changes or rejection
+    are elevated to the top so the model treats them as the primary goal rather than
+    re-implementing the original ticket requirements from scratch.
     """
-    parts = [
-        f"# {request.ticket_key}: {request.title}",
-        "",
-        "You are writing the change for this work item in the repository "
-        f"`{request.repo}`, on the branch already checked out for you.",
-        "",
-        "## The ticket",
-        "",
-        (request.description or "").strip() or
-        "_The ticket carries no description. Work from the title and the "
-        "context below._",
-    ]
+    is_rework = request.trigger == "changes_requested" or bool(request.asks)
+
+    parts: list[str] = []
+
+    if is_rework:
+        branch_desc = f" on the branch `{request.existing_branch}`" if request.existing_branch else ""
+        parts += [
+            f"# Rework: {request.ticket_key}: {request.title}",
+            "",
+            f"You are reworking an existing pull request{branch_desc} in the repository "
+            f"`{request.repo}`, on the branch already checked out for you.",
+            "",
+            "A code reviewer has reviewed the pull request and requested changes. "
+            "Your PRIMARY GOAL is to address and implement the reviewer's requested changes. "
+            "Work ONLY on the reviewer asks. Do NOT work on Locus internal PR analysis or bot inline comments. "
+            "Apply your changes directly to the checked out code on this branch. "
+            "Do not start from scratch or undo existing correct work.",
+        ]
+
+        if request.asks:
+            parts += [
+                "",
+                "## What reviewers have asked for (PRIMARY GOAL)",
+                "",
+                "Every one of these must be addressed and implemented. "
+                "A request satisfied in an earlier round must not be undone by this one.",
+                "",
+            ]
+            parts += [f"{n}. {ask}" for n, ask in enumerate(request.asks, start=1)]
+
+        parts += [
+            "",
+            "## The ticket",
+            "",
+            (request.description or "").strip() or
+            "_The ticket carries no description. Work from the title and the "
+            "context below._",
+        ]
+    else:
+        parts += [
+            f"# {request.ticket_key}: {request.title}",
+            "",
+            "You are writing the change for this work item in the repository "
+            f"`{request.repo}`, on the branch already checked out for you.",
+            "",
+            "## The ticket",
+            "",
+            (request.description or "").strip() or
+            "_The ticket carries no description. Work from the title and the "
+            "context below._",
+        ]
 
     if request.context.strip():
-        parts += ["", "## Context gathered by Locus", "", request.context.strip()]
+        if is_rework:
+            parts += [
+                "",
+                "## Context gathered by Locus",
+                "",
+                "_Note: This context is provided strictly for background reference. "
+                "Do NOT treat internal analysis, scanner findings, or linked issue descriptions "
+                "as work items to implement during this rework. Focus exclusively on the reviewer asks above._",
+                "",
+                request.context.strip(),
+            ]
+        else:
+            parts += ["", "## Context gathered by Locus", "", request.context.strip()]
     elif context_mode() == "ticket_only":
         # Said outright rather than left as an empty section: a reader
         # otherwise cannot tell a missing brief from a suppressed one.
@@ -470,7 +539,7 @@ def build_prompt(request: AuthoringRequest) -> str:
             "(LOCUS_AUTHORING_CONTEXT=ticket_only)._",
         ]
 
-    if request.asks:
+    if not is_rework and request.asks:
         parts += [
             "",
             "## What reviewers have asked for, oldest first",
@@ -491,7 +560,8 @@ def build_prompt(request: AuthoringRequest) -> str:
             "> " + request.rejection.strip().replace("\n", "\n> "),
         ]
 
-    parts += ["", SCOPE_INSTRUCTIONS]
+    scope_text = REWORK_SCOPE_INSTRUCTIONS if (is_rework or request.rejection) else SCOPE_INSTRUCTIONS
+    parts += ["", scope_text]
     return "\n".join(parts)
 
 

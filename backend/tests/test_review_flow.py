@@ -134,6 +134,48 @@ class TestStateMachine:
 
         assert result is None
 
+    @pytest.mark.asyncio
+    async def test_sets_ticket_keys_from_pr_title_if_missing(self, db):
+        review = await review_flow.record_review_submitted(
+            db,
+            owner_id=OWNER,
+            repo=REPO,
+            pr_number=PR,
+            review_state="changes_requested",
+            reviewer="senior-dev",
+            body="needs work",
+            pr_title="shadowyay/locus-e2e-inventory#7: Batch tracking",
+        )
+
+        assert review is not None
+        assert review.ticket_keys == "shadowyay/locus-e2e-inventory#7"
+
+    @pytest.mark.asyncio
+    async def test_bot_or_internal_analysis_review_is_ignored(self, db):
+        # Bot reviewer
+        result_bot = await review_flow.record_review_submitted(
+            db,
+            owner_id=OWNER,
+            repo=REPO,
+            pr_number=PR,
+            review_state="changes_requested",
+            reviewer="locus-agent[bot]",
+            body="bot ask",
+        )
+        assert result_bot is None
+
+        # Internal PR context marker
+        result_marker = await review_flow.record_review_submitted(
+            db,
+            owner_id=OWNER,
+            repo=REPO,
+            pr_number=PR,
+            review_state="changes_requested",
+            reviewer="human",
+            body="<!-- locus-pr-agent -->\n## 🧭 Locus PR Context",
+        )
+        assert result_marker is None
+
 
 class TestRoundArithmetic:
     @pytest.mark.asyncio

@@ -326,6 +326,33 @@ class TestPrompt:
         prompt = driver.build_prompt(request())
         assert "do not open a pull request" in prompt.lower()
 
+    def test_rework_prompt_elevates_asks_and_adjusts_scope(self):
+        """
+        On a rework, reviewer asks are the primary goal and must not be
+        subordinated or forbidden by 'Change only what the ticket asks for'.
+        """
+        prompt = driver.build_prompt(request(
+            trigger="changes_requested",
+            asks=["create a new folder named apple", "write banana inside text file"],
+            existing_branch="locus/LOC-42-1",
+            context="## Requirement\nBuild the widget",
+        ))
+
+        assert "# Rework: LOC-42: Add the thing" in prompt
+        assert "PRIMARY GOAL" in prompt
+        assert "locus/LOC-42-1" in prompt
+        assert "1. create a new folder named apple" in prompt
+        assert "2. write banana inside text file" in prompt
+        assert prompt.index("What reviewers have asked for") < prompt.index("## Requirement")
+        assert "Focus on implementing the reviewer's requested changes" in prompt
+        assert "Change only what the ticket asks for" not in prompt
+
+    def test_initial_prompt_uses_ticket_scope(self):
+        """An initial attempt focuses on the ticket scope."""
+        prompt = driver.build_prompt(request(trigger="initial"))
+        assert "# LOC-42: Add the thing" in prompt
+        assert "Change only what the ticket asks for" in prompt
+
 
 class TestCommand:
     def test_is_a_template_not_hard_coded_flags(self, monkeypatch):

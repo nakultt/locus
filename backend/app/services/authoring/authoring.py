@@ -397,7 +397,14 @@ def next_attempt_number(db: Session, *, owner_id: int, ticket_key: str) -> int:
     return len(attempts_for(db, owner_id, ticket_key)) + 1
 
 
-def gather_asks(db: Session, *, owner_id: int, ticket_key: str) -> list[str]:
+def gather_asks(
+    db: Session,
+    *,
+    owner_id: int,
+    ticket_key: str,
+    repo: str | None = None,
+    pr_number: int | None = None,
+) -> list[str]:
     """
     Every reviewer ask across every round of every pull request on this item.
 
@@ -411,6 +418,19 @@ def gather_asks(db: Session, *, owner_id: int, ticket_key: str) -> list[str]:
     reviews = work_item_service.sibling_reviews(
         db, owner_id=owner_id, ticket_key=ticket_key
     )
+    if repo and pr_number:
+        this_review = (
+            db.query(models.PRReview)
+            .filter(
+                models.PRReview.owner_id == owner_id,
+                models.PRReview.repo == repo,
+                models.PRReview.pr_number == pr_number,
+            )
+            .first()
+        )
+        if this_review and this_review.id not in {r.id for r in reviews}:
+            reviews.append(this_review)
+
     if not reviews:
         return []
 
@@ -418,11 +438,25 @@ def gather_asks(db: Session, *, owner_id: int, ticket_key: str) -> list[str]:
         models.PRReviewRound.review_id.in_([r.id for r in reviews]),
     ).order_by(models.PRReviewRound.created_at.asc()).all()
 
+    from app.services.pipeline.review_flow import is_bot_or_internal_comment
+
     asks: list[str] = []
     for entry in rounds:
+        if is_bot_or_internal_comment(entry.reviewer, entry.body):
+            continue
         body = (entry.body or "").strip()
         if entry.outcome == "changes_requested" and body and body not in asks:
             asks.append(body)
+
+    if not asks:
+        for r in reviews:
+            pending = (r.pending_asks or "").strip()
+            if pending and not is_bot_or_internal_comment(r.last_reviewer, pending):
+                for line in pending.splitlines():
+                    cleaned = line.strip().lstrip("-*0123456789. ").strip()
+                    if cleaned and not is_bot_or_internal_comment(None, cleaned) and cleaned not in asks:
+                        asks.append(cleaned)
+
     return asks
 
 

@@ -144,8 +144,12 @@ def build(
 
     # --- Review history: what humans asked for, in their words -----------
     if review and review.rounds:
+        from app.services.pipeline.review_flow import is_bot_or_internal_comment
+
         lines.append("\n## Review history")
         for round_ in review.rounds:
+            if is_bot_or_internal_comment(round_.reviewer, round_.body):
+                continue
             if round_.outcome == schemas.ReviewOutcome.resubmitted.value:
                 lines.append(f"- Round {round_.round_number}: author pushed changes")
                 continue
@@ -169,10 +173,12 @@ def build(
                 lines.append(quoted)
 
     # --- Outstanding ------------------------------------------------------
+    from app.services.pipeline.review_flow import is_bot_or_internal_comment
+
     asks = [
         line.strip()
         for line in ((review.pending_asks if review else None) or "").splitlines()
-        if line.strip()
+        if line.strip() and not is_bot_or_internal_comment(None, line)
     ]
     if asks:
         lines.append("\n## Outstanding asks")

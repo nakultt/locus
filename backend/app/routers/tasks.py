@@ -592,7 +592,11 @@ async def author_task(
             or (card.linked_branches[0].name if card.linked_branches else None)
         ),
         context=_context_for(db, current_user.id, task_key, card),
-        asks=authoring.gather_asks(db, owner_id=current_user.id, ticket_key=task_key),
+        asks=authoring.gather_asks(
+            db, owner_id=current_user.id, ticket_key=task_key,
+            repo=continuing.repo if continuing else repo,
+            pr_number=continuing.pr_number if continuing else None,
+        ),
         rejection=_rejection_for(db, current_user.id, task_key),
         attempt=attempt,
         # Recorded on the attempt and stated in the pull request body, so the

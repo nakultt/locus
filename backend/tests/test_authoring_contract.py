@@ -307,6 +307,80 @@ class TestGatherAsks:
 
         assert authoring.gather_asks(db, owner_id=1, ticket_key="LOC-42") == []
 
+    def test_gather_asks_includes_current_pr_when_ticket_keys_unset(self, db):
+        review = models.PRReview(
+            repo="acme/api", pr_number=1, state="changes_requested",
+            ticket_keys=None, owner_id=1,
+        )
+        db.add(review)
+        db.commit()
+        db.add(models.PRReviewRound(
+            review_id=review.id, outcome="changes_requested", round_number=1,
+            body="create the apple folder",
+        ))
+        db.commit()
+
+        # Without repo/pr_number, sibling_reviews cannot find it because ticket_keys is unset:
+        assert authoring.gather_asks(db, owner_id=1, ticket_key="LOC-42") == []
+
+        # With repo and pr_number, the PR's own asks are safely gathered:
+        assert authoring.gather_asks(
+            db, owner_id=1, ticket_key="LOC-42", repo="acme/api", pr_number=1
+        ) == ["create the apple folder"]
+
+    def test_gather_asks_falls_back_to_pending_asks(self, db):
+        review = models.PRReview(
+            repo="acme/api", pr_number=1, state="changes_requested",
+            ticket_keys="LOC-42", pending_asks="create the apple folder\nwrite banana",
+            owner_id=1,
+        )
+        db.add(review)
+        db.commit()
+        db.add(models.PRReviewRound(
+            review_id=review.id, outcome="changes_requested", round_number=1,
+            body=None,
+        ))
+        db.commit()
+
+        assert authoring.gather_asks(db, owner_id=1, ticket_key="LOC-42") == [
+            "create the apple folder", "write banana"
+        ]
+
+    def test_gather_asks_ignores_bot_and_internal_analysis_comments(self, db):
+        review = models.PRReview(
+            repo="acme/api", pr_number=1, state="changes_requested",
+            ticket_keys="LOC-42", owner_id=1,
+        )
+        db.add(review)
+        db.commit()
+
+        # Bot round with changes_requested
+        db.add(models.PRReviewRound(
+            review_id=review.id, outcome="changes_requested", round_number=1,
+            reviewer="locus-agent[bot]", body="bot ask should be ignored",
+        ))
+        # Internal PR analysis comment
+        db.add(models.PRReviewRound(
+            review_id=review.id, outcome="changes_requested", round_number=2,
+            reviewer="human", body="<!-- locus-pr-agent -->\n## 🧭 Locus PR Context\nlinked issue #7",
+        ))
+        # Inline suggestion comment
+        db.add(models.PRReviewRound(
+            review_id=review.id, outcome="changes_requested", round_number=3,
+            reviewer="human", body="<!-- locus-inline -->\n```suggestion\nbanana\n```",
+        ))
+        # Legitimate human reviewer ask
+        db.add(models.PRReviewRound(
+            review_id=review.id, outcome="changes_requested", round_number=4,
+            reviewer="alice", body="create the apple folder",
+        ))
+        db.commit()
+
+        asks = authoring.gather_asks(
+            db, owner_id=1, ticket_key="LOC-42", repo="acme/api", pr_number=1
+        )
+        assert asks == ["create the apple folder"]
+
 
 # --- The endpoint ----------------------------------------------------------
 
