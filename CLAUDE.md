@@ -12,11 +12,21 @@ All nine phases are now built: the authoring dial, presets, the driver contract,
 driver, the bound and handoff, the calendar agent, availability and interruption, the board
 surface, and this documentation. The plan is now a record of *why*, not a list of what is missing.
 
-One caveat from the plan itself still stands and is the most important thing to know: **nothing
-here has run against live third-party services.** The solver, the parsers, the credential
-isolation, the workspace checks and the driver's decisions are all exercised directly; every call
-that reads or writes to GitHub, Jira, Slack, Google or OpenCode is written against the documented
-API and is unproven. Measure autonomous mode on real tickets before promising it to anyone.
+The plan's headline caveat — that nothing here had run against live third-party services — is
+**no longer true, and was worth retiring carefully.** Autonomous mode has since been run end to
+end twice against real GitHub, Slack, Gmail and Google Docs: a ticket assigned, code written by
+the agent, a changes-requested round it reworked itself, an auto-merge, and a QA sign-off that
+closed the work item. What that exercise proved is mostly that the *warning* was right even
+though the claim is now stale — eleven defects surfaced, every one of them in a path the tests
+could not reach, and every one failing in a way that looked like success. They are documented as
+invariants below. The parts still unproven are named under "Known gaps".
+
+The half worth keeping is the last sentence: **measure autonomous mode on real tickets before
+promising it to anyone.** The plumbing works. The *review* is the weak half — across two runs on
+code that was independently verified correct, five `p1` findings were raised and all five were
+false positives, while both genuine correctness bugs were found by executing the acceptance
+criteria rather than by reading the diff. This is why review findings never block the merge gate
+at any priority (see below): that decision is load-bearing, not a nicety.
 
 ## Branch convention
 
@@ -858,6 +868,102 @@ produces plausible-looking schedules with overlaps and missed deadlines. Events 
 by movability, conflicts resolve least-disruptive-first, and anything with external attendees
 is reported as blocked rather than moved.
 
+### Invariants the first live runs added
+
+Everything below was found by running autonomous mode end to end against real services. None of
+it was caught by the suite, and each failed in a way that looked like success — which is the
+common thread and the reason they are grouped.
+
+**A pass that failed is never rendered as a pass that found nothing.** These are different
+claims and only one is evidence about the code. The comment printed "No issues detected in the
+changed code." as its headline while the collapsed notes below recorded that every pass had
+failed, so two dead scanners and a misdirected model backend sat unnoticed through a whole
+pipeline run. `_incomplete_notice` says so instead, and says it whether or not the section found
+anything: findings present with a scanner dead is the more dangerous case, because a partial
+list reads as a complete one and nothing else in the output contradicts it. Only the passes that
+actually failed are marked — a Slack outage says nothing about whether the code was scanned.
+
+**The deterministic scanners must not depend on which event loop is running.** `reload=True`
+makes uvicorn manage subprocesses, which selects a `SelectorEventLoop`, which on Windows cannot
+spawn one — so `create_subprocess_exec` raised `NotImplementedError`, whose message is the empty
+string, and the comment read `semgrep failed: `. Semgrep and Gitleaks therefore never ran in
+development, silently, killing the confirmed half of the scan. They run through
+`asyncio.to_thread(subprocess.run, …)`, which behaves the same on every platform and any loop.
+Never interpolate a bare exception into a message either: `_describe` falls back to the class
+name, because an empty one names neither the cause nor anything to search for.
+
+**Git is never allowed to wait for a human.** An agent running unattended cannot answer a
+credential prompt: on Windows the credential manager opens an account picker and the push blocks
+until the attempt times out, spending it on a dialog nobody saw; on a server there is no helper
+at all and the prompt fails in a way that reads like a rejected push. `run_git` disables
+prompting outright — `GIT_TERMINAL_PROMPT=0`, no askpass, `GCM_INTERACTIVE=never`, and an empty
+`credential.helper` — in one place rather than at each call site, because the failure mode of
+missing one is a run that hangs rather than one that fails. That makes authentication necessarily
+explicit, which is what `authenticated_remote` is for: it takes the host from the configured
+remote rather than assuming github.com, so Enterprise keeps working, and returns `origin`
+unchanged for ssh or local remotes, which carry their own credentials or need none. The push URL
+carries the token and git echoes the remote it could not reach, so both paths are redacted —
+unredacted this wrote the token into `AuthoringAttempt.error`, which the UI renders.
+
+**A rework continues the branch the reviewer already read.** `existing_branch` was passed as
+None for both triggers, directly beneath a comment saying otherwise, so the branch name picked up
+the attempt number and every rework opened a *second* pull request. The review sat on one and the
+fix on the other, `round_number` stopped tracking the round trip, and the abandoned PR pinned the
+board. A QA rejection still opens a new pull request — that half of the comment was correct, and
+is what `work_item.resolve_key` and `sibling_reviews` exist for. Strip the ticket key before
+passing a stored `pr_title` back to the driver, which re-adds it: otherwise every attempt
+prefixes it again.
+
+**In flight means open, not merely un-merged.** GitHub sends the same `closed` action for a merge
+and an abandonment and distinguishes them only by `merged`; the merge half was handled and the
+other half discarded, so nothing ever left the review loop except by merging. A superseded pull
+request sitting in `changes_requested` therefore pinned its task's stage for good — the board
+showed "Changes requested, 2/9" for work that had merged and been signed off. `ReviewState.closed`
+exists for this, `review_flow.record_closed` writes it (never walking back a merge), and both
+`task_board._derive_stage` and `worklist.build` treat it as finished. Only an actual merge reports
+as merged: every pull request having been closed unmerged means the work was abandoned, not
+landed.
+
+**One definition of which work item a pull request belongs to.** `pr_agent.work_item_keys` is it:
+a tracker key when there is one, otherwise the GitHub issue the pull request closes, qualified by
+its repository. There were two of these — the comms log had the issue fallback and the Google Docs
+export did not — so on a repo with no tracker the export saw no work item, skipped the
+ticket-keyed lookup in `report_sync.find_report`, and created a fresh document per pull request.
+The document the board links, created from the ticket before any PR existed, was then never
+written to again and still read "No pull request has been opened for this work yet" long after
+the work had merged.
+
+**`suggested_fix` is a `SuggestedFix`, not a string.** Handing the object to a helper that calls
+`.strip()` raised on every render of a review finding that carried a fix — and because
+`report_sync.refresh` swallows its own failure and returns the stored URL, the document silently
+stopped being updated from the review and QA paths while every link to it kept resolving. That
+swallowing is correct and stays; it is why a failure here has to be impossible rather than
+tolerated.
+
+**The channel a tester replies through must not change the record.** The Slack QA path rewrote
+the report once the tester answered; the email path did everything else and never refreshed it,
+so the report ended at the merge and never said whether the change worked — for the *ordinary*
+case, since the brief reaches testers by email. `close_on_qa_signoff` is already careful to behave
+identically across both channels; the document is part of that outcome and has to be too.
+
+**Integration health is recorded for every service, not just Gmail.** Only the Gmail poller ever
+wrote a row, so after a run making many successful GitHub, Slack and Docs calls the table held
+one — and "absent" meant both "never attempted" and "attempted constantly, never instrumented",
+which is exactly the ambiguity the feature exists to remove. `integration_health.record_stages`
+derives it from the pipeline stage list, the one place every integration already reports its own
+outcome, so a new stage is instrumented by adding a line to `STAGE_SERVICES`. A `skipped` stage
+records nothing: absence has to keep meaning "never attempted".
+
+**`backend/.env` is not authoritative on its own.** Bun loads the repo-root `.env` and passes it
+to every child process, and `load_dotenv()` does not override a variable already in the
+environment. The root file is a leftover from the pre-Next stack and still carried
+`LLM_PROVIDER=gemini` beside a stale `GOOGLE_API_KEY`, so the backend resolved its model backend
+to Google and sent every diff, Slack thread and ticket body it analysed to a third party — the
+exact thing "the analysis models run locally" exists to prevent. Nothing leaked only because the
+key was dead and every call 400'd. `scripts/dev.ts` strips the file's own keys from the child
+environment rather than denylisting names, because a denylist needs updating whenever somebody
+adds a variable and forgetting is silent.
+
 ## Database schema changes
 
 New installs need no migrations — `Base.metadata.create_all()` at startup creates the current
@@ -898,7 +1004,21 @@ gets rewritten on every checkout and shows as modified in a fresh clone.
 - The scheduler reads only the primary calendar; conflicts on secondary or shared calendars
   are invisible to it.
 - Tests do not cover live calls to GitHub, Jira, or Slack. Response-shape handling for those
-  is written against the documented APIs.
+  is written against the documented APIs. Two full end-to-end runs have since exercised GitHub,
+  Slack, Gmail and Google Docs for real, but *only* on the autonomous-mode path and only against
+  one account — that is evidence, not coverage, and it is not repeatable in CI.
+- **The review pass is the weakest half and should not be trusted unsupervised.** Across two
+  live runs on code independently verified correct, all five `p1` findings were false positives,
+  while both real correctness bugs were found by executing the acceptance criteria rather than
+  by reading the diff. On the second run the model even identified the offending pattern and
+  filed it as a `p3` quality nit, missing that it disabled a safety check. Findings deliberately
+  do not block the merge gate at any priority, which is what keeps this survivable.
+- Jira and Linear have not been exercised live. Both end-to-end runs used GitHub issues as the
+  work item, so `assigned.py`'s Jira half and every tracker transition remain unproven.
+- The QA sign-off has been proven over Gmail and over Slack, but Slack only with a human typing
+  the reply: Locus correctly ignores messages carrying a `bot_id`, so the bot token cannot
+  simulate a tester, and a read-only user token cannot post. There is no way to drive that half
+  unattended, by design.
 - Multi-instance deployment is guarded but not proven. The job claim is an atomic conditional
   UPDATE, and the two sweeps take Postgres advisory locks (`app/core/locks.py`), so
   duplicate outward messages are prevented by construction rather than by there being one

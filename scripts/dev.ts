@@ -23,7 +23,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 /**
- * The environment for a child, without anything the repo-root `.env` defined.
+ * The environment for the backend, without anything the repo-root `.env` defined.
  *
  * Bun loads the root `.env` automatically and `Bun.spawn` inherits it, so every
  * variable in that file arrived in the backend as though an operator had
@@ -79,6 +79,17 @@ type Service = {
   name: string;
   cmd: string[];
   cwd: string;
+  /**
+   * Whether to hide the repo-root `.env` from this child. See `childEnv`.
+   *
+   * Only the backend needs it. Next reads its own `.env` files from
+   * `frontend/`, but a root-level `NEXT_PUBLIC_*` is a reasonable thing for
+   * someone to write, and stripping it would break the browser bundle in a
+   * way that looks like a bad build rather than a missing variable. The bug
+   * this guards against is specific to the backend, so the blast radius is
+   * kept there.
+   */
+  sanitizeEnv?: boolean;
 };
 
 const SERVICES: Service[] = [
@@ -86,6 +97,7 @@ const SERVICES: Service[] = [
     name: "backend",
     cmd: ["uv", "run", "main.py"],
     cwd: `${ROOT}backend`,
+    sanitizeEnv: true,
   },
   {
     name: "frontend",
@@ -120,7 +132,7 @@ for (const service of SERVICES) {
     cmd: service.cmd,
     cwd: service.cwd,
     stdio: ["inherit", "inherit", "inherit"],
-    env: childEnv(ROOT),
+    env: service.sanitizeEnv ? childEnv(ROOT) : process.env,
 
     // One process dying takes the pair down. Leaving the survivor running
     // hides which half failed behind a wall of connection-refused errors from
