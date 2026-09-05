@@ -808,6 +808,22 @@ a secret or the credential path is a signal worth surfacing, and silently editin
 means the reviewer reads something the agent did not produce. `migrations/**` is deliberately not
 on the list — schema changes are legitimate work, and the review and CI gates catch a bad one.
 
+**A review is requested once, on the pull request the agent actually created.** Autonomous mode
+opened its pull requests with nobody requested, so the work never entered GitHub's own review
+queue -- the place a reviewer looks -- and the first anybody heard of it was a Slack ping.
+`autonomous_pr_reviewers` is an account setting resolved through `agent_runtime`
+(`LOCUS_AUTHORING_PR_REVIEWERS`, then empty), deliberately **not** `settings.reviewers`: that list
+names who is expected to review a repo and is used to address the review loop's notifications, and
+turning it into a GitHub request would start notifying people who only agreed to be mentioned in a
+channel. Three rules. The request fires only on the 201, never on the already-open path -- a rework
+pushes to the branch the reviewer has already read, and re-requesting there re-notifies them every
+round, which is what gets a bot muted. The pull request's author is dropped first, because GitHub
+rejects a list naming them with a 422 covering the *whole* list, so the agent's own account
+appearing in a team's reviewer list would cost everyone else their request too. And a failure is
+logged and swallowed: the pull request is open, which is what the attempt was spent on, and failing
+an authoring run over a notification would hand the work item back.
+`tests/test_pr_reviewers.py` pins it.
+
 **An empty diff opens no pull request.** An empty PR puts a reviewer's name on a request to read a
 diff that does not exist.
 

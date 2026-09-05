@@ -1129,6 +1129,12 @@ export interface AgentRuntimeSettings {
   /** Tri-state: null inherits, true and false are choices. */
   allow_in_place?: boolean | null;
   workspace_ttl_days?: number | null;
+  /**
+   * GitHub logins asked to review the pull requests the agent opens, one per
+   * line. Separate from `reviewers`, which only addresses the review loop's
+   * Slack pings; null requests nobody.
+   */
+  autonomous_pr_reviewers?: string | null;
   calendar_sweep_minutes?: number | null;
   calendar_lookahead_days?: number | null;
 }
@@ -1155,6 +1161,7 @@ export interface AgentRuntimeResolved {
   workspace_root: string;
   allow_in_place: boolean;
   workspace_ttl_days: number;
+  pr_reviewers: string[];
   calendar_sweep_minutes: number;
   calendar_lookahead_days: number;
   /** Whether this account has saved any runtime setting of its own. */

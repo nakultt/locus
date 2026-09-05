@@ -16,6 +16,7 @@ import {
   ShieldCheck,
   Terminal,
   Trash2,
+  UserPlus,
   UserRound,
   Webhook,
   X,
@@ -729,6 +730,52 @@ function Defaults({ docsConnected }: { docsConnected: boolean }) {
                   value={values.agent_commit_email ?? ""}
                   onChange={(e) =>
                     set("agent_commit_email", e.target.value || null)
+                  }
+                  spellCheck={false}
+                />
+              </Field>
+            </div>
+          </div>
+
+          {/* ── Review request ──────────────────────────────────────────
+              Who GitHub asks to review the pull requests the agent opens.
+              Deliberately not the reviewer list above: that one addresses the
+              review loop's Slack pings, and turning it into a review request
+              would start notifying people who only agreed to be mentioned in
+              a channel. Blank requests nobody, which is what this mode did
+              before the setting existed. */}
+          <div className="border-t border-line pt-5">
+            <Kicker>
+              <UserPlus className="mr-1.5 inline size-3.5" aria-hidden />
+              Review request
+            </Kicker>
+            <p className="mt-1.5 text-sm leading-relaxed text-muted">
+              Who is asked to review the pull requests the agent opens, on
+              GitHub itself. Requested once, on the pull request the agent
+              actually creates — a rework pushes to the same branch, and
+              re-requesting there would re-notify the reviewer on every round.
+              The agent&apos;s own account is skipped: GitHub rejects a request
+              naming the author, and it rejects the whole list with it.
+            </p>
+
+            <div className="mt-4">
+              <Field
+                label="Request a review from"
+                htmlFor="rt-pr-reviewers"
+                hint="One GitHub login per line. Blank opens the pull request without requesting anybody."
+              >
+                <Textarea
+                  id="rt-pr-reviewers"
+                  mono
+                  rows={3}
+                  placeholder={
+                    resolved?.pr_reviewers?.length
+                      ? resolved.pr_reviewers.join("\n")
+                      : "senior-dev\ntech-lead"
+                  }
+                  value={values.autonomous_pr_reviewers ?? ""}
+                  onChange={(e) =>
+                    set("autonomous_pr_reviewers", e.target.value || null)
                   }
                   spellCheck={false}
                 />

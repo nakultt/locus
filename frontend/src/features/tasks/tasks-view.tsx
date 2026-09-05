@@ -59,7 +59,7 @@ import { GettingStarted } from "./getting-started";
  * scroll positions apart from the queue it describes.
  */
 
-type Filter = "needs_you" | "in_flight" | "done" | "all";
+type Filter = "in_flight" | "needs_you" | "done" | "all";
 
 /**
  * Fill in any list the response left out.
@@ -88,7 +88,7 @@ export default function TasksView() {
   const [jobs, setJobs] = useState<PRJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [filter, setFilter] = useState<Filter>("needs_you");
+  const [filter, setFilter] = useState<Filter>("in_flight");
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<TaskCard | null>(null);
   const [showRuns, setShowRuns] = useState(false);
@@ -246,8 +246,8 @@ export default function TasksView() {
           value={filter}
           onChange={setFilter}
           items={[
-            { value: "needs_you", label: "Needs you", count: counts.needs_you },
             { value: "in_flight", label: "In flight", count: counts.in_flight },
+            { value: "needs_you", label: "Needs you", count: counts.needs_you },
             { value: "done", label: "Completed", count: counts.done },
             { value: "all", label: "All", count: counts.all },
           ]}

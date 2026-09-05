@@ -1363,6 +1363,14 @@ class PRAgentDefaultsUpdate(BaseModel):
     workspace_ttl_days: int | None = Field(
         None, ge=0, le=90, description="How long kept-on-failure worktrees survive"
     )
+    autonomous_pr_reviewers: str | None = Field(
+        None,
+        description=(
+            "GitHub logins asked to review the pull requests the agent opens, "
+            "one per line. Separate from `reviewers`, which only addresses the "
+            "review loop's Slack pings. Blank requests nobody."
+        ),
+    )
     calendar_sweep_minutes: int | None = Field(
         None, ge=5, le=1440, description="How often your calendars are swept"
     )
@@ -1400,6 +1408,7 @@ class AgentRuntimeResolved(BaseModel):
     workspace_root: str
     allow_in_place: bool
     workspace_ttl_days: int
+    pr_reviewers: list[str] = []
     calendar_sweep_minutes: int
     calendar_lookahead_days: int
     # True when this account has saved any runtime setting of its own. The UI

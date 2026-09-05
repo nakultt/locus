@@ -416,6 +416,7 @@ _RUNTIME_TEXT = (
     "agent_commit_email",
     "code_root",
     "workspace_root",
+    "autonomous_pr_reviewers",
 )
 
 _RUNTIME_NUMBERS = (
@@ -440,6 +441,12 @@ def _apply_runtime(row, request) -> None:
     # form somebody has spent five minutes filling in.
     row.authoring_driver = agent_runtime.normalize_driver(row.authoring_driver)
     row.authoring_context = agent_runtime.normalize_context_mode(row.authoring_context)
+
+    # Stored one bare login per line whatever was typed, so the form reads back
+    # what the request will actually name -- a list saved with "@" or commas
+    # would otherwise look right and request nobody.
+    logins = agent_runtime.parse_logins(row.autonomous_pr_reviewers)
+    row.autonomous_pr_reviewers = "\n".join(logins) if logins else None
 
     for name in _RUNTIME_NUMBERS:
         setattr(row, name, getattr(request, name, None))

@@ -34,6 +34,7 @@ def clean(monkeypatch):
         "LOCUS_WORKSPACE_TTL_DAYS",
         "LOCUS_CALENDAR_SWEEP_MINUTES",
         "LOCUS_CALENDAR_LOOKAHEAD_DAYS",
+        "LOCUS_AUTHORING_PR_REVIEWERS",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -169,3 +170,41 @@ class TestDescribe:
         # Paths and bounds, not secrets: the values themselves are returned,
         # unlike the model backend's API key.
         assert set(described) >= {"code_root", "workspace_root", "agent_email"}
+
+
+class TestPRReviewers:
+    """
+    Who GitHub is asked to review the pull requests the agent opens.
+
+    Empty is the meaningful default: a review request is a notification the
+    recipient cannot undo, so this must never resolve to somebody nobody
+    named -- which is why the list above it, `settings.reviewers`, is not
+    reused here.
+    """
+
+    def test_nobody_is_requested_unless_an_account_says_so(self):
+        assert agent_runtime.pr_reviewers() == []
+
+    def test_logins_are_read_however_they_were_typed(self):
+        _bind(pr_reviewers="@senior-dev\ntech-lead, @qa-lead\n\n")
+        assert agent_runtime.pr_reviewers() == ["senior-dev", "tech-lead", "qa-lead"]
+
+    def test_a_repeated_login_is_requested_once(self):
+        """
+        GitHub takes the whole list in one call and rejects the whole of it if
+        an entry is bad, so a login written twice must not become two entries.
+        """
+        _bind(pr_reviewers="senior-dev\nSenior-Dev")
+        assert agent_runtime.pr_reviewers() == ["senior-dev"]
+
+    def test_an_account_beats_the_deployment(self, monkeypatch):
+        monkeypatch.setenv("LOCUS_AUTHORING_PR_REVIEWERS", "deployment-wide")
+
+        assert agent_runtime.pr_reviewers() == ["deployment-wide"]
+
+        _bind(pr_reviewers="ours")
+        assert agent_runtime.pr_reviewers() == ["ours"]
+
+    def test_it_is_reported_with_the_rest_of_the_runtime(self):
+        _bind(pr_reviewers="senior-dev")
+        assert agent_runtime.describe()["pr_reviewers"] == ["senior-dev"]

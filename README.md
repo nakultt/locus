@@ -585,6 +585,7 @@ is the cheapest possible place to discover the environment is wrong.
 | `LOCUS_MAX_CHANGED_LINES` | `600` | Same. Exceeding either consumes an attempt and is not retried smaller. |
 | `LOCUS_MAX_OPEN_AUTONOMOUS_PRS` | `3` | Per repo. The rubber-stamping mitigation. |
 | `LOCUS_AGENT_EMAIL` | `locus-agent@users.noreply.github.com` | How a previous attempt's commits are told apart from a human's. |
+| `LOCUS_AUTHORING_PR_REVIEWERS` | unset | GitHub logins asked to review the pull requests the agent opens, one per line or comma-separated. Requested once, on creation only. |
 
 ⚠️ **`LOCUS_ALLOW_IN_PLACE=1` is off by default and costs real safety.** The agent shares a working
 tree with a human, `git checkout` becomes destructive, concurrent attempts on one repo become

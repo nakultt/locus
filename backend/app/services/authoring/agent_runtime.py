@@ -83,6 +83,8 @@ class AgentRuntime:
     # Tri-state, like the column: None inherits, True and False are choices.
     allow_in_place: bool | None = None
     workspace_ttl_days: int | None = None
+    # Newline- or comma-separated GitHub logins, stored as typed.
+    pr_reviewers: str | None = None
     calendar_sweep_minutes: int | None = None
     calendar_lookahead_days: int | None = None
 
@@ -134,6 +136,28 @@ def _flag(value: Any) -> bool | None:
     if value is None or value == "":
         return None
     return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def parse_logins(value: Any) -> list[str]:
+    """
+    GitHub logins from a hand-typed list, one per line or comma-separated.
+
+    A leading `@` is stripped, because that is how people write a mention and
+    GitHub's API wants the bare login. Order is preserved and duplicates are
+    dropped: the request is one call carrying the whole list, and GitHub
+    rejects the whole of it if any entry is bad, so a login repeated on two
+    lines must not become two entries.
+    """
+    logins: list[str] = []
+    seen: set[str] = set()
+
+    for line in str(value or "").replace(",", "\n").splitlines():
+        login = line.strip().lstrip("@")
+        if login and login.lower() not in seen:
+            seen.add(login.lower())
+            logins.append(login)
+
+    return logins
 
 
 def normalize_driver(value: str | None) -> str | None:
@@ -265,6 +289,17 @@ def workspace_ttl_days(default: int = DEFAULT_WORKSPACE_TTL_DAYS) -> int:
     ))
 
 
+def pr_reviewers() -> list[str]:
+    """
+    Who is asked to review the pull requests the agent opens.
+
+    Empty is the meaningful default and stays the fallback: requesting a review
+    from somebody who never asked for one is a notification they cannot undo,
+    so this only ever does what an account explicitly typed.
+    """
+    return parse_logins(_resolve("pr_reviewers", "LOCUS_AUTHORING_PR_REVIEWERS", ""))
+
+
 def calendar_sweep_minutes(default: int = DEFAULT_CALENDAR_SWEEP_MINUTES) -> int:
     return int(_resolve(
         "calendar_sweep_minutes", "LOCUS_CALENDAR_SWEEP_MINUTES", default, _int,
@@ -297,6 +332,7 @@ def from_row(row) -> AgentRuntime:
         workspace_root=_text(row.workspace_root),
         allow_in_place=None if row.allow_in_place is None else bool(row.allow_in_place),
         workspace_ttl_days=_int(row.workspace_ttl_days),
+        pr_reviewers=_text(getattr(row, "autonomous_pr_reviewers", None)),
         calendar_sweep_minutes=_int(row.calendar_sweep_minutes),
         calendar_lookahead_days=_int(row.calendar_lookahead_days),
     )
@@ -318,6 +354,16 @@ def for_user(db: Session, user_id: int) -> AgentRuntime | None:
             models.PRAgentDefaults.owner_id == user_id
         ).first()
     except Exception:
+        # Rolled back before returning, or the swallow is a lie on Postgres: a
+        # failed statement poisons the whole session, so every later query in
+        # the same request dies with "current transaction is aborted" and the
+        # real cause -- an unmigrated column here -- never appears in the
+        # traceback. That is what makes degrading to the deployment default
+        # actually degrade rather than take the request down two frames later.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         return None
     return from_row(row) if row else None
 
@@ -352,6 +398,7 @@ def describe() -> dict[str, Any]:
         "workspace_root": workspace_root_setting(),
         "allow_in_place": allow_in_place(),
         "workspace_ttl_days": workspace_ttl_days(),
+        "pr_reviewers": pr_reviewers(),
         "calendar_sweep_minutes": calendar_sweep_minutes(),
         "calendar_lookahead_days": calendar_lookahead_days(),
     }

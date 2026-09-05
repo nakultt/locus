@@ -10,10 +10,13 @@ Credentials are passed per call. Nothing is stored at module level; a
 background worker and a live request must never share credential state.
 """
 
+import logging
 import re
 from pathlib import Path
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 GITHUB_API_BASE = "https://api.github.com"
 
@@ -219,6 +222,66 @@ async def get_default_branch(token: str, repo: str) -> str:
     return response.json().get("default_branch") or "main"
 
 
+async def request_reviewers(
+    token: str,
+    repo: str,
+    pr_number: int | None,
+    logins: list[str],
+    *,
+    author: str | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> list[str]:
+    """
+    Ask the named GitHub users to review a pull request.
+
+    Returns the logins actually requested, empty when there was nothing to ask
+    or the call failed. **A failure is never raised**: the pull request is
+    open, which is the outcome the caller spent an attempt on, and failing an
+    authoring run because a review could not be requested would hand a work
+    item back over a notification.
+
+    The author is dropped first. GitHub rejects a request naming the pull
+    request's own author with a 422 covering the *whole* list, so the agent's
+    own account appearing in a team's reviewer list -- which is easy to do,
+    since it is a teammate everywhere else -- would silently cost everyone
+    else their request too.
+    """
+    if not pr_number or not logins:
+        return []
+
+    wanted = [
+        login for login in logins
+        if not author or login.lower() != author.lower()
+    ]
+    if not wanted:
+        return []
+
+    async def post(http: httpx.AsyncClient) -> list[str]:
+        response = await http.post(
+            f"{GITHUB_API_BASE}/repos/{repo}/pulls/{pr_number}/requested_reviewers",
+            headers=_headers(token),
+            json={"reviewers": wanted},
+        )
+        if response.status_code in (200, 201):
+            return wanted
+        logger.warning(
+            "Could not request reviewers %s on %s#%s (%s): %s",
+            ", ".join(wanted), repo, pr_number, response.status_code, response.text,
+        )
+        return []
+
+    try:
+        if client is not None:
+            return await post(client)
+        async with httpx.AsyncClient(timeout=30.0) as own:
+            return await post(own)
+    except Exception as exc:
+        logger.warning(
+            "Could not request reviewers on %s#%s: %s", repo, pr_number, exc
+        )
+        return []
+
+
 async def create_pull_request(
     token: str,
     repo: str,
@@ -228,6 +291,7 @@ async def create_pull_request(
     base: str,
     body: str,
     draft: bool = False,
+    reviewers: list[str] | None = None,
 ) -> dict:
     """
     Open a pull request, resolving the two 422s that actually happen.
@@ -243,6 +307,12 @@ async def create_pull_request(
     - **No commits ahead.** The agent produced nothing. Reported as an error,
       because an empty pull request is worse than none: it puts a reviewer's
       name on a request to read a diff that does not exist.
+
+    `reviewers` are requested only on the pull request this call actually
+    created. The already-open path above returns somebody else's -- usually a
+    previous attempt's, which a reviewer has already been asked to read and may
+    already have reviewed -- and re-requesting there would re-notify them on
+    every rework, which is what gets a bot muted.
 
     Returns:
         The pull request object on success, or `{"error": ...}`. A dict rather
@@ -262,7 +332,17 @@ async def create_pull_request(
         )
 
         if response.status_code == 201:
-            return response.json()
+            created = response.json()
+            if reviewers:
+                await request_reviewers(
+                    token,
+                    repo,
+                    created.get("number"),
+                    reviewers,
+                    author=(created.get("user") or {}).get("login"),
+                    client=client,
+                )
+            return created
 
         if response.status_code == 422:
             detail = ""

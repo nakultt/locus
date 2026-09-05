@@ -1012,6 +1012,10 @@ class OpenCodeDriver:
                     test_failure=test_failure,
                     doc_url=settings.get("doc_url"),
                 ),
+                # Account-level, and empty unless somebody typed a login. A
+                # review request is a notification the recipient cannot undo,
+                # so it is only ever sent to people an account named.
+                reviewers=agent_runtime.pr_reviewers(),
             )
             if "error" in pull_request:
                 return failed(
