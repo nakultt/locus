@@ -23,6 +23,8 @@ def clean_env(monkeypatch):
         "ANTHROPIC_API_KEY",
         "GEMINI_API_KEY",
         "GOOGLE_API_KEY",
+        "OPENCODE_API_KEY",
+        "OPENCODE_BASE_URL",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -71,6 +73,37 @@ def test_gemini_uses_the_openai_compatible_endpoint(monkeypatch):
     assert llm._api_key(llm.GEMINI) == "g-test"
     assert "generativelanguage.googleapis.com" in llm._base_url(llm.GEMINI)
     llm.get_llm()
+
+
+def test_opencode_uses_responses_endpoint(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "opencode")
+    monkeypatch.setenv("OPENCODE_API_KEY", "sk-zen-test")
+
+    assert llm._provider() == llm.OPENCODE
+    assert llm._api_key(llm.OPENCODE) == "sk-zen-test"
+    assert llm._base_url(llm.OPENCODE) == "https://opencode.ai/zen/v1/responses"
+    assert llm.default_base_url(llm.OPENCODE) == "https://opencode.ai/zen/v1/responses"
+
+    fast, smart = llm._models(llm.OPENCODE)
+    assert fast == "muse-spark-1.3-contributor-free"
+    assert smart == "muse-spark-1.3-contributor-free"
+
+    model = llm.get_llm()
+    assert model.use_responses_api is True
+    assert model.openai_api_base == "https://opencode.ai/zen/v1"
+
+
+def test_opencode_aliases_resolve(monkeypatch):
+    for alias in ("zen", "opencode-zen", "open-code", "OPENCODE"):
+        monkeypatch.setenv("LLM_PROVIDER", alias)
+        assert llm._provider() == llm.OPENCODE
+
+
+def test_opencode_without_key_names_the_variable(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "opencode")
+    with pytest.raises(llm.LLMUnavailableError) as excinfo:
+        llm.get_llm()
+    assert "OPENCODE_API_KEY" in str(excinfo.value)
 
 
 def test_status_reports_key_presence_never_the_key(monkeypatch):
@@ -144,6 +177,37 @@ def test_hosted_check_reports_a_rejected_key_as_a_key_problem(monkeypatch):
     available, message = asyncio.run(llm.check_llm_available())
     assert available is False
     assert "OPENAI_API_KEY" in message
+
+
+def test_opencode_check_hits_models_endpoint(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "opencode")
+    monkeypatch.setenv("OPENCODE_API_KEY", "sk-valid")
+
+    calls = []
+
+    class Response:
+        status_code = 200
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, **kwargs):
+            calls.append(url)
+            return Response()
+
+    monkeypatch.setattr(llm.httpx, "AsyncClient", lambda **kw: Client())
+
+    import asyncio
+
+    available, message = asyncio.run(llm.check_llm_available())
+    assert available is True
+    assert calls == ["https://opencode.ai/zen/v1/models"]
+    assert "OpenCode Zen is reachable" in message
+
 
 
 # ---------------------------------------------------------------- per-user

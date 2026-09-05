@@ -120,7 +120,7 @@ class LLMConfigUpdate(BaseModel):
     erase the key every time somebody changed a model id -- invisibly, until
     the next analysis failed with a 401.
     """
-    provider: str | None = Field(None, description="local | openai | anthropic | gemini")
+    provider: str | None = Field(None, description="local | openai | anthropic | gemini | opencode")
     base_url: str | None = Field(
         None, description="OpenAI-compatible endpoint; blank inherits the default"
     )

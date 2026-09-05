@@ -351,6 +351,20 @@ async def search_slack_threads(
                         if posted and posted <= since.timestamp():
                             continue
 
+                    # A bot posted it, so it is not team discussion.
+                    #
+                    # The search runs on the *user's* token and sees the whole
+                    # channel, Locus's own notifications included -- and those
+                    # name the repo and the ticket, so they match better than
+                    # the human conversation the search exists to find. Cached
+                    # as "prior discussion" they are handed to the authoring
+                    # model as background, and it answers them: the QA brief
+                    # Locus wrote for a different pull request reads exactly
+                    # like a task list. The same discriminator the QA loop
+                    # already uses to know a tester's reply from its own post.
+                    if match.get("bot_id"):
+                        continue
+
                     seen_permalinks.add(permalink)
 
                     channel_name = match.get("channel", {}).get("name", "unknown")

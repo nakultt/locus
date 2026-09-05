@@ -134,6 +134,84 @@ class TestSearchVisibility:
         assert received.query == '"LOC-42"'
 
 
+class TestOwnNotificationsAreNotDiscussion:
+    """
+    Locus must not read its own Slack posts back as team discussion.
+
+    `search.messages` runs on the *user's* token and returns the whole
+    channel, so every review ping, QA brief and merge announcement Locus wrote
+    came back matching the ticket key better than the human conversation the
+    search exists to find. Cached as "prior discussion" they reached the
+    authoring model as background, and it answered them: a rework asked only
+    to create a folder produced compatibility aliases instead, which is what
+    the QA brief for an unrelated pull request had asked a *tester* to verify.
+    """
+
+    def _cache(self, db, text):
+        comms_log.record_search_matches(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR,
+            queries=['"LOC-42"'],
+            matches=[{
+                "channel": "web", "participant": "Locus",
+                "text": text, "permalink": f"https://slack.com/archives/{hash(text)}",
+                "query": '"LOC-42"',
+            }],
+        )
+
+    def test_the_notifications_locus_actually_sends_are_recognised(self):
+        """
+        Built by the real formatters rather than typed out here, so a reworded
+        notification fails this test instead of silently becoming context.
+        """
+        from app.services.pipeline.review_flow import is_own_slack_notification
+
+        sent = [
+            ":white_check_mark: @jo approved <https://gh/pr/8|acme/api#8> — "
+            "ready to merge.",
+            ":pencil: @jo requested changes on <https://gh/pr/8|acme/api#8> "
+            "(round 1) — over to @sam.",
+            ":eyes: Review requested on <https://gh/pr/8|acme/api#8> — @jo",
+            ":arrows_counterclockwise: <https://gh/pr/8|acme/api#8> ready for "
+            "round 2 — @jo",
+            ":rocket: Auto-merged. Post-merge actions are running.",
+            ":test_tube: *Ready to test* - <https://gh/pr/8|acme/api#8>",
+            "*<https://gh/pr/8|acme/api#8>* — a title\n"
+            "by sam · +39/-2 across 4 files\n"
+            ":mag: 1 unverified issue(s) flagged for review",
+        ]
+        for text in sent:
+            assert is_own_slack_notification(text), text
+
+    def test_a_human_message_is_not_mistaken_for_one(self):
+        from app.services.pipeline.review_flow import is_own_slack_notification
+
+        assert not is_own_slack_notification(
+            "we agreed retries cap at 3 — see the thread from Tuesday"
+        )
+        assert not is_own_slack_notification(None)
+
+    def test_a_cached_notification_is_not_returned_as_context(self, db):
+        """
+        Filtered on the way out rather than deleted. The row is a true record
+        of what the search returned, and the log is the whole record; it is
+        only wrong as *context*. The Slack cache is deliberately permanent, so
+        there is no expiry to wait out -- without this the rows already stored
+        reach every future run on the work item forever.
+        """
+        self._cache(db, "we agreed retries cap at 3")
+        self._cache(db, ":eyes: Review requested on <https://gh/pr/8|acme/api#8> — @jo")
+
+        _, matches = comms_log.cached_search(
+            db, owner_id=OWNER, repo=REPO, pr_number=PR, ticket_key=None
+        )
+
+        assert [m["text"] for m in matches] == ["we agreed retries cap at 3"]
+        # Still recorded: the filter is on the read, not the write.
+        assert db.query(models.CommunicationEvent).filter(
+            models.CommunicationEvent.direction == "received"
+        ).count() == 2
+
+
 class TestLinkedIssues:
     ISSUES = [
         {

@@ -28,6 +28,7 @@ their login is not in the list.
 """
 
 import logging
+import re
 
 import httpx
 from langchain_core.prompts import ChatPromptTemplate
@@ -180,6 +181,60 @@ def is_bot_or_internal_comment(
             return True
 
     return False
+
+
+# Every shape Locus posts into Slack. A closed set, because this module and
+# `merge_actions` are the only things that write them.
+#
+# Slack's `search.messages` is run with the *user's* token, so it returns the
+# channel's whole history -- including everything Locus has posted into it. A
+# review ping, a QA brief and a merge announcement all name the repo and the
+# ticket, so they match the search terms better than the human discussion the
+# search exists to find, and they were being cached as "prior discussion" and
+# handed to the authoring model as background. The agent then answered them:
+# a rework whose only instruction was "create a folder named apple" instead
+# produced compatibility aliases, which is what the QA brief for an unrelated
+# pull request in the same channel had asked a *tester* to verify.
+# Emoji are matched as Slack's shortcodes because that is what
+# `search.messages` returns -- a message posted with a literal "🔍"
+# comes back as ":mag:" -- so a marker written in Unicode would never fire.
+# Where a line has stable prose, that is preferred over the emoji entirely.
+_OWN_SLACK_MARKERS = (
+    ":test_tube: *ready to test*",
+    ":white_check_mark:",
+    ":pencil:",
+    ":eyes: review requested on",
+    ":arrows_counterclockwise:",
+    ":rocket: auto-merged",
+    "unverified issue(s) flagged for review",
+    "confirmed finding(s)",
+    "no security findings",
+)
+
+# The analysis summary's second line: "by <author> · +39/-2 across 4 files".
+# Matched by shape because the first line is just a link and a title, and the
+# third varies with what the scan found.
+_OWN_SLACK_SUMMARY = re.compile(r"\+\d+/-\d+ across \d+ files")
+
+
+def is_own_slack_notification(text: str | None) -> bool:
+    """
+    True if Locus posted this Slack message itself.
+
+    Matched on the markers rather than the author, because the cached rows
+    carry whatever `search.messages` reported as the username and that is the
+    Slack app's display name, which an operator can rename. New matches are
+    filtered by `bot_id` at search time; this covers what is already stored,
+    and the Slack cache is deliberately permanent -- there is no expiry to
+    wait out, so a poisoned row would otherwise reach every future run on the
+    work item forever.
+    """
+    if not text:
+        return False
+    body = text.strip().lower()
+    if any(marker in body for marker in _OWN_SLACK_MARKERS):
+        return True
+    return bool(_OWN_SLACK_SUMMARY.search(body))
 
 
 async def record_review_submitted(

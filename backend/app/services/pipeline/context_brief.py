@@ -127,10 +127,18 @@ def build(
                 lines.append(quoted)
 
     # --- Prior discussion -------------------------------------------------
+    from app.services.pipeline.review_flow import is_own_slack_notification
+
     discussion = [
         e for e in events
         if e.channel == "slack" and e.direction == "received"
         and e.loop == "context"
+        # Not discussion: Locus's own review pings, QA briefs and merge
+        # announcements, which the user-token search returns from the channel
+        # it posts them into. Filtered here as well as in `cached_search`
+        # because this reads the timeline directly, and every consumer of this
+        # brief is a model -- the authoring driver and the code reviewer.
+        and not is_own_slack_notification(e.body)
     ]
     if discussion:
         lines.append("\n## Prior discussion")

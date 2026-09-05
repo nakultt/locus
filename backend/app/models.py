@@ -1018,7 +1018,7 @@ class LLMSetting(Base):
         Integer, ForeignKey("users.id"), nullable=False, unique=True, index=True
     )
 
-    # local | openai | anthropic | gemini. Blank falls back to LLM_PROVIDER.
+    # local | openai | anthropic | gemini | opencode. Blank falls back to LLM_PROVIDER.
     provider = Column(String(32), nullable=True)
     # The OpenAI-compatible endpoint. Configurable for every provider, not
     # only the local one: self-hosted vLLM, Ollama, LiteLLM, OpenRouter and an

@@ -44,8 +44,9 @@ LOCAL = "local"
 OPENAI = "openai"
 ANTHROPIC = "anthropic"
 GEMINI = "gemini"
+OPENCODE = "opencode"
 
-PROVIDERS = (LOCAL, OPENAI, ANTHROPIC, GEMINI)
+PROVIDERS = (LOCAL, OPENAI, ANTHROPIC, GEMINI, OPENCODE)
 
 # Aliases people actually type. "moe" and "moe-local" are what the local
 # backend used to be called, and "claude" and "google" are the product names
@@ -58,6 +59,10 @@ _PROVIDER_ALIASES = {
     "claude": ANTHROPIC,
     "google": GEMINI,
     "google-gemini": GEMINI,
+    "opencode": OPENCODE,
+    "open-code": OPENCODE,
+    "opencode-zen": OPENCODE,
+    "zen": OPENCODE,
 }
 
 # Per-provider defaults. `smart_mode` selects the slower, stronger model.
@@ -66,6 +71,7 @@ _DEFAULT_MODELS = {
     OPENAI: ("gpt-4.1-mini", "gpt-4.1"),
     ANTHROPIC: ("claude-haiku-4-5-20251001", "claude-opus-5"),
     GEMINI: ("gemini-2.5-flash", "gemini-2.5-pro"),
+    OPENCODE: ("muse-spark-1.3-contributor-free", "muse-spark-1.3-contributor-free"),
 }
 
 # Gemini is reached through its OpenAI-compatible endpoint rather than a fourth
@@ -75,11 +81,15 @@ GEMINI_BASE_URL = os.getenv(
 )
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 ANTHROPIC_BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+OPENCODE_BASE_URL = os.getenv(
+    "OPENCODE_BASE_URL", "https://opencode.ai/zen/v1/responses"
+)
 
 _ENV_KEYS = {
     OPENAI: "OPENAI_API_KEY",
     ANTHROPIC: "ANTHROPIC_API_KEY",
     GEMINI: "GEMINI_API_KEY",
+    OPENCODE: "OPENCODE_API_KEY",
 }
 
 
@@ -170,6 +180,8 @@ def _base_url(provider: str) -> str:
         return OPENAI_BASE_URL
     if provider == GEMINI:
         return GEMINI_BASE_URL
+    if provider == OPENCODE:
+        return OPENCODE_BASE_URL
     return ANTHROPIC_BASE_URL
 
 
@@ -248,6 +260,20 @@ def get_llm(smart_mode: bool = False, temperature: float = 0.1) -> BaseChatModel
             max_retries=1,
         )
 
+    if provider == OPENCODE:
+        # OpenCode Zen serves generation at /responses.
+        # ChatOpenAI with use_responses_api=True posts to /responses on base_url.
+        base_url = _base_url(OPENCODE).rstrip("/").removesuffix("/responses")
+        return ChatOpenAI(
+            model=model,
+            base_url=base_url,
+            api_key=key,
+            temperature=temperature,
+            timeout=timeout,
+            max_retries=1,
+            use_responses_api=True,
+        )
+
     # local, openai and gemini all speak the OpenAI wire format.
     return ChatOpenAI(
         model=model,
@@ -305,7 +331,12 @@ async def _check_hosted(provider: str) -> tuple[bool, str]:
     provider that is unreachable.
     """
     key = _api_key(provider)
-    label = {OPENAI: "OpenAI", ANTHROPIC: "Anthropic", GEMINI: "Gemini"}[provider]
+    label = {
+        OPENAI: "OpenAI",
+        ANTHROPIC: "Anthropic",
+        GEMINI: "Gemini",
+        OPENCODE: "OpenCode Zen",
+    }[provider]
 
     if not key:
         return False, (
@@ -316,6 +347,9 @@ async def _check_hosted(provider: str) -> tuple[bool, str]:
     if provider == ANTHROPIC:
         url = _base_url(ANTHROPIC).rstrip("/") + "/v1/models"
         headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
+    elif provider == OPENCODE:
+        url = _base_url(OPENCODE).rstrip("/").removesuffix("/responses") + "/models"
+        headers = {"Authorization": f"Bearer {key}"}
     else:
         url = _base_url(provider).rstrip("/") + "/models"
         headers = {"Authorization": f"Bearer {key}"}
@@ -358,6 +392,7 @@ PROVIDER_LABELS = {
     OPENAI: "OpenAI",
     ANTHROPIC: "Anthropic (Claude)",
     GEMINI: "Google Gemini",
+    OPENCODE: "OpenCode Zen",
 }
 
 
@@ -375,6 +410,8 @@ def default_base_url(provider: str) -> str:
         return OPENAI_BASE_URL
     if provider == GEMINI:
         return GEMINI_BASE_URL
+    if provider == OPENCODE:
+        return OPENCODE_BASE_URL
     return ANTHROPIC_BASE_URL
 
 

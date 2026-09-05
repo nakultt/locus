@@ -226,8 +226,16 @@ def cached_search(
     # three times would read as three separate people saying it.
     matches: list[dict] = []
     seen: set[str] = set()
+    from app.services.pipeline.review_flow import is_own_slack_notification
+
     for e in events:
         if e.direction != "received" or not e.body:
+            continue
+        # Locus's own notification, cached before the search learned to skip
+        # bot posts. Dropped on the way out rather than deleted: the row is a
+        # true record of what the search returned, and `full_report` renders
+        # the log as the whole record. It is only wrong as *context*.
+        if is_own_slack_notification(e.body):
             continue
         if e.permalink:
             if e.permalink in seen:
