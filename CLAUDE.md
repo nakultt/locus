@@ -930,6 +930,31 @@ is what `work_item.resolve_key` and `sibling_reviews` exist for. Strip the ticke
 passing a stored `pr_title` back to the driver, which re-adds it: otherwise every attempt
 prefixes it again.
 
+**Both triggers reach the driver the same way, including the board's button.** The fix above
+landed on the webhook path only, so `POST /tasks/author` kept passing the *issue's* linked branch
+— which an agent-created branch is not, since `linkedBranches` returns only affirmatively linked
+ones — and a click on a work item in `changes_requested` reproduced the whole failure it had just
+removed: a second pull request, the review stranded on the first. `_pr_to_continue` picks the open
+pull request (`review_state` neither `merged` nor `closed`, the same reading `_derive_stage`
+uses), `authoring_flow.head_branch` and `bare_title` are shared with the webhook path rather than
+reimplemented, and the trigger recorded is `changes_requested` when that is what the run is
+answering — a manual click on a rejected pull request is a rework whoever pressed it. A branch
+GitHub could not be read for falls back to a fresh one *and* falls back on the trigger with it: a
+run that did not continue the branch is not responding to the review, and the pull request body
+says what the run is. `tests/test_authoring_contract.py` pins it.
+
+**The throughput cap gates opening a pull request, not writing one.** The cap exists to bound
+*reviewer attention*, and a rework spends none — the reviewer is already reading that pull
+request. Refusing there is the one refusal that makes the mode worse than useless: changes were
+asked for and the agent is then forbidden from delivering them. `should_retry` takes `continuing`
+and the board endpoint consults the cap only when no branch is being continued. Two things made
+this urgent rather than theoretical. The usual way an account *reaches* the cap is duplicates
+opened by the board button before it learned to rework, so the cap was blocking the fix for its
+own cause. And `open_autonomous_prs` subtracted only `merged`, never `closed` — that state
+arrived with "in flight means open, not merely un-merged" and this counter was not part of the
+change — so closing the duplicates by hand did not release it either. Both are pinned, in
+`tests/test_authoring_bound.py` and `tests/test_authoring_contract.py`.
+
 **In flight means open, not merely un-merged.** GitHub sends the same `closed` action for a merge
 and an abandonment and distinguishes them only by `merged`; the merge half was handled and the
 other half discarded, so nothing ever left the review loop except by merging. A superseded pull

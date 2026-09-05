@@ -227,29 +227,29 @@ class TestReworkContinuesTheReviewedBranch:
     """
 
     def test_strips_a_prefix_the_driver_will_re_add(self):
-        assert authoring_flow._bare_title(
+        assert authoring_flow.bare_title(
             "acme/api#1: Add a thing", "acme/api#1"
         ) == "Add a thing"
 
     def test_strips_a_prefix_that_already_doubled(self):
-        assert authoring_flow._bare_title(
+        assert authoring_flow.bare_title(
             "acme/api#1: acme/api#1: Add a thing", "acme/api#1"
         ) == "Add a thing"
 
     def test_leaves_an_unprefixed_title_alone(self):
-        assert authoring_flow._bare_title(
+        assert authoring_flow.bare_title(
             "Add a thing", "acme/api#1"
         ) == "Add a thing"
 
     def test_a_title_that_is_only_the_key_stays_usable(self):
-        assert authoring_flow._bare_title("acme/api#1: ", "acme/api#1") == "acme/api#1"
+        assert authoring_flow.bare_title("acme/api#1: ", "acme/api#1") == "acme/api#1"
 
     def test_reads_the_head_branch_from_github(self, monkeypatch):
         async def fake(token, repo, pr_number):
             return {"head": {"ref": "locus/acme-api-1-1"}}
 
         monkeypatch.setattr(authoring_flow.github_pr, "get_pull_request", fake)
-        branch = asyncio.run(authoring_flow._head_branch(
+        branch = asyncio.run(authoring_flow.head_branch(
             "acme/api", 1, {"github": {"api_key": "t"}}
         ))
         assert branch == "locus/acme-api-1-1"
@@ -261,7 +261,7 @@ class TestReworkContinuesTheReviewedBranch:
             return {"head": None}
 
         monkeypatch.setattr(authoring_flow.github_pr, "get_pull_request", fake)
-        assert asyncio.run(authoring_flow._head_branch(
+        assert asyncio.run(authoring_flow.head_branch(
             "acme/api", 1, {"github": {"api_key": "t"}}
         )) is None
 
@@ -272,12 +272,12 @@ class TestReworkContinuesTheReviewedBranch:
             raise RuntimeError("GitHub is down")
 
         monkeypatch.setattr(authoring_flow.github_pr, "get_pull_request", boom)
-        assert asyncio.run(authoring_flow._head_branch(
+        assert asyncio.run(authoring_flow.head_branch(
             "acme/api", 1, {"github": {"api_key": "t"}}
         )) is None
 
     def test_no_token_reads_no_branch(self):
-        assert asyncio.run(authoring_flow._head_branch("acme/api", 1, {})) is None
+        assert asyncio.run(authoring_flow.head_branch("acme/api", 1, {})) is None
 
 
 # --------------------------------------------------------------------------

@@ -62,6 +62,10 @@ async def maybe_retry(
         ticket_key=ticket_key,
         settings=settings,
         repo=repo,
+        # A changes-requested rework pushes to the pull request the reviewer
+        # is already reading, so it opens nothing and the throughput cap has
+        # nothing to protect. A QA rejection does open one, and is capped.
+        continuing=trigger == "changes_requested",
     )
 
     if not retry:
@@ -98,14 +102,14 @@ async def maybe_retry(
     # task board's stage forever, because `_derive_stage` reads the furthest
     # state among *unmerged* pull requests.
     continue_branch = (
-        await _head_branch(repo, pr_number, integration_configs)
+        await head_branch(repo, pr_number, integration_configs)
         if trigger == "changes_requested"
         else None
     )
 
     request = authoring.AuthoringRequest(
         ticket_key=ticket_key,
-        title=_bare_title(
+        title=bare_title(
             (review.pr_title if review else None) or ticket_key, ticket_key
         ),
         repo=repo,
@@ -275,9 +279,13 @@ async def _hand_back(
     )
 
 
-def _bare_title(title: str, ticket_key: str) -> str:
+def bare_title(title: str, ticket_key: str) -> str:
     """
     The pull request title without the ticket key the driver re-adds.
+
+    Public because the board's "write it now" button reworks an open pull
+    request too, and a manual rework that re-prefixed the title would produce
+    the same "KEY: KEY: Title" this exists to prevent.
 
     The driver builds its title as `f"{ticket_key}: {title}"`, and the stored
     `PRReview.pr_title` is a previous run's output, which already carries that
@@ -290,11 +298,17 @@ def _bare_title(title: str, ticket_key: str) -> str:
     return title or ticket_key
 
 
-async def _head_branch(
+async def head_branch(
     repo: str, pr_number: int, integration_configs: dict
 ) -> str | None:
     """
     The branch this pull request is on, so a rework can push to it.
+
+    Shared with the board's manual run for one reason: the two triggers must
+    not be able to disagree about where a rework lands. Reconstructing the
+    branch name in one of them is how the manual button came to open a second
+    pull request while the reviewer's changes-requested review sat on the
+    first.
 
     Read from GitHub rather than reconstructed from the ticket key and attempt
     number: the branch may have been created by a human, by the Development

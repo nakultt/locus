@@ -833,7 +833,11 @@ export type ReviewState =
   | "awaiting_review"
   | "changes_requested"
   | "approved"
-  | "merged";
+  | "merged"
+  // Closed without merging: superseded, abandoned, or opened by mistake.
+  // Distinct from `merged` because the change did not land, and from the live
+  // states because nobody is waiting on it.
+  | "closed";
 
 export type ReviewOutcome =
   | "review_requested"

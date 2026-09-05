@@ -345,6 +345,13 @@ def open_autonomous_prs(db: Session, *, owner_id: int, repo: str) -> int:
     Counted from `AuthoringAttempt` joined to the review state rather than from
     GitHub: a PR Locus opened and a PR a person opened are indistinguishable to
     GitHub, and the cap is about the ones this mode produced.
+
+    Finished means merged **or** closed. `ReviewState.closed` arrived with "in
+    flight means open, not merely un-merged" and this counter was not part of
+    that change, so a pull request somebody abandoned counted against the cap
+    forever -- and the way an abandoned agent PR usually comes to exist is a
+    duplicate that should never have been opened, which then blocks the rework
+    that would have made it unnecessary.
     """
     numbers = {
         row.pr_number
@@ -359,16 +366,16 @@ def open_autonomous_prs(db: Session, *, owner_id: int, repo: str) -> int:
     if not numbers:
         return 0
 
-    merged = {
+    finished = {
         review.pr_number
         for review in db.query(models.PRReview).filter(
             models.PRReview.owner_id == owner_id,
             models.PRReview.repo == repo,
             models.PRReview.pr_number.in_(numbers),
-            models.PRReview.state == "merged",
+            models.PRReview.state.in_(("merged", "closed")),
         ).all()
     }
-    return len(numbers - merged)
+    return len(numbers - finished)
 
 
 def throughput_exceeded(db: Session, *, owner_id: int, repo: str) -> bool:
@@ -427,6 +434,7 @@ def should_retry(
     settings,
     repo: str | None = None,
     human_pushed: bool = False,
+    continuing: bool = False,
 ) -> tuple[bool, str]:
     """
     Whether the driver should take another swing at this work item.
@@ -438,6 +446,12 @@ def should_retry(
     Refuses when the item is handed back, when the mode is not autonomous, when
     the bound is spent, when a human has pushed to the branch since the last
     attempt, or when the throughput cap is reached.
+
+    `continuing` says the run would push to a pull request that is already
+    open. The cap is a limit on **reviewer attention**, and a rework spends
+    none of it -- the reviewer is already reading that pull request, and asking
+    them for changes they cannot then receive is the one refusal that makes the
+    mode worse than useless. So the cap gates opening, not writing.
 
     Nothing before this is dangerous; nothing before this is complete either.
     Shipping the driver without the bound means the first reviewer who requests
@@ -464,7 +478,7 @@ def should_retry(
             f"and the bound is {allowed}"
         )
 
-    if repo and throughput_exceeded(db, owner_id=owner_id, repo=repo):
+    if repo and not continuing and throughput_exceeded(db, owner_id=owner_id, repo=repo):
         # Held silently by the caller. A held retry that reports every time
         # trains people to ignore the channel, the same rule
         # `automerge.sweep_once` follows.

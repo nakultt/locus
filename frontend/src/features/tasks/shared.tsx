@@ -57,6 +57,7 @@ export const REVIEW_STATE: Record<ReviewState, { label: string; tone: Tone }> = 
   changes_requested: { label: "Changes requested", tone: "danger" },
   approved: { label: "Approved", tone: "success" },
   merged: { label: "Merged", tone: "accent" },
+  closed: { label: "Closed", tone: "neutral" },
 };
 
 export const LOOP: Record<CommLoop, { label: string; tone: Tone }> = {

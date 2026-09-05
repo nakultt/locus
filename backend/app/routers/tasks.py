@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from app import models, schemas
 from app.core.database import get_db
 from app.core.dependencies import get_current_user, get_integration_configs
-from app.services.authoring import authoring
+from app.services.authoring import authoring, authoring_flow
 from app.services.pipeline import context_brief, report_sync, task_board
 from app.services.pipeline.agent_settings import resolve_settings
 
@@ -456,6 +456,11 @@ async def author_task(
     Everything after the pull request exists is the pipeline that already
     runs -- the `opened` webhook fires and nothing downstream learns which arm
     authored the change.
+
+    That last sentence is why this runs a *rework* when the work item already
+    has an open pull request rather than always starting fresh: the two
+    triggers reach the same driver, so a click and a changes-requested webhook
+    must land in the same place. See `_pr_to_continue`.
     """
     integration_configs = get_integration_configs(db, current_user.id)
     board = await task_board.build(
@@ -513,7 +518,35 @@ async def author_task(
             ),
         )
 
-    if authoring.throughput_exceeded(db, owner_id=current_user.id, repo=repo):
+    # A rework continues the pull request the reviewer already read.
+    #
+    # This button used to pass the issue's linked branch or nothing at all,
+    # which meant the driver cut `locus/<key>-<attempt>` and opened a *second*
+    # pull request: the changes-requested review stayed on the first,
+    # `PRReview.round_number` stopped tracking the round trip, and the
+    # abandoned PR pinned the task's stage. The webhook path was fixed for
+    # exactly this and the board path was not, so the same click meant
+    # different things depending on which arm reached the driver.
+    #
+    # `head_branch` returning None falls back to the previous behaviour, which
+    # is worse but is not a lost attempt.
+    continuing = _pr_to_continue(card)
+    continue_branch = (
+        await authoring_flow.head_branch(
+            continuing.repo, continuing.pr_number, integration_configs
+        )
+        if continuing
+        else None
+    )
+
+    # Resolved before the cap is consulted, because it decides whether the cap
+    # applies at all: the limit is on reviewer attention, and a rework spends
+    # none -- the reviewer is already reading that pull request. Refusing here
+    # was the worst possible answer, since the usual way to reach the cap is
+    # duplicates this endpoint opened before it learned to rework.
+    if not continue_branch and authoring.throughput_exceeded(
+        db, owner_id=current_user.id, repo=repo
+    ):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=(
@@ -544,16 +577,38 @@ async def author_task(
         repo=repo,
     )
     request = authoring.AuthoringRequest(
+        # The stored title is a previous run's output and already carries the
+        # key the driver re-adds, so it is stripped before going back out.
+        title=(
+            authoring_flow.bare_title(continuing.title or card.title, task_key)
+            if continuing and continue_branch
+            else card.title
+        ),
         ticket_key=task_key,
-        title=card.title,
         description=card.description,
         repo=repo,
-        existing_branch=card.linked_branches[0].name if card.linked_branches else None,
+        existing_branch=(
+            continue_branch
+            or (card.linked_branches[0].name if card.linked_branches else None)
+        ),
         context=_context_for(db, current_user.id, task_key, card),
         asks=authoring.gather_asks(db, owner_id=current_user.id, ticket_key=task_key),
         rejection=_rejection_for(db, current_user.id, task_key),
         attempt=attempt,
-        trigger="initial",
+        # Recorded on the attempt and stated in the pull request body, so the
+        # trigger has to describe what the run is answering rather than which
+        # arm started it. A manual click on a changes-requested pull request is
+        # a rework whoever pressed it.
+        trigger=(
+            "changes_requested"
+            if (
+                continue_branch
+                and continuing
+                and continuing.review_state
+                is schemas.ReviewState.changes_requested
+            )
+            else "initial"
+        ),
         settings={
             "source_path": settings.source_path,
             "prepare_command": settings.prepare_command,
@@ -607,6 +662,31 @@ async def author_task(
         error=result.error,
         handed_back_reason=result.hand_back_reason,
     )
+
+
+def _pr_to_continue(card: schemas.TaskCard) -> schemas.TaskPullRequest | None:
+    """
+    The open pull request a manual run should push to, if there is one.
+
+    In flight means open, not merely un-merged -- the same rule
+    `task_board._derive_stage` reads the board by. A merged pull request is
+    finished and a closed one was abandoned or superseded; pushing to either
+    puts commits somewhere nobody is looking. Everything else is a pull request
+    a reviewer either has read or is being asked to read, and the branch it is
+    on is where the next attempt belongs.
+
+    The latest is taken when several are open, which matches `_derive_stage`
+    consulting the furthest state among them: two open pull requests on one
+    work item is already unusual, and the newest is the one carrying the
+    current attempt.
+    """
+    finished = {schemas.ReviewState.merged, schemas.ReviewState.closed}
+    open_prs = [
+        pr
+        for pr in card.pull_requests
+        if pr.review_state is not None and pr.review_state not in finished
+    ]
+    return open_prs[-1] if open_prs else None
 
 
 def _repo_from_card(card: schemas.TaskCard) -> str | None:

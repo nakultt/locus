@@ -204,6 +204,21 @@ class TestThroughputGuard:
 
         assert authoring.open_autonomous_prs(db, owner_id=1, repo="acme/api") == 0
 
+    def test_a_closed_pull_request_stops_counting(self, db):
+        """
+        Finished means merged or closed. A pull request somebody abandoned
+        counted against the cap forever -- and the way an abandoned agent PR
+        usually comes to exist is a duplicate that should not have been opened,
+        which then blocked the rework that would have made it unnecessary.
+        """
+        self._opened(db, 1)
+        db.add(models.PRReview(
+            repo="acme/api", pr_number=1, state="closed", owner_id=1
+        ))
+        db.commit()
+
+        assert authoring.open_autonomous_prs(db, owner_id=1, repo="acme/api") == 0
+
     def test_several_attempts_on_one_pull_request_count_once(self, db):
         """The cap is on reviewer attention, and a rework is the same PR."""
         for _ in range(3):
@@ -448,12 +463,172 @@ class TestAuthorEndpoint:
         assert mode["source"] == "handed_back"
         assert mode["authoring_mode"] == "assisted"
 
+    def test_an_open_pull_request_is_reworked_not_reopened(
+        self, client, monkeypatch
+    ):
+        """
+        The board's button and the changes-requested webhook must land in the
+        same place.
+
+        This used to pass the issue's linked branch or nothing, so the driver
+        cut `locus/<key>-<attempt>` and opened a *second* pull request while
+        the reviewer's review sat on the first -- the round trip stopped being
+        tracked and the abandoned PR pinned the task's stage.
+        """
+        from app import schemas
+        from app.services.authoring import authoring_flow
+
+        _go_autonomous(client)
+        driver = _StubDriver()
+        monkeypatch.setattr(authoring, "get_driver", lambda *a, **k: driver)
+        monkeypatch.setattr(task_board, "build", _board_with(
+            schemas.TaskPullRequest(
+                repo="acme/api",
+                pr_number=8,
+                # Already prefixed: the driver re-adds the key, and passing
+                # this back unchanged is what produced "LOC-42: LOC-42: ...".
+                title="LOC-42: Add the thing",
+                review_state=schemas.ReviewState.changes_requested,
+            )
+        ))
+
+        async def head_branch(repo, pr_number, configs):
+            assert (repo, pr_number) == ("acme/api", 8)
+            return "locus/loc-42-1"
+
+        monkeypatch.setattr(authoring_flow, "head_branch", head_branch)
+
+        client.post("/tasks/author", params={"task_key": "LOC-42"})
+
+        assert driver.seen.existing_branch == "locus/loc-42-1"
+        assert driver.seen.trigger == "changes_requested"
+        assert driver.seen.title == "Add the thing"
+
+    def test_the_cap_does_not_refuse_a_rework(self, client, monkeypatch):
+        """
+        The cap gates opening, not writing. The usual way to reach it is
+        duplicates this endpoint opened before it learned to rework, so
+        refusing the rework leaves the only route out being to close them by
+        hand.
+        """
+        from app import main, schemas
+        from app.core.database import get_db
+        from app.services.authoring import authoring_flow
+
+        _go_autonomous(client)
+        driver = _StubDriver()
+        monkeypatch.setattr(authoring, "get_driver", lambda *a, **k: driver)
+        monkeypatch.setenv("LOCUS_MAX_OPEN_AUTONOMOUS_PRS", "1")
+        monkeypatch.setattr(task_board, "build", _board_with(
+            schemas.TaskPullRequest(
+                repo="acme/api", pr_number=8,
+                review_state=schemas.ReviewState.changes_requested,
+            )
+        ))
+
+        async def head_branch(*a, **k):
+            return "locus/loc-42-1"
+
+        monkeypatch.setattr(authoring_flow, "head_branch", head_branch)
+
+        session = next(main.app.dependency_overrides[get_db]())
+        authoring.record_attempt(
+            session, owner_id=1, request=request(),
+            result=authoring.AuthoringResult(
+                opened=True, pr_number=8, driver="stub"
+            ),
+        )
+
+        response = client.post("/tasks/author", params={"task_key": "LOC-42"})
+
+        assert response.status_code == 200
+        assert driver.seen.existing_branch == "locus/loc-42-1"
+
+    def test_a_finished_pull_request_is_left_alone(self, client, monkeypatch):
+        """
+        In flight means open. A merged pull request is finished and a closed
+        one was abandoned; pushing to either puts commits where nobody is
+        looking, so the run starts a branch of its own.
+        """
+        from app import schemas
+        from app.services.authoring import authoring_flow
+
+        _go_autonomous(client)
+        driver = _StubDriver()
+        monkeypatch.setattr(authoring, "get_driver", lambda *a, **k: driver)
+        monkeypatch.setattr(task_board, "build", _board_with(
+            schemas.TaskPullRequest(
+                repo="acme/api", pr_number=8,
+                review_state=schemas.ReviewState.merged,
+            ),
+            schemas.TaskPullRequest(
+                repo="acme/api", pr_number=9,
+                review_state=schemas.ReviewState.closed,
+            ),
+        ))
+
+        async def unreachable(*a, **k):  # pragma: no cover - asserts by running
+            raise AssertionError("A finished pull request must not be continued")
+
+        monkeypatch.setattr(authoring_flow, "head_branch", unreachable)
+
+        client.post("/tasks/author", params={"task_key": "LOC-42"})
+
+        assert driver.seen.existing_branch is None
+        assert driver.seen.trigger == "initial"
+
+    def test_a_branch_that_cannot_be_read_falls_back_rather_than_failing(
+        self, client, monkeypatch
+    ):
+        """
+        GitHub being unreachable costs the continuation, never the attempt --
+        the old behaviour is worse, not fatal. The trigger falls back with it:
+        a run that did not continue the branch is not answering the review.
+        """
+        from app import schemas
+        from app.services.authoring import authoring_flow
+
+        _go_autonomous(client)
+        driver = _StubDriver()
+        monkeypatch.setattr(authoring, "get_driver", lambda *a, **k: driver)
+        monkeypatch.setattr(task_board, "build", _board_with(
+            schemas.TaskPullRequest(
+                repo="acme/api", pr_number=8,
+                review_state=schemas.ReviewState.changes_requested,
+            )
+        ))
+
+        async def no_branch(*a, **k):
+            return None
+
+        monkeypatch.setattr(authoring_flow, "head_branch", no_branch)
+
+        body = client.post("/tasks/author", params={"task_key": "LOC-42"}).json()
+
+        assert body["opened"] is True
+        assert driver.seen.existing_branch is None
+        assert driver.seen.trigger == "initial"
+
     def test_requires_authentication(self, client):
         assert client.post(
             "/tasks/author",
             params={"task_key": "LOC-42"},
             headers={"Authorization": "Bearer bad"},
         ).status_code == 401
+
+
+def _board_with(*pull_requests):
+    """A board whose single card carries these pull requests."""
+    from app import schemas
+
+    async def build(db, owner_id, integration_configs):
+        card = _card("LOC-42")
+        card.pull_requests = list(pull_requests)
+        return schemas.TaskBoard(
+            needs_you=[], in_flight=[card], unavailable=[], total=1
+        )
+
+    return build
 
 
 class _StubDriver:
@@ -463,8 +638,10 @@ class _StubDriver:
 
     def __init__(self, hand_back_reason: str | None = None):
         self._hand_back_reason = hand_back_reason
+        self.seen = None
 
     async def author(self, request, integration_configs):
+        self.seen = request
         return authoring.AuthoringResult(
             opened=self._hand_back_reason is None,
             pr_number=None if self._hand_back_reason else 42,

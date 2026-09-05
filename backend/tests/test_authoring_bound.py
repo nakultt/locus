@@ -131,6 +131,23 @@ class TestShouldRetry:
         assert retry is False
         assert "already open" in reason
 
+    def test_the_cap_does_not_stop_a_run_that_opens_nothing(self, db, monkeypatch):
+        """
+        The cap limits reviewer attention, and a rework spends none -- the
+        reviewer is already reading that pull request. Refusing there is the
+        one refusal that makes the mode worse than useless: changes were asked
+        for and cannot be delivered.
+        """
+        monkeypatch.setenv("LOCUS_MAX_OPEN_AUTONOMOUS_PRS", "1")
+        s = settings_for(db)
+        spend(db, 1, opened=True, ticket_key="OTHER-1")
+
+        retry, _ = authoring.should_retry(
+            db, owner_id=1, ticket_key="LOC-42", settings=s, repo="acme/api",
+            continuing=True,
+        )
+        assert retry is True
+
 
 class TestHandoffMessage:
     def test_states_the_count_and_what_happens_next(self):

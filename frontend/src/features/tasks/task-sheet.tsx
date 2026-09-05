@@ -557,6 +557,14 @@ function AgentTab({
 }) {
   const autonomous = card.authoring_mode === "autonomous" && !card.handed_back;
 
+  // What the button will actually do. A run against a work item that already
+  // has an open pull request pushes to that branch rather than opening a
+  // second one, and the label has to say so — "Write it now" on a task in
+  // review reads as "start over", which is what it used to do.
+  const reworking = card.pull_requests.find(
+    (pr) => pr.review_state && pr.review_state !== "merged" && pr.review_state !== "closed"
+  );
+
   return (
     <div className="space-y-6">
       {/* Autonomy is a judgement about *this* work item — a dependency bump
@@ -594,9 +602,19 @@ function AgentTab({
           )}
 
           {autonomous && (
-            <Button size="sm" className="ml-auto" onClick={onRun} loading={busy}>
+            <Button
+              size="sm"
+              className="ml-auto"
+              onClick={onRun}
+              loading={busy}
+              title={
+                reworking
+                  ? `The agent pushes to the branch #${reworking.pr_number} is on, answering what the reviewer asked for. No second pull request is opened.`
+                  : "The agent cuts a branch and opens a pull request."
+              }
+            >
               {!busy && <Play aria-hidden />}
-              Write it now
+              {reworking ? `Rework #${reworking.pr_number}` : "Write it now"}
             </Button>
           )}
         </div>
