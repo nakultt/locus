@@ -1116,7 +1116,7 @@ export interface AuthoringSettings {
  * the form renders those as placeholders.
  */
 export interface AgentRuntimeSettings {
-  /** opencode | none */
+  /** opencode | claude | codex | none */
   authoring_driver?: string | null;
   authoring_model?: string | null;
   authoring_command?: string | null;
@@ -1188,6 +1188,23 @@ export interface PRAgentDefaults extends AuthoringSettings, AgentRuntimeSettings
   review_slack_channel?: string | null;
   auto_merge_on_approval: boolean;
   merge_method: MergeMethod;
+  /**
+   * What starts the authoring agent, as opposed to whether it may write.
+   *
+   * `authoring_mode` decides whether the agent is allowed to write a work
+   * item at all, per repo and per item. These three decide whether a person
+   * has to press the button. Account-level only — there is no per-repo layer,
+   * because "who presses the button" is one policy for the account.
+   *
+   * The review and QA triggers default on, because both already fired
+   * automatically before they were settings; turning them into opt-in would
+   * silently switch off a pipeline that works. Assignment defaults off: a
+   * morning's assigned tickets can open a pull request each.
+   */
+  auto_start_on_assignment: boolean;
+  auto_start_on_review: boolean;
+  auto_start_on_qa: boolean;
+
   /** Keep GitHub Projects cards in step with the pipeline, for every repo. */
   project_board_sync: boolean;
   /** Default stage-to-column map, one "stage: column" per line. */

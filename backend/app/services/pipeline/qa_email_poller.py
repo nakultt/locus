@@ -18,13 +18,14 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 
-from app import crud, models
+from app import models
 from app.core.database import SessionLocal
 from app.core.dependencies import get_integration_configs
 from app.services import integration_health
 from app.services.integrations import google_auth
 from app.services.pipeline import comms_log, report_sync
 from app.services.pipeline.agent_settings import resolve_settings
+from app.services.pipeline.pr_agent import work_item_keys_for
 from app.services.pipeline.qa_feedback import handle_qa_reply
 
 logger = logging.getLogger(__name__)
@@ -215,21 +216,11 @@ async def poll_once() -> int:
                 if not body:
                     continue
 
-                integration_configs: dict[str, dict] = {}
-                for integration in crud.get_user_integrations(db, owner_id):
-                    config: dict = {}
-                    api_key = crud.get_integration_key(
-                        db, owner_id, integration.service_name
-                    )
-                    if api_key:
-                        config["api_key"] = api_key
-                    credentials = crud.get_integration_credentials(
-                        db, owner_id, integration.service_name
-                    )
-                    if credentials:
-                        config["credentials"] = credentials
-                    if config:
-                        integration_configs[integration.service_name] = config
+                # The same function the Gmail fetch above used, not a local
+                # copy of its loop: the copy that was here omitted the Google
+                # client id and secret, so the report export downstream could
+                # not refresh a token older than an hour.
+                integration_configs = get_integration_configs(db, owner_id)
 
                 # A sign-off by email closes the work item exactly as one in
                 # Slack does; the channel the tester chose must not change the
@@ -244,14 +235,20 @@ async def poll_once() -> int:
                 )
                 settings = resolve_settings(db, thread.owner_id, registration)
 
+                thread_tickets = json.loads(thread.ticket_keys_json or "[]")
+                thread_issues = json.loads(thread.issue_numbers_json or "[]")
+                work_keys = work_item_keys_for(
+                    thread.repo, thread_tickets, thread_issues
+                )
+
                 try:
                     outcome = await handle_qa_reply(
                         reply_text=body,
                         integration_configs=integration_configs,
                         repo=thread.repo,
                         pr_url=thread.pr_url,
-                        ticket_keys=json.loads(thread.ticket_keys_json or "[]"),
-                        issue_numbers=json.loads(thread.issue_numbers_json or "[]"),
+                        ticket_keys=thread_tickets,
+                        issue_numbers=thread_issues,
                         slack_channel=thread.slack_channel,
                         thread_ts=thread.slack_thread_ts,
                         done_status=settings.jira_done_status,
@@ -267,6 +264,10 @@ async def poll_once() -> int:
                     logger.exception("QA email reply handling failed for %s", thread.repo)
                     continue
 
+                # Stamped with the work item, exactly as the Slack path does:
+                # the channel a tester happened to reply through must not
+                # change what the record says, and everything that reads a
+                # rejection back matches on `ticket_key`.
                 comms_log.record(
                     db, owner_id=owner_id, repo=thread.repo,
                     pr_number=thread.pr_number,
@@ -275,6 +276,7 @@ async def poll_once() -> int:
                     target=thread.pr_url,
                     body=body,
                     outcome=outcome["verdict"],
+                    ticket_key=work_keys[0] if work_keys else None,
                 )
 
                 processed += 1

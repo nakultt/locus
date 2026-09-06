@@ -729,6 +729,29 @@ class PRAgentDefaults(Base):
     # pull request and requests nobody, which is what it did before this.
     autonomous_pr_reviewers = Column(Text, nullable=True)
 
+    # ---- what starts the agent ---------------------------------------------
+    #
+    # `authoring_mode` answers "may the agent write this work item"; these
+    # answer "who has to press the button". With all three on and the mode
+    # autonomous, the loop from an assigned ticket to a signed-off merge needs
+    # no human except the reviewer and the tester -- which is the point.
+    #
+    # Account-level only, like the runtime block above: they describe when the
+    # agent starts *itself*, which is one policy for the account rather than a
+    # per-repo axis. `authoring_mode` remains the per-repo and per-item switch,
+    # so a team can enable auto-start once and still hand individual work items
+    # to a person.
+    #
+    # NOT NULL with different defaults, deliberately. The review and QA
+    # triggers already fired automatically before they were settings, so they
+    # default on -- turning them into opt-in would silently stop a pipeline
+    # that works today. Assignment is new capability with a far larger blast
+    # radius (a morning's tickets can open a pull request each), so it is
+    # opt-in, and the throughput cap is what bounds it once enabled.
+    auto_start_on_assignment = Column(Integer, nullable=False, default=0)
+    auto_start_on_review = Column(Integer, nullable=False, default=1)
+    auto_start_on_qa = Column(Integer, nullable=False, default=1)
+
     # ---- the calendar agent ------------------------------------------------
     # Per-user dials on a per-user agent. The sweep interval is how often this
     # account's calendars are checked; the loop still ticks on its own clock.

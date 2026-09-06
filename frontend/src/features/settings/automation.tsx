@@ -405,6 +405,69 @@ function Defaults({ docsConnected }: { docsConnected: boolean }) {
         </Section>
       )}
 
+
+      {/* ── What starts the agent ─────────────────────────────────────────
+          The section above decides whether the agent may write a work item.
+          This one decides whether a person has to press the button.
+
+          Both switches matter, and both are checked: a work item in "You
+          write it" stays untouched however many of these are on. That is what
+          lets a team turn the loop on once and still hand individual tickets
+          to a person.
+
+          The review and testing triggers are on by default because both
+          already fired automatically before they were settings — turning them
+          into opt-in would silently stop a pipeline that works, and the
+          symptom would be a rework that simply never arrives. Assignment is
+          off by default and says why on the card. */}
+      <Section
+        title="What starts the agent"
+        description="With all three on and a ticket in “Agent writes it”, nobody has to press a button between the ticket being assigned and the testing team signing off."
+      >
+        <div className="divide-y divide-border rounded-lg border border-border">
+          <div className="p-5">
+            <CheckboxRow
+              id="auto-start-assignment"
+              checked={values.auto_start_on_assignment}
+              onCheckedChange={(v) => set("auto_start_on_assignment", v)}
+              label="Start writing when a work item is assigned to me"
+              hint="Checked every few minutes. Only items with no pull request, no linked branch and no previous attempt are picked up, one per sweep — so a backlog assigned at once does not arrive as a wall of pull requests. The open-PR cap under Agent runtime is the hard bound."
+            />
+          </div>
+
+          <div className="p-5">
+            <CheckboxRow
+              id="auto-start-review"
+              checked={values.auto_start_on_review}
+              onCheckedChange={(v) => set("auto_start_on_review", v)}
+              label="Start a rework when a reviewer requests changes"
+              hint="Pushes to the branch the reviewer is already reading, so no second pull request is opened and they are not re-notified. Off, the review still lands and the card offers “Rework #N” instead."
+            />
+          </div>
+
+          <div className="p-5">
+            <CheckboxRow
+              id="auto-start-qa"
+              checked={values.auto_start_on_qa}
+              onCheckedChange={(v) => set("auto_start_on_qa", v)}
+              label="Start a fix when the testing team reports it broken"
+              hint="Opens a new pull request carrying the tester’s own words and the rejection history — the merged one cannot be pushed to. Off, the ticket still reopens and the card offers “Fix after testing” instead."
+            />
+          </div>
+        </div>
+
+        {values.authoring_mode !== "autonomous" && (
+          <Notice
+            tone="info"
+            title="These do nothing until a work item is in “Agent writes it”"
+          >
+            Your account default is “You write it”, so nothing starts on its
+            own. Switch the default above, or flip an individual ticket on its
+            own card.
+          </Notice>
+        )}
+      </Section>
+
       {/* ── Agent runtime ────────────────────────────────────────────────
           How this account's agent runs, as opposed to which tickets it may
           write. Every one of these was an environment variable, which made it
@@ -430,7 +493,7 @@ function Defaults({ docsConnected }: { docsConnected: boolean }) {
             <Field
               label="Driver"
               htmlFor="rt-driver"
-              hint="What actually writes the code. None is the safe answer: it reports that no driver is configured rather than running anything."
+              hint="What actually writes the code. All three run a coding CLI in an isolated worktree under the same rules — the worktree, the file denylist, the diff caps and the test gate are the driver's, not the CLI's. Each uses whatever its own login set up on this machine (“claude login”, “codex login”), so no API key is stored here; Codex signs in with a ChatGPT account. None is the safe answer: it reports that no driver is configured rather than running anything."
             >
               <Select
                 id="rt-driver"
@@ -443,6 +506,8 @@ function Defaults({ docsConnected }: { docsConnected: boolean }) {
                   Inherit{resolved ? ` (${resolved.driver})` : ""}
                 </option>
                 <option value="opencode">OpenCode</option>
+                <option value="claude">Claude Code</option>
+                <option value="codex">Codex</option>
                 <option value="none">None</option>
               </Select>
             </Field>
@@ -486,7 +551,7 @@ function Defaults({ docsConnected }: { docsConnected: boolean }) {
           <Field
             label="Invocation template"
             htmlFor="rt-command"
-            hint="{prompt} and {workspace} are substituted. A template rather than fixed flags, because the CLI moves and a pinned flag breaks on an upgrade with a non-zero exit and no useful message."
+            hint="{prompt} and {workspace} are substituted. A template rather than fixed flags, because the CLI moves and a pinned flag breaks on an upgrade with a non-zero exit and no useful message. A template that invokes a different binary than the driver above is ignored rather than run — leave it blank when you switch drivers."
           >
             <Input
               id="rt-command"

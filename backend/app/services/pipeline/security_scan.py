@@ -36,7 +36,7 @@ from app.schemas import (
     SecuritySeverity,
     SuggestedFix,
 )
-from app.services.chat.llm import get_llm
+from app.services.chat.llm import get_llm, message_text
 
 # Semgrep severity -> ours
 _SEMGREP_SEVERITY = {
@@ -353,7 +353,7 @@ async def run_llm_review(
     except Exception as e:
         return [], f"LLM review failed: {e}"
 
-    content = response.content if isinstance(response.content, str) else str(response.content)
+    content = message_text(response)
     raw_findings = _extract_json_array(content)
     if raw_findings is None:
         return [], "LLM review returned unparseable output"
@@ -480,7 +480,7 @@ async def run_code_review(
     except Exception as e:
         return [], f"Code review failed: {e}"
 
-    content = response.content if isinstance(response.content, str) else str(response.content)
+    content = message_text(response)
     raw_findings = _extract_json_array(content)
     if raw_findings is None:
         return [], "Code review returned unparseable output"
@@ -635,7 +635,7 @@ async def suggest_fixes(
     except Exception as e:
         return 0, f"Fix suggestions failed: {e}"
 
-    content = response.content if isinstance(response.content, str) else str(response.content)
+    content = message_text(response)
     raw = _extract_json_array(content)
     if raw is None:
         return 0, "Fix suggestions returned unparseable output"

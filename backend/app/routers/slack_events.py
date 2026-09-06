@@ -21,11 +21,12 @@ import time
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
-from app import crud, models
+from app import models
 from app.core.database import get_db
 from app.core.dependencies import get_integration_configs
 from app.services.pipeline import comms_log, report_sync
 from app.services.pipeline.agent_settings import resolve_settings
+from app.services.pipeline.pr_agent import work_item_keys_for
 from app.services.pipeline.qa_feedback import handle_qa_reply
 from app.services.pipeline.review_flow import post_review_notification
 from app.services.scheduling import availability as availability_service
@@ -88,6 +89,7 @@ async def slack_events(
     request: Request,
     x_slack_request_timestamp: str = Header(None),
     x_slack_signature: str = Header(None),
+    x_slack_retry_num: str = Header(None),
     db: Session = Depends(get_db),
 ) -> dict:
     """
@@ -134,6 +136,25 @@ async def slack_events(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid signature"
         )
+
+    # Slack redelivers an event up to three times when the endpoint does not
+    # answer within three seconds, and every branch below this line ends in a
+    # message to a person: a QA escalation, a reopened ticket, a busy reply.
+    # The QA path calls a model and then GitHub, Jira and Docs inside the
+    # request, so exceeding three seconds is the *ordinary* case rather than a
+    # fault -- a tester's single "didn't work" was answered with two identical
+    # escalation posts. A retry only ever arrives after we already received the
+    # event (every failure path here answers 200 deliberately, so Slack is
+    # never retrying an error), which makes dropping it the correct reading
+    # rather than a lost message. Placed after the signature gate so an
+    # unsigned request cannot skip work by claiming to be a retry.
+    if x_slack_retry_num:
+        logger.info(
+            "Ignoring Slack retry %s (%s); the original was already handled",
+            x_slack_retry_num,
+            request.headers.get("x-slack-retry-reason", "unknown reason"),
+        )
+        return {"ok": True, "ignored": "retry"}
 
     event = payload.get("event", {})
 
@@ -184,19 +205,17 @@ async def slack_events(
         thread.slack_channel = channel
         db.commit()
 
-    integration_configs: dict[str, dict] = {}
-    for integration in crud.get_user_integrations(db, thread.owner_id):
-        config: dict = {}
-        api_key = crud.get_integration_key(db, thread.owner_id, integration.service_name)
-        if api_key:
-            config["api_key"] = api_key
-        credentials = crud.get_integration_credentials(
-            db, thread.owner_id, integration.service_name
-        )
-        if credentials:
-            config["credentials"] = credentials
-        if config:
-            integration_configs[integration.service_name] = config
+    # Through `get_integration_configs` and never a local copy of its loop.
+    # This path had one, and a hand-rolled copy is not a duplicate of the
+    # credential building: it is a duplicate missing the two things that
+    # function exists to attach. It never called `llm_config.bind_for_user`, so
+    # the QA classifier ran on the deployment default rather than the backend
+    # the account had configured -- which looks exactly like the setting not
+    # having saved, and here surfaced as `Classifier unavailable: Connection
+    # error` against a local endpoint the user had already moved off. And it
+    # never attached the Google client id and secret, so the report export on
+    # this path could not refresh an access token older than an hour.
+    integration_configs = get_integration_configs(db, thread.owner_id)
 
     # A sign-off closes the work item, so this needs the same resolved settings
     # the merge path used -- which status counts as done, and whether closing
@@ -211,14 +230,18 @@ async def slack_events(
     )
     settings = resolve_settings(db, thread.owner_id, registration)
 
+    thread_tickets = json.loads(thread.ticket_keys_json or "[]")
+    thread_issues = json.loads(thread.issue_numbers_json or "[]")
+    work_keys = work_item_keys_for(thread.repo, thread_tickets, thread_issues)
+
     try:
         outcome = await handle_qa_reply(
             reply_text=event.get("text", ""),
             integration_configs=integration_configs,
             repo=thread.repo,
             pr_url=thread.pr_url,
-            ticket_keys=json.loads(thread.ticket_keys_json or "[]"),
-            issue_numbers=json.loads(thread.issue_numbers_json or "[]"),
+            ticket_keys=thread_tickets,
+            issue_numbers=thread_issues,
             slack_channel=channel,
             thread_ts=thread_ts,
             done_status=settings.jira_done_status,
@@ -237,6 +260,15 @@ async def slack_events(
     # The tester's own words, with the verdict the classifier reached. Stored
     # together because "why did it reopen the ticket" is only answerable if
     # both are visible side by side.
+    #
+    # Stamped with the work item, which this used to leave null. Everything
+    # that reads a rejection back looks it up by `ticket_key`:
+    # `worklist.build` files the item under `repo#pr` when it is missing, so a
+    # rejection of PR 8 became a task of its own instead of attaching to the
+    # work item, and the card for that work item showed no rejection at all --
+    # no "reported broken" row, and the board's authoring button offering to
+    # start over rather than to fix what the tester found. `_rejection_for`
+    # matches on it too, so the manual run lost the tester's words entirely.
     comms_log.record(
         db, owner_id=thread.owner_id, repo=thread.repo,
         pr_number=thread.pr_number,
@@ -245,6 +277,7 @@ async def slack_events(
         target=channel,
         body=event.get("text", ""),
         outcome=outcome["verdict"],
+        ticket_key=work_keys[0] if work_keys else None,
     )
 
     if outcome["verdict"] == "broken":

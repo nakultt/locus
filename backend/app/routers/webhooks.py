@@ -430,6 +430,52 @@ _RUNTIME_NUMBERS = (
 )
 
 
+# What starts the agent. A separate pair again, and account-only like the
+# runtime block: the registration has no columns for these, because the
+# question they answer -- who presses the button -- is one policy for the
+# account rather than a per-repo axis.
+_AUTO_START_FLAGS = (
+    "auto_start_on_assignment",
+    "auto_start_on_review",
+    "auto_start_on_qa",
+)
+
+
+def _apply_auto_start(row, request) -> None:
+    """
+    Copy the three auto-start triggers onto the defaults row.
+
+    Stored 0/1 and NOT NULL rather than tri-state, unlike the runtime dials:
+    there is no deployment-wide environment default to inherit, so "unset"
+    would have nothing to fall through to. A row that exists is a choice.
+    """
+    for name in _AUTO_START_FLAGS:
+        setattr(row, name, 1 if getattr(request, name, False) else 0)
+
+
+def _auto_start_fields(row) -> dict:
+    """
+    The triggers read back off a row.
+
+    A NULL column -- possible on a row written before the migration added it,
+    or by a half-run migration -- reads back as the schema default rather than
+    False, because False is a claim the account never made and would silently
+    report a working trigger as disabled.
+    """
+    schema_defaults = {
+        name: schemas.PRAgentDefaultsUpdate.model_fields[name].default
+        for name in _AUTO_START_FLAGS
+    }
+    return {
+        name: (
+            schema_defaults[name]
+            if getattr(row, name, None) is None
+            else bool(getattr(row, name))
+        )
+        for name in _AUTO_START_FLAGS
+    }
+
+
 def _apply_runtime(row, request) -> None:
     """Copy the agent runtime dials onto the defaults row."""
     for name in _RUNTIME_TEXT:
@@ -645,6 +691,7 @@ async def get_defaults(
         merge_method=row.merge_method or "squash",
         project_board_sync=bool(row.project_board_sync),
         project_column_map=row.project_column_map,
+        **_auto_start_fields(row),
         **_authoring_fields(row),
         context_docs=[
             d for d in (row.context_doc_ids or "").splitlines() if d.strip()
@@ -696,6 +743,7 @@ async def save_defaults(
     row.merge_method = request.merge_method.value
     row.project_board_sync = 1 if request.project_board_sync else 0
     row.project_column_map = (request.project_column_map or "").strip() or None
+    _apply_auto_start(row, request)
     _apply_authoring(row, request)
     _apply_runtime(row, request)
     row.context_doc_ids = "\n".join(doc_ids) if doc_ids else None
@@ -1065,17 +1113,7 @@ async def agent_summary(
 
     # Build the per-capability view from the same credential shape the pipeline
     # sees, so the dashboard cannot disagree with what a run would actually do.
-    configs: dict[str, dict] = {}
-    for integration in crud.get_user_integrations(db, current_user.id):
-        entry: dict = {}
-        key = crud.get_integration_key(db, current_user.id, integration.service_name)
-        if key:
-            entry["api_key"] = key
-        creds = crud.get_integration_credentials(db, current_user.id, integration.service_name)
-        if creds:
-            entry["credentials"] = creds
-        if entry:
-            configs[integration.service_name] = entry
+    configs = get_integration_configs(db, current_user.id)
 
     services = [
         schemas.ServiceStatus(
@@ -1324,7 +1362,16 @@ async def _run_review_job(
                 ).first(),
                 ticket_key=ticket_key,
             )
-            if item_settings.authoring_mode == "autonomous":
+            # Two switches, and both must be on. `authoring_mode` says the
+            # agent may write this work item at all; `auto_start_on_review`
+            # says nobody has to press the button. A team that wants the agent
+            # but wants to decide each rework itself turns the second off and
+            # clicks "Rework #N" on the board, which reaches the driver by the
+            # same path with the same trigger.
+            if (
+                item_settings.authoring_mode == "autonomous"
+                and item_settings.auto_start_on_review
+            ):
                 await authoring_flow.maybe_retry(
                     db,
                     owner_id=job.owner_id,

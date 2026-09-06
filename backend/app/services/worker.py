@@ -303,3 +303,47 @@ async def calendar_agent_loop() -> None:
             raise
         except Exception:
             logger.exception("Calendar sweep failed")
+
+
+async def assignment_loop() -> None:
+    """
+    Start the authoring agent on newly assigned work items.
+
+    The fifth loop, and the only authoring trigger that is a sweep rather than
+    an event. A reviewer requesting changes and a tester reporting a failure
+    both arrive as webhooks; a ticket landing on somebody fires nothing Locus
+    receives, so there is nothing to subscribe to -- the same argument that
+    makes `automerge.sweep_once` a timer.
+
+    Does nothing unless an account turned `auto_start_on_assignment` on. The
+    sweep returns immediately when no account has, so a deployment that never
+    enables it pays one query every tick.
+    """
+    from app.core.locks import ASSIGNMENT_LOCK, advisory_lock
+    from app.services.authoring.assignment_watch import TICK_MINUTES, sweep_once
+
+    logger.info("Assignment watcher started")
+
+    while True:
+        try:
+            await asyncio.sleep(TICK_MINUTES * 60)
+
+            # One sweeper at a time. This one ends in a pull request with a
+            # reviewer's name on it, so two instances would open two for the
+            # same ticket -- the duplicate-PR failure the rework fix exists to
+            # prevent, arriving from a different direction.
+            with advisory_lock(ASSIGNMENT_LOCK) as held:
+                if not held:
+                    continue
+                started = await sweep_once()
+
+            if started:
+                logger.info(
+                    "Assignment watcher started %s work item(s)", started
+                )
+
+        except asyncio.CancelledError:
+            logger.info("Assignment watcher stopping")
+            raise
+        except Exception:
+            logger.exception("Assignment sweep failed")

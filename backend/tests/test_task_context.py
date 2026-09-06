@@ -269,6 +269,55 @@ class TestIncrementalSlackSearch:
         assert all("after:" not in q for q in captured)
 
 
+class TestOwnPostsAreNotSearchResults:
+    """
+    The search runs on the *user's* token and sees the whole channel,
+    including everything Locus posted into it -- and those posts name the repo
+    and the ticket, so they match better than the human discussion the search
+    exists to find.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_bot_post_is_not_cached_as_discussion(self, monkeypatch):
+        """
+        `bot_id` is the discriminator, the same one the QA loop already uses
+        to tell a tester's reply from its own post. Filtering at the source
+        stops new ones; `comms_log.cached_search` covers what is already
+        stored, because the Slack cache is deliberately permanent.
+        """
+        from app.services.pipeline import pr_agent
+
+        human = TestIncrementalSlackSearch._message(1_800_000_000, "cap retries at 3")
+        own = TestIncrementalSlackSearch._message(
+            1_800_000_001,
+            ":eyes: Review requested on <https://gh/pr/8|acme/api#8> — @jo",
+        )
+        own["bot_id"] = "B12345"
+        own["username"] = "Locus"
+
+        class _Response:
+            @staticmethod
+            def json() -> dict:
+                return TestIncrementalSlackSearch._payload(human, own)
+
+        class _Client:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *_): return False
+            async def get(self, _url, **kwargs): return _Response()
+
+        monkeypatch.setattr(pr_agent.httpx, "AsyncClient", lambda **_: _Client())
+
+        matches: list[dict] = []
+        threads = await pr_agent.search_slack_threads(
+            [TICKET], REPO, 42,
+            {"credentials": {"user_token": "xoxp-test"}},
+            title="Add retry logic", matches=matches,
+        )
+
+        assert [t.summary for t in threads] == ["cap retries at 3"]
+        assert [m["text"] for m in matches] == ["cap retries at 3"]
+
+
 class TestTimelineInheritance:
     """
     The reviewer is given the ticket's cached Slack discussion every round.
@@ -358,6 +407,34 @@ class TestContextBrief:
         assert "cap retries at 3" in brief
         assert "Needs a test for the retry path." in brief
         assert "Add a test" in brief  # outstanding asks
+
+    def test_locus_own_slack_posts_are_not_prior_discussion(self, db):
+        """
+        Every consumer of this brief is a model -- the authoring driver and
+        the code reviewer -- so a cached notification here is not noise, it is
+        an instruction. A rework asked only to create a folder produced
+        compatibility aliases instead, which is what the QA brief Locus had
+        written for an unrelated pull request asked a *tester* to verify.
+        """
+        self._review(db)
+        for body in (
+            "cap retries at 3",
+            ":test_tube: *Ready to test* - <https://gh/pr/9|acme/api#9>\n"
+            "*What to test*\nVerify that reserve takes stock first.",
+        ):
+            comms_log.record(
+                db, owner_id=OWNER, repo=REPO, pr_number=42, ticket_key=TICKET,
+                loop="context", direction="received", channel="slack",
+                participant="Locus", target="web", body=body,
+            )
+
+        brief = context_brief.build(
+            db, owner_id=OWNER, repo=REPO, pr_number=42, ticket_key=TICKET
+        )
+
+        assert "cap retries at 3" in brief
+        assert "Ready to test" not in brief
+        assert "Verify that reserve takes stock first" not in brief
 
     def test_findings_come_from_this_run_not_from_storage(self, db):
         """

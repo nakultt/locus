@@ -117,12 +117,11 @@ async def classify(text: str) -> tuple[str, str]:
         return "routine", "Empty message"
 
     try:
-        from app.services.chat.llm import get_llm
+        from app.services.chat.llm import get_llm, message_text
 
         llm = get_llm(temperature=0)
         response = await llm.ainvoke(CLASSIFIER_PROMPT.format(message=text[:2000]))
-        content = response.content
-        raw = (content if isinstance(content, str) else str(content)).strip()
+        raw = message_text(response).strip()
 
         # Local models frequently wrap JSON in a markdown fence.
         if raw.startswith("```"):

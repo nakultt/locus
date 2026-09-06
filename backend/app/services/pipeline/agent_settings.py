@@ -69,6 +69,20 @@ class EffectiveSettings:
     handed_back: bool = False
     handed_back_reason: str | None = None
 
+    # What starts the agent, as opposed to whether it may write at all.
+    # Account-level only, so these resolve from the defaults row and nothing
+    # else -- a repo has no say, because the question is one policy for the
+    # account. `authoring_mode` remains the per-repo and per-item switch, and
+    # is checked *as well*: auto-start on an item nobody put in autonomous mode
+    # must still do nothing.
+    #
+    # Review and QA default True because both fired automatically before they
+    # were settings; assignment defaults False because it is new and can open
+    # a pull request per assigned ticket in one sweep.
+    auto_start_on_assignment: bool = False
+    auto_start_on_review: bool = True
+    auto_start_on_qa: bool = True
+
     # Per key: "repo", "defaults", or "unset". The dashboard shows this so a
     # skipped stage can be traced to the setting responsible.
     sources: dict[str, str] = field(default_factory=dict)
@@ -406,6 +420,19 @@ def _resolve_authoring(
     else:
         resolved.autonomous_max_rounds = 2
         resolved.sources["autonomous_max_rounds"] = "unset"
+
+    # Account-level only: read straight off the defaults row, with no repo or
+    # work-item layer to resolve against. A missing row means nobody has saved
+    # settings, which is not the same as choosing the dataclass defaults -- but
+    # it resolves to them, because that is the behaviour the install already
+    # had before these were settings.
+    for _flag in ("auto_start_on_assignment", "auto_start_on_review", "auto_start_on_qa"):
+        stored = getattr(defaults, _flag, None) if defaults else None
+        if stored is None:
+            resolved.sources[_flag] = "unset"
+        else:
+            setattr(resolved, _flag, bool(stored))
+            resolved.sources[_flag] = "defaults"
 
     resolved.preset_label = pick_text(
         resolved, "preset_label",

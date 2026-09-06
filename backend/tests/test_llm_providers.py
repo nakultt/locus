@@ -305,3 +305,157 @@ def test_an_unknown_provider_from_a_user_falls_back_to_local():
     """The same rule the environment follows: fail towards the local backend."""
     _bind(provider="opnai", api_key="sk-typo")
     assert llm._provider() == llm.LOCAL
+
+
+class TestTheBindingCannotBeMissed:
+    """
+    `get_integration_configs` binds the user's model backend, and is the only
+    place that does. A path that builds the same credential dict by hand looks
+    correct and runs on the deployment default instead -- which is
+    indistinguishable from the setting never having saved.
+
+    The QA classifier hit exactly this. The Slack events router had its own
+    copy of the loop, so a tester's reply was classified against the local
+    endpoint on an account that had configured a hosted provider, and the
+    channel reported `Classifier unavailable: Connection error` for a backend
+    the user had already moved off. `automerge`, the Gmail poller and the
+    capabilities view carried the same copy.
+    """
+
+    def test_only_dependencies_builds_integration_configs(self):
+        """
+        A source check, for the same reason `test_project_board` pins a query
+        as a string: nothing else can catch the next copy of this loop, and the
+        symptom when one appears is a setting that appears not to save.
+        """
+        import pathlib
+
+        app_root = pathlib.Path(__file__).resolve().parent.parent / "app"
+
+        # The signal is the *pair*: walking the user's integrations while
+        # decrypting each one's credentials is the config dict being built.
+        # Listing integrations alone is not -- `auth.list_integrations` and the
+        # chat router legitimately do that and never touch a credential.
+        builders = set()
+        for path in app_root.rglob("*.py"):
+            source = path.read_text(encoding="utf-8")
+            if (
+                "crud.get_user_integrations(" in source
+                and "get_integration_credentials(" in source
+            ):
+                builders.add(path.relative_to(app_root).as_posix())
+
+        assert builders == {"core/dependencies.py"}, (
+            "Build integration configs through get_integration_configs; a local "
+            "copy of its loop silently skips the LLM/agent-runtime binding and "
+            "the Google OAuth client credentials."
+        )
+
+    def test_get_integration_configs_binds_the_users_backend(self, monkeypatch):
+        from app.core import dependencies
+        from app.services.chat import llm, llm_config
+
+        llm_config.clear()
+
+        monkeypatch.setattr(
+            dependencies.crud, "get_user_integrations", lambda _db, _uid: []
+        )
+        monkeypatch.setattr(
+            llm_config, "for_user",
+            lambda _db, _uid: llm_config.LLMConfig(
+                provider="openai", api_key="sk-bound"
+            ),
+        )
+        monkeypatch.setattr(dependencies.llm_config, "for_user", llm_config.for_user)
+
+        dependencies.get_integration_configs(db=None, user_id=1)
+
+        assert llm._provider() == llm.OPENAI
+        llm_config.clear()
+
+
+class TestMessageTextHandlesBlockContent:
+    """
+    A message's `.content` is a string only on the chat-completions wire
+    format. The Responses API and Anthropic return a list of content blocks,
+    and every analysis parser used to fall back to `str(content)` -- which
+    stringifies the Python list, so a parser expecting JSON got
+    `[{'id': 'rs_...', 'type': 'reasoning', ...}]`.
+
+    It failed in the most misleading direction available at each site: the QA
+    classifier called the tester's reply unclear, and the scanner and reviewer
+    degraded to their error strings, while every surface rendered as though a
+    model had read the code.
+    """
+
+    class _Response:
+        def __init__(self, content):
+            self.content = content
+
+    def test_a_plain_string_is_returned_unchanged(self):
+        assert llm.message_text(self._Response('{"verdict": "broken"}')) == (
+            '{"verdict": "broken"}'
+        )
+
+    def test_a_responses_api_reasoning_block_is_skipped(self):
+        """The shape that actually broke this, from OpenCode Zen."""
+        response = self._Response([
+            {"id": "rs_6a9d04", "type": "reasoning", "summary": [],
+             "encrypted_content": "Q-PaDgHMfkLKSLbkRxBq"},
+            {"type": "text", "text": '{"verdict": "broken", "reason": "no"}'},
+        ])
+
+        assert llm.message_text(response) == '{"verdict": "broken", "reason": "no"}'
+
+    def test_an_anthropic_thinking_block_is_skipped(self):
+        response = self._Response([
+            {"type": "thinking", "thinking": "the tester said it did not work"},
+            {"type": "text", "text": '{"verdict": "broken"}'},
+        ])
+
+        assert llm.message_text(response) == '{"verdict": "broken"}'
+
+    def test_several_text_blocks_are_joined(self):
+        response = self._Response([
+            {"type": "text", "text": '{"verdict":'},
+            {"type": "text", "text": ' "works"}'},
+        ])
+
+        assert llm.message_text(response) == '{"verdict": "works"}'
+
+    def test_a_block_list_never_stringifies_the_python_object(self):
+        """The regression itself: no `str(list)` may reach a parser."""
+        text = llm.message_text(self._Response([
+            {"id": "rs_1", "type": "reasoning", "encrypted_content": "x"},
+        ]))
+
+        assert "'type':" not in text
+        assert text == ""
+
+    def test_a_bare_message_works_as_well_as_a_response(self):
+        """Callers pass an AIMessage in one place and a response in seven."""
+        assert llm.message_text("already text") == "already text"
+
+    def test_no_parser_reimplements_the_extraction(self):
+        """
+        A source check, like the binding one above. The seven copies of
+        `content if isinstance(content, str) else str(content)` are exactly
+        what this helper replaced, and a new one would fail the same way.
+        """
+        import pathlib
+
+        app_root = pathlib.Path(__file__).resolve().parent.parent / "app"
+
+        offenders = [
+            path.relative_to(app_root).as_posix()
+            for path in app_root.rglob("*.py")
+            if "isinstance(response.content, str)" in path.read_text(encoding="utf-8")
+            or "isinstance(content, str) else str(content)" in path.read_text(
+                encoding="utf-8"
+            )
+        ]
+
+        assert offenders == [], (
+            "Read model output through llm.message_text; str() on a list of "
+            "content blocks yields a repr, not the model's answer."
+        )

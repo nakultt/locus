@@ -16,7 +16,7 @@ from uuid import uuid4
 import httpx
 
 from app.schemas import MergeActionResult, PRAnalysisResult
-from app.services.chat.llm import get_llm
+from app.services.chat.llm import get_llm, message_text
 from app.services.integrations import google_auth, project_board
 
 logger = logging.getLogger(__name__)
@@ -308,8 +308,7 @@ async def draft_qa_brief(
                 findings=findings,
             )
         )
-        content = response.content
-        text = content if isinstance(content, str) else str(content)
+        text = message_text(response)
         if text.strip():
             return text.strip()
     except Exception as e:

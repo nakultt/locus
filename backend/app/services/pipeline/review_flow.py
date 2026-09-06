@@ -35,7 +35,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from sqlalchemy.orm import Session
 
 from app import models, schemas
-from app.services.chat.llm import get_llm
+from app.services.chat.llm import get_llm, message_text
 
 logger = logging.getLogger(__name__)
 
@@ -93,16 +93,6 @@ def _get_or_create_review(
     )
 
     if review is None:
-        review = (
-            db.query(models.PRReview)
-            .filter(
-                models.PRReview.repo == repo,
-                models.PRReview.pr_number == pr_number,
-            )
-            .first()
-        )
-
-    if review is None:
         review = models.PRReview(
             repo=repo,
             pr_number=pr_number,
@@ -136,7 +126,7 @@ async def summarize_asks(body: str) -> list[str]:
         logger.warning("Could not summarize review asks: %s", e)
         return []
 
-    content = response.content if isinstance(response.content, str) else str(response.content)
+    content = message_text(response)
     if content.strip().upper().startswith("NONE"):
         return []
 

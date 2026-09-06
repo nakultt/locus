@@ -347,6 +347,73 @@ class TestPrompt:
         assert "Focus on implementing the reviewer's requested changes" in prompt
         assert "Change only what the ticket asks for" not in prompt
 
+    def test_a_qa_rejection_is_not_rendered_as_a_reviewer_rework(self):
+        """
+        The reported bug. `is_rework` fired on `asks` being non-empty, and a QA
+        rejection carries the review rounds' asks forward -- so a run answering
+        the testing team was told "a code reviewer requested changes", handed
+        the already-satisfied asks as its PRIMARY GOAL, and told by the context
+        note to focus exclusively on them, with the tester's actual words far
+        below under a heading the scope block had just told it to ignore. The
+        agent re-implemented the previous round and never touched what the
+        tester reported.
+        """
+        prompt = driver.build_prompt(request(
+            trigger="qa_rejected",
+            asks=["create a new folder named apple"],
+            rejection='create a new folder named "peach" with innit.py in it',
+            context="## Requirement\nBuild the widget",
+        ))
+
+        assert prompt.startswith("# Fix after testing: LOC-42: Add the thing")
+        # The tester's words are the goal, and they come first.
+        assert "## What the tester reported (PRIMARY GOAL)" in prompt
+        assert prompt.index('named "peach"') < prompt.index("named apple")
+        # Nothing may tell this run that a reviewer asked for the change.
+        assert "a code reviewer requested changes" not in prompt.lower()
+        assert "Focus exclusively on the tester's report above" in prompt
+        assert "Focus on the tester's report" in prompt
+        assert "Focus on implementing the reviewer's requested changes" not in prompt
+
+    def test_a_qa_rejection_still_carries_the_asks_as_constraints(self):
+        """
+        A fix must not undo what the reviewer already agreed to, so the asks
+        stay -- but as something to preserve, never as the thing to build.
+        """
+        prompt = driver.build_prompt(request(
+            trigger="qa_rejected",
+            asks=["create a new folder named apple"],
+            rejection="did not work",
+        ))
+
+        assert "## Already agreed with the reviewer (do not undo)" in prompt
+        assert "1. create a new folder named apple" in prompt
+        assert "do not treat them as the thing to build" in prompt
+
+    def test_a_qa_rejection_states_the_rejection_once(self):
+        """
+        Repeating it under "why the last attempt came back" after stating it as
+        the goal reads as two different things being asked for.
+        """
+        prompt = driver.build_prompt(request(
+            trigger="qa_rejected", rejection="the peach folder is missing",
+        ))
+
+        assert prompt.count("the peach folder is missing") == 1
+        assert "Why the last attempt came back from testing" not in prompt
+
+    def test_a_reviewer_rework_is_unaffected(self):
+        """The other branch must keep saying reviewer, not tester."""
+        prompt = driver.build_prompt(request(
+            trigger="changes_requested",
+            asks=["create a new folder named apple"],
+            existing_branch="locus/LOC-42-1",
+        ))
+
+        assert prompt.startswith("# Rework: LOC-42: Add the thing")
+        assert "A code reviewer has reviewed the pull request" in prompt
+        assert "What the tester reported" not in prompt
+
     def test_initial_prompt_uses_ticket_scope(self):
         """An initial attempt focuses on the ticket scope."""
         prompt = driver.build_prompt(request(trigger="initial"))
@@ -788,3 +855,36 @@ class TestAuthorRun:
         result = await driver.OpenCodeDriver().author(request(), CONFIGS)
 
         assert result.model == "some-model-v2"
+
+    @pytest.mark.asyncio
+    async def test_rework_producing_no_changes_fails_without_pushing_empty_attribution(
+        self, configured, github, monkeypatch
+    ):
+        git(["checkout", "-b", "locus/LOC-42-1"], configured)
+        (configured / "initial.py").write_text("initial code\n")
+        git(["add", "-A"], configured)
+        git(["-c", f"user.email={driver.agent_email()}", "-c", f"user.name={driver.agent_name()}",
+             "commit", "-m", "initial commit"], configured)
+        git(["push", "-u", "origin", "locus/LOC-42-1"], configured)
+        git(["checkout", "main"], configured)
+
+        monkeypatch.setattr(driver, "run_agent", fake_agent({}))
+
+        pushed = []
+        orig_run_git = driver.run_git
+        def track_git(args, *a, **k):
+            if args and args[0] == "push":
+                pushed.append(args)
+            return orig_run_git(args, *a, **k)
+
+        monkeypatch.setattr(driver, "run_git", track_git)
+
+        result = await driver.OpenCodeDriver().author(
+            request(existing_branch="locus/LOC-42-1", trigger="changes_requested"),
+            CONFIGS,
+        )
+
+        assert result.opened is False
+        assert "no changes in this attempt" in result.error
+        assert pushed == []
+

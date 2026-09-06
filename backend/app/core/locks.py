@@ -40,6 +40,11 @@ QA_POLL_LOCK = 8_417_002
 # instances would find the same double-booking and propose the same reshuffle
 # twice -- and a proposal is something a person is asked to act on.
 CALENDAR_LOCK = 8_417_003
+# The assignment sweep matches assigned work items rather than claiming them,
+# and ends in a pull request with a reviewer's name on it. Two instances would
+# open two for the same ticket -- the duplicate-PR failure the rework fix
+# exists to prevent, arriving from a different direction.
+ASSIGNMENT_LOCK = 8_417_004
 
 
 def _supports_advisory_locks() -> bool:

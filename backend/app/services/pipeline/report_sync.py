@@ -55,6 +55,16 @@ def find_report(
             so the second pull request finds it rather than starting over.
             Callers that only read (rather than write the document) leave this
             off so a lookup never mutates.
+
+    **Both lookups are scoped to the owner, and neither falls back past it.**
+    Owner-less retries were added here to make links appear on a board that was
+    running as one account while the documents had been written by another --
+    the underlying problem was the ownership split, and the workaround was a
+    cross-user read: it returned another account's row, so their Google Doc id
+    was rendered as this account's report link and a refresh could have written
+    this work item's history into their document. That is the rule "cross-user
+    access returns 404, not 403" exists for, and a missing document is the
+    correct answer here -- `ensure_for_ticket` creates one.
     """
     if ticket_key:
         by_ticket = (
@@ -66,13 +76,6 @@ def find_report(
             .order_by(models.PRReport.created_at)
             .first()
         )
-        if by_ticket is None:
-            by_ticket = (
-                db.query(models.PRReport)
-                .filter(models.PRReport.ticket_key == ticket_key)
-                .order_by(models.PRReport.created_at)
-                .first()
-            )
         if by_ticket is not None:
             return by_ticket
 
@@ -85,16 +88,6 @@ def find_report(
         )
         .first()
     )
-    if by_pr is None and repo and pr_number is not None:
-        by_pr = (
-            db.query(models.PRReport)
-            .filter(
-                models.PRReport.repo == repo,
-                models.PRReport.pr_number == pr_number,
-            )
-            .first()
-        )
-
     if by_pr is not None and ticket_key and adopt and not by_pr.ticket_key:
         by_pr.ticket_key = ticket_key
         try:

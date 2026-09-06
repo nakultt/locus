@@ -285,6 +285,46 @@ def get_llm(smart_mode: bool = False, temperature: float = 0.1) -> BaseChatModel
     )
 
 
+def message_text(response) -> str:
+    """
+    The text a model returned, whatever shape the provider returned it in.
+
+    **A message's `.content` is not a string.** It is a string on the OpenAI
+    chat-completions wire format, which is what the local endpoint speaks, and
+    a *list of content blocks* on the Responses API and on Anthropic. Every
+    caller here used to write `content if isinstance(content, str) else
+    str(content)`, which on a list stringifies the Python object -- so a parser
+    expecting JSON received `[{'id': 'rs_...', 'type': 'reasoning', ...}]` and
+    failed.
+
+    That failed quietly and in the most misleading direction available at each
+    site: the QA classifier reported the tester's reply as unclear, and the
+    security scanner and code reviewer degraded to their error strings. The
+    whole analysis half of the pipeline was dead on any provider that blocks
+    its content, while every surface still rendered as though a model had read
+    the code.
+
+    Reasoning and thinking blocks are dropped rather than concatenated. They
+    carry no `text` key -- a reasoning block holds `summary` and
+    `encrypted_content` and an Anthropic thinking block holds `thinking` -- so
+    taking `text` alone both selects the answer and excludes the scratchpad,
+    which must never reach a prompt-parser or a rendered finding.
+    """
+    content = getattr(response, "content", response)
+
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        return "".join(
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") not in ("reasoning", "thinking")
+        )
+
+    return str(content)
+
+
 def _health_url() -> str:
     """MoE serves /health at the root, not under /v1."""
     return _base_url(LOCAL).rstrip("/").removesuffix("/v1") + "/health"

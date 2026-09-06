@@ -1371,6 +1371,33 @@ class PRAgentDefaultsUpdate(BaseModel):
             "review loop's Slack pings. Blank requests nobody."
         ),
     )
+
+    # What starts the agent. `authoring_mode` decides whether it may write at
+    # all; these decide whether a person has to press the button. Account-level
+    # only -- the per-repo and per-item axis is `authoring_mode`.
+    auto_start_on_assignment: bool = Field(
+        False,
+        description=(
+            "Start writing as soon as a work item is assigned to you, with no "
+            "click. Off by default: a morning's assigned tickets can open a "
+            "pull request each, and the open-PR cap is what bounds it."
+        ),
+    )
+    auto_start_on_review: bool = Field(
+        True,
+        description=(
+            "Start a rework as soon as a reviewer requests changes. On by "
+            "default, because this already happened before it was a setting."
+        ),
+    )
+    auto_start_on_qa: bool = Field(
+        True,
+        description=(
+            "Start a fix as soon as the testing team reports the change is "
+            "broken. On by default, for the same reason."
+        ),
+    )
+
     calendar_sweep_minutes: int | None = Field(
         None, ge=5, le=1440, description="How often your calendars are swept"
     )

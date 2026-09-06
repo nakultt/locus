@@ -60,7 +60,27 @@ DEFAULT_WORKSPACE_TTL_DAYS = 3
 DEFAULT_CALENDAR_SWEEP_MINUTES = 30
 DEFAULT_CALENDAR_LOOKAHEAD_DAYS = 14
 
-VALID_DRIVERS = ("opencode", "none")
+# `none` is the do-nothing driver and stays the fallback for anything
+# unrecognized. Three real drivers rather than one, because `get_driver`
+# returning either OpenCode or a no-op made autonomous mode depend on a single
+# third-party binary -- and one broke, hanging with no output on every model
+# including a local one and a name that does not exist.
+VALID_DRIVERS = ("opencode", "claude", "codex", "none")
+
+# What a person might reasonably type or a preset might carry, mapped to the
+# stored name. Normalizing on the way in rather than matching loosely at every
+# read: the stored value is what `get_driver` dispatches on, and a second
+# spelling reaching it would resolve to the do-nothing driver and report
+# "no authoring driver configured" for a driver that is installed.
+DRIVER_ALIASES = {
+    "claude-code": "claude",
+    "codex-cli": "codex",
+    "openai-codex": "codex",
+    "claude_code": "claude",
+    "claudecode": "claude",
+    "open-code": "opencode",
+    "open_code": "opencode",
+}
 CONTEXT_MODES = ("full", "ticket_only")
 
 
@@ -164,11 +184,14 @@ def normalize_driver(value: str | None) -> str | None:
     """
     A recognized driver name, or None.
 
-    An unrecognized name resolves to None rather than to `opencode`: falling
-    through to the do-nothing driver reports "no authoring driver configured",
-    where guessing would run a shell in a checkout on the strength of a typo.
+    An unrecognized name resolves to None rather than to a working driver:
+    falling through to the do-nothing one reports "no authoring driver
+    configured", where guessing would run a shell in a checkout on the
+    strength of a typo. Aliases are resolved first, so a familiar spelling is
+    not treated as a typo -- but only spellings of a driver that exists.
     """
     cleaned = (value or "").strip().lower()
+    cleaned = DRIVER_ALIASES.get(cleaned, cleaned)
     return cleaned if cleaned in VALID_DRIVERS else None
 
 

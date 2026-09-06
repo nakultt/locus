@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -33,6 +34,7 @@ from app.services.authoring.authoring import AuthoringRequest, AuthoringResult, 
 from app.services.authoring.workspace import (
     Workspace,
     WorkspaceError,
+    _is_within,
     allow_in_place,
     authenticated_remote,
     prune_old_workspaces,
@@ -199,13 +201,70 @@ def prepare_workspace(
     base = base_branch or _default_branch(source)
     branch = existing_branch or f"locus/{_slug(ticket_key)}-{attempt}"
 
+    _release_worktree_for_branch(source, branch)
+
     if _branch_exists(source, branch):
-        run_git(["worktree", "add", str(target), branch], source)
+        try:
+            run_git(["worktree", "add", str(target), branch], source)
+        except WorkspaceError as exc:
+            if "already used by worktree" in str(exc).lower():
+                _release_worktree_for_branch(source, branch)
+                run_git(["worktree", "add", str(target), branch], source)
+            else:
+                raise
+        if existing_branch and _branch_exists(source, f"origin/{branch}"):
+            run_git(["reset", "--hard", f"origin/{branch}"], target)
     else:
-        start = f"origin/{base}" if _branch_exists(source, f"origin/{base}") else base
+        start = f"origin/{branch}" if (existing_branch and _branch_exists(source, f"origin/{branch}")) else (
+            f"origin/{base}" if _branch_exists(source, f"origin/{base}") else base
+        )
         run_git(["worktree", "add", "-b", branch, str(target), start], source)
 
     return Workspace(path=target, branch=branch, base_branch=base, source=source)
+
+
+def _release_worktree_for_branch(source: Path, branch: str) -> None:
+    """
+    Remove any previous attempt worktrees that currently hold this branch.
+
+    Git forbids checking out the same branch in multiple worktrees. When a
+    previous attempt fails and its worktree is kept for debugging, the next
+    attempt on that branch (a rework) would fail with 'already used by worktree'.
+    Releasing prior attempt worktrees frees the branch for the new run.
+    """
+    res = run_git(["worktree", "list", "--porcelain"], source, check=False)
+    if res.returncode != 0:
+        return
+
+    branch_ref = f"refs/heads/{branch}"
+    worktree_path = None
+    admin_base = source / ".git" / "worktrees" if (source / ".git").is_dir() else None
+
+    for line in res.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("worktree "):
+            worktree_path = line[len("worktree "):].strip()
+        elif line.startswith("branch "):
+            curr = line[len("branch "):].strip()
+            if (curr == branch_ref or curr == branch) and worktree_path:
+                p = Path(worktree_path).resolve()
+                if p != source.resolve():
+                    run_git(["worktree", "remove", "--force", str(p)], source, check=False)
+                    if p.exists():
+                        shutil.rmtree(p, ignore_errors=True)
+                    if admin_base and admin_base.exists():
+                        for admin in admin_base.iterdir():
+                            gitdir_file = admin / "gitdir"
+                            if gitdir_file.exists():
+                                try:
+                                    target_p = Path(gitdir_file.read_text().strip()).resolve()
+                                    if target_p == p or _is_within(target_p, p):
+                                        shutil.rmtree(admin, ignore_errors=True)
+                                except Exception:
+                                    pass
+            worktree_path = None
+
+    run_git(["worktree", "prune"], source, check=False)
 
 
 def _remote_for(source: Path, clone_url: str | None) -> str:
@@ -369,39 +428,19 @@ def stamp_attribution(
     trailer = attribution_trailer(driver, model, attempt)
     marker = "Machine-authored: written by"
 
-    # A filter-branch over a handful of commits is heavier than needed, and
-    # rewording mid-history needs a rebase. The common case by far is a single
-    # commit, so handle that directly and fall back to stamping the tip.
-    if len(shas) == 1:
-        existing = run_git(["log", "-1", "--format=%B"], workspace.path, check=False)
-        if existing.returncode == 0 and marker not in existing.stdout:
-            run_git(
-                [
-                    "-c", f"user.email={agent_email()}",
-                    "-c", f"user.name={agent_name()}",
-                    "commit", "--amend", "--no-edit",
-                    "-m", existing.stdout.strip(),
-                    "-m", trailer,
-                ],
-                workspace.path,
-                check=False,
-            )
-        return
-
-    # Several commits: add one empty commit carrying the attribution rather
-    # than rewriting history. Less tidy, but it cannot lose a message, and an
-    # empty commit is visible in `git log` where a silent skip would not be.
-    run_git(
-        [
-            "-c", f"user.email={agent_email()}",
-            "-c", f"user.name={agent_name()}",
-            "commit", "--allow-empty",
-            "-m", f"Attribution for the {len(shas)} commits above",
-            "-m", trailer,
-        ],
-        workspace.path,
-        check=False,
-    )
+    existing = run_git(["log", "-1", "--format=%B"], workspace.path, check=False)
+    if existing.returncode == 0 and marker not in existing.stdout:
+        run_git(
+            [
+                "-c", f"user.email={agent_email()}",
+                "-c", f"user.name={agent_name()}",
+                "commit", "--amend", "--no-edit",
+                "-m", existing.stdout.strip(),
+                "-m", trailer,
+            ],
+            workspace.path,
+            check=False,
+        )
 
 
 def human_commits_on(workspace: Workspace, base_branch: str, branch: str) -> bool:
@@ -430,6 +469,29 @@ Change only what the ticket asks for. Specifically:
 Commit your work. Do not push, do not open a pull request, and do not merge --
 that is handled for you once you exit.
 """.strip()
+
+QA_SCOPE_INSTRUCTIONS = """
+## Scope
+
+Focus on the tester's report. Specifically:
+
+- Fix exactly what the tester said did not work, completely and accurately.
+- The reviewer asks listed above were already agreed and implemented. Keep them
+  working; do not undo them, and do not treat them as the thing to build.
+- Do NOT work on Locus's internal PR analysis, automated scan findings, code
+  review findings, or bot inline suggestions.
+- Do not implement or modify features from linked issues or background tickets
+  unless the tester asked for it.
+- Do not make unrelated changes outside what the tester reported.
+- Do not reformat, re-indent or reorganise files the change does not need.
+- Do not add a dependency without saying why in the commit message.
+- Do not edit CI workflows, environment files, or anything holding a secret.
+- Keep the diff focused and small enough for one person to review in a sitting.
+
+Commit your work. Do not push, do not open a pull request, and do not merge --
+that is handled for you once you exit.
+""".strip()
+
 
 REWORK_SCOPE_INSTRUCTIONS = """
 ## Scope
@@ -461,12 +523,68 @@ def build_prompt(request: AuthoringRequest) -> str:
     Order matters. For a rework or QA rejection, the requested changes or rejection
     are elevated to the top so the model treats them as the primary goal rather than
     re-implementing the original ticket requirements from scratch.
+
+    **A QA rejection and a reviewer rework are different briefs.** Both were
+    rendered as the second one, because `is_rework` fired on `request.asks`
+    being non-empty and a QA rejection carries the review rounds' asks forward.
+    So a run answering the testing team was told "a code reviewer requested
+    changes", handed the *already-satisfied* asks as its PRIMARY GOAL, and told
+    by the context note to "focus exclusively on the reviewer asks above" --
+    with the tester's actual words a hundred lines further down, under a heading
+    the scope block had just instructed it to ignore. The agent did what it was
+    asked: it re-implemented the previous round and never touched what the
+    tester reported. The asks still appear, because a fix must not undo a change
+    the reviewer already agreed to, but they appear as a constraint and the
+    rejection is the goal.
     """
-    is_rework = request.trigger == "changes_requested" or bool(request.asks)
+    is_qa_rejection = request.trigger == "qa_rejected" or (
+        bool(request.rejection) and request.trigger != "changes_requested"
+    )
+    is_rework = not is_qa_rejection and (
+        request.trigger == "changes_requested" or bool(request.asks)
+    )
 
     parts: list[str] = []
 
-    if is_rework:
+    if is_qa_rejection:
+        # A QA rejection opens a *new* pull request on a new branch, so this
+        # says "fix" rather than "rework the pull request you are on".
+        parts += [
+            f"# Fix after testing: {request.ticket_key}: {request.title}",
+            "",
+            "The previous attempt at this work item was merged, and the testing "
+            f"team then reported that it does not work. In the repository "
+            f"`{request.repo}`, on the branch already checked out for you, your "
+            "PRIMARY GOAL is to fix exactly what the tester reported.",
+            "",
+            "## What the tester reported (PRIMARY GOAL)",
+            "",
+            "In the tester's own words:",
+            "",
+            "> " + (request.rejection or "").strip().replace("\n", "\n> "),
+        ]
+
+        if request.asks:
+            parts += [
+                "",
+                "## Already agreed with the reviewer (do not undo)",
+                "",
+                "These were requested in earlier review rounds and are already "
+                "implemented. They are constraints on your fix, not work to "
+                "redo -- keep them working and do not reimplement them.",
+                "",
+            ]
+            parts += [f"{n}. {ask}" for n, ask in enumerate(request.asks, start=1)]
+
+        parts += [
+            "",
+            "## The ticket",
+            "",
+            (request.description or "").strip() or
+            "_The ticket carries no description. Work from the title and the "
+            "context below._",
+        ]
+    elif is_rework:
         branch_desc = f" on the branch `{request.existing_branch}`" if request.existing_branch else ""
         parts += [
             f"# Rework: {request.ticket_key}: {request.title}",
@@ -515,14 +633,19 @@ def build_prompt(request: AuthoringRequest) -> str:
         ]
 
     if request.context.strip():
-        if is_rework:
+        if is_rework or is_qa_rejection:
+            goal = (
+                "the tester's report above"
+                if is_qa_rejection
+                else "the reviewer asks above"
+            )
             parts += [
                 "",
                 "## Context gathered by Locus",
                 "",
                 "_Note: This context is provided strictly for background reference. "
                 "Do NOT treat internal analysis, scanner findings, or linked issue descriptions "
-                "as work items to implement during this rework. Focus exclusively on the reviewer asks above._",
+                f"as work items to implement during this attempt. Focus exclusively on {goal}._",
                 "",
                 request.context.strip(),
             ]
@@ -539,7 +662,7 @@ def build_prompt(request: AuthoringRequest) -> str:
             "(LOCUS_AUTHORING_CONTEXT=ticket_only)._",
         ]
 
-    if not is_rework and request.asks:
+    if not (is_rework or is_qa_rejection) and request.asks:
         parts += [
             "",
             "## What reviewers have asked for, oldest first",
@@ -550,7 +673,10 @@ def build_prompt(request: AuthoringRequest) -> str:
         ]
         parts += [f"{n}. {ask}" for n, ask in enumerate(request.asks, start=1)]
 
-    if request.rejection:
+    # Only when it was not already the headline. Repeating it under "why the
+    # last attempt came back" after stating it as the goal reads as two
+    # different things being asked for.
+    if request.rejection and not is_qa_rejection:
         parts += [
             "",
             "## Why the last attempt came back from testing",
@@ -560,30 +686,102 @@ def build_prompt(request: AuthoringRequest) -> str:
             "> " + request.rejection.strip().replace("\n", "\n> "),
         ]
 
-    scope_text = REWORK_SCOPE_INSTRUCTIONS if (is_rework or request.rejection) else SCOPE_INSTRUCTIONS
+    if is_qa_rejection:
+        scope_text = QA_SCOPE_INSTRUCTIONS
+    elif is_rework or request.rejection:
+        scope_text = REWORK_SCOPE_INSTRUCTIONS
+    else:
+        scope_text = SCOPE_INSTRUCTIONS
     parts += ["", scope_text]
     return "\n".join(parts)
 
 
-def build_command(prompt_path: Path, workspace_path: Path) -> list[str]:
+def build_command(
+    prompt_path: Path, workspace_path: Path, default_command: str | None = None
+) -> list[str]:
     """
-    The OpenCode invocation, from the configured template.
+    The agent invocation, from the configured template.
 
-    A template rather than hard-coded flags, because OpenCode's CLI surface
+    A template rather than hard-coded flags, because a coding CLI's surface
     moves and a driver pinning today's flags breaks on an upgrade with a
     non-zero exit and no useful message.
-    """
-    template = agent_runtime.command(DEFAULT_COMMAND).strip()
-    rendered = template.format(prompt=str(prompt_path), workspace=str(workspace_path))
-    parts = shlex.split(rendered, posix=os.name != "nt")
 
-    # The model is OpenCode's, not Locus's. This exists only to pin one when a
-    # team wants reproducibility across attempts, and is unset by default.
-    model = agent_runtime.model().strip()
+    `default_command` is the driver's own template, used when the account has
+    not overridden it. It is a parameter rather than a module constant because
+    two drivers share this function and their invocations differ -- but the
+    account-level override is one setting, so a team that pinned a template
+    keeps it whichever driver they select.
+    """
+    template = agent_runtime.command(default_command or DEFAULT_COMMAND).strip()
+    # The model is the agent CLI's, not Locus's. This exists only to pin one
+    # when a team wants reproducibility across attempts, and is unset by
+    # default. Both CLIs spell the flag `--model`.
+    return _command_from_template(
+        template, prompt_path, workspace_path, model=agent_runtime.model().strip()
+    )
+
+
+def _command_from_template(
+    template: str, prompt_path: Path, workspace_path: Path, *, model: str
+) -> list[str]:
+    """
+    Render one template to argv, appending `--model` when one is pinned.
+
+    Split in non-posix mode on Windows, because posix mode treats the
+    backslashes in a Windows workspace path as escapes and eats them, and every
+    path here is a Windows path. The cost is that non-posix mode *keeps* the
+    quotes around a quoted argument, so `-p "do the thing"` would reach the CLI
+    as a literal `"do the thing"` including the quote characters. That never
+    mattered while the only template passed bare words; it matters for
+    `claude -p`, whose prompt is a single argument that has to be quoted to
+    survive splitting. So the quotes are stripped afterwards, which is a no-op
+    for a template that has none.
+    """
+    rendered = template.format(prompt=str(prompt_path), workspace=str(workspace_path))
+    parts = [
+        _unquote(part) for part in shlex.split(rendered, posix=os.name != "nt")
+    ]
+
     if model and "--model" not in parts:
         parts += ["--model", model]
 
     return parts
+
+
+def _unquote(part: str) -> str:
+    """Drop one matching pair of surrounding quotes, if there is one."""
+    for quote in ('"', "'"):
+        if len(part) >= 2 and part.startswith(quote) and part.endswith(quote):
+            return part[1:-1]
+    return part
+
+
+
+# Terminal escape sequences: colour and cursor control (CSI), and the OSC
+# sequences a progress display uses for hyperlinks and window titles.
+_ANSI = re.compile(
+    r"\x1b\[[0-9;?]*[ -/]*[@-~]"
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+    r"|\x1b[@-Z\\-_]"
+)
+
+
+def _plain(text: str) -> str:
+    """
+    Agent output with terminal escapes removed.
+
+    This output is not only logged: on a failure it becomes
+    `AuthoringResult.error`, which is stored on `AuthoringAttempt.error` and
+    rendered in the UI, so escape codes reach a person as literal `[2m` noise
+    wrapped around the one line they need to read.
+
+    Stripped here rather than asked for politely. Every driver's CLI has a
+    flag for it -- `--color never` and friends -- and Codex still emitted
+    escapes with that flag set, because the flag governs its *own* rendering
+    and not what a tool it shells out to writes. One place that cannot be
+    missed beats three flags that can.
+    """
+    return _ANSI.sub("", text)
 
 
 async def run_agent(
@@ -607,6 +805,14 @@ async def run_agent(
             cwd=str(workspace),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            # Closed, never inherited. The same rule `run_git` follows: an
+            # agent running unattended cannot answer a prompt, so it must not
+            # be able to wait for one. Inheriting stdin cost three seconds and
+            # a "no stdin data received" warning on every Claude Code run, and
+            # a CLI that decided to read further would have hung until the
+            # wall clock killed it -- spending an attempt on a prompt nobody
+            # saw.
+            stdin=asyncio.subprocess.DEVNULL,
         )
     except NotImplementedError:
         # The running event loop cannot spawn a subprocess, so run it on a
@@ -637,7 +843,9 @@ async def run_agent(
         await process.wait()
         return 124, f"Timed out after {timeout}s"
 
-    return process.returncode or 0, (stdout or b"").decode("utf-8", "replace")
+    return process.returncode or 0, _plain(
+        (stdout or b"").decode("utf-8", "replace")
+    )
 
 
 def _run_agent_blocking(
@@ -658,11 +866,16 @@ def _run_agent_blocking(
             text=True,
             errors="replace",
             timeout=timeout,
+            # As above: the threaded fallback must behave identically, or the
+            # driver waits for a human on exactly one of the two code paths.
+            stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
         return 124, f"Timed out after {timeout}s"
 
-    return done.returncode or 0, (done.stdout or "") + (done.stderr or "")
+    return done.returncode or 0, _plain(
+        (done.stdout or "") + (done.stderr or "")
+    )
 
 
 def changed_files(workspace: Workspace, base_branch: str) -> list[str]:
@@ -823,23 +1036,103 @@ def build_pr_body(
     return "\n".join(lines).strip()
 
 
-class OpenCodeDriver:
+class CliDriver:
     """
-    Drives OpenCode in an isolated worktree and opens the pull request.
+    Drives a coding CLI in an isolated worktree and opens the pull request.
 
     Every refusal happens on the diff after the run, never by trusting the
     prompt. Every outcome returns an `AuthoringResult` rather than raising:
     the caller records the attempt either way, and an exception escaping past
     the recording would not consume an attempt.
+
+    **Almost none of this is specific to any one CLI.** Three things are: the
+    name, the invocation template, and the label recorded when no model is
+    pinned. Everything else -- resolving the source, cutting the worktree, the
+    prepare command, the wall clock, the denylist, the size caps, the test
+    gate, attribution, the human-commit check, the push with prompting
+    disabled, the pull request and its reviewers -- is the same work whichever
+    binary writes the code. A second driver therefore subclasses this and
+    overrides those three, rather than copying a thousand lines that would
+    then drift apart one fix at a time.
+
+    Subclasses set:
+        name: recorded on every attempt and rendered in the UI.
+        default_command: the invocation, used when the account has not set its
+            own template. `{prompt}` and `{workspace}` are substituted.
+        default_model_label: what to record when no model is pinned. A label
+            rather than a guess -- "which model wrote this" must not be
+            answered with the name of one nobody selected.
     """
 
-    name = "opencode"
+    name = "cli"
+    default_command = DEFAULT_COMMAND
+    default_model_label = "cli-default"
+    # The executable the template is expected to invoke. See `_own_settings`.
+    binary = ""
+
+    def _own_settings(self) -> bool:
+        """
+        Whether the account's stored invocation belongs to *this* driver.
+
+        `command` and `model` are one account-level setting each, shared across
+        drivers -- but their values are not portable. A stored template names a
+        binary and a pinned model names one provider's catalogue, so switching
+        the driver while leaving them in place ran the *previous* driver's
+        command line: selecting Claude Code and getting `opencode run ... --model
+        opencode/muse-spark-...`, which is the "looks like the setting never
+        saved" failure with a shell behind it.
+
+        Matched on the first token of the resolved template, which is the
+        executable. When it does not match, the stored invocation was written
+        for another driver and neither it nor the pinned model is used -- the
+        driver falls back to its own defaults and says so, rather than running
+        something the account did not select.
+        """
+        template = agent_runtime.command(self.default_command).strip()
+        if not template:
+            return True
+        try:
+            first = shlex.split(template, posix=os.name != "nt")[0]
+        except (ValueError, IndexError):
+            return False
+        return Path(first).stem.lower() == (self.binary or self.name).lower()
+
+    def build_command(self, prompt_path: Path, workspace_path: Path) -> list[str]:
+        if self._own_settings():
+            return build_command(prompt_path, workspace_path, self.default_command)
+
+        logger.info(
+            "Ignoring the stored agent command: it does not invoke %s. "
+            "Using this driver's default.",
+            self.binary or self.name,
+        )
+        return _command_from_template(
+            self.default_command, prompt_path, workspace_path, model=""
+        )
+
+    def _model(self) -> str:
+        """
+        The model this attempt actually ran on.
+
+        Resolved through `agent_runtime`, the same source `build_command`
+        passes to the CLI. This used to read `LOCUS_OPENCODE_MODEL` directly
+        while the command line carried the *account's* setting, so an account
+        that pinned a model had every attempt recorded against a different one
+        -- and "every `AuthoringAttempt` records which model ran" is the claim
+        that makes autonomous mode auditable at all.
+        """
+        if not self._own_settings():
+            # A model name is one provider's catalogue entry. Carrying
+            # `opencode/muse-spark-1.3` onto a Claude Code run would record a
+            # model that does not exist for the driver that ran.
+            return self.default_model_label
+        return agent_runtime.model().strip() or self.default_model_label
 
     async def author(
         self, request: AuthoringRequest, integration_configs: dict
     ) -> AuthoringResult:
         started = time.monotonic()
-        model = (os.getenv("LOCUS_OPENCODE_MODEL") or "").strip() or "opencode-default"
+        model = self._model()
 
         def failed(error: str, **extra) -> AuthoringResult:
             return AuthoringResult(
@@ -936,19 +1229,34 @@ class OpenCodeDriver:
                         workspace_path=str(workspace.path),
                     )
 
+            head_before = run_git(["rev-parse", "HEAD"], workspace.path, check=False).stdout.strip()
+
             prompt_path = workspace.path / ".locus-prompt.md"
             prompt_path.write_text(build_prompt(request), encoding="utf-8")
 
             code, output = await run_agent(
-                build_command(prompt_path, workspace.path), workspace.path
+                self.build_command(prompt_path, workspace.path), workspace.path
             )
             prompt_path.unlink(missing_ok=True)
+            logger.info(
+                "%s agent finished with code %s:\n%s", self.name, code, output
+            )
 
             if code == 124:
                 return failed(output, workspace_path=str(workspace.path))
             if code != 0:
                 return failed(
                     f"{self.name} exited {code}:\n{output[-3000:]}",
+                    workspace_path=str(workspace.path),
+                )
+
+            head_now = run_git(["rev-parse", "HEAD"], workspace.path, check=False).stdout.strip()
+            run_git(["add", "-A"], workspace.path, check=False)
+            staged = run_git(["diff", "--cached", "--name-only"], workspace.path, check=False).stdout.strip()
+
+            if head_now == head_before and not staged:
+                return failed(
+                    "The agent produced no changes in this attempt, so nothing was committed or pushed",
                     workspace_path=str(workspace.path),
                 )
 
@@ -1116,6 +1424,21 @@ class OpenCodeDriver:
             if not keep:
                 remove_workspace(workspace)
             prune_old_workspaces()
+
+
+
+class OpenCodeDriver(CliDriver):
+    """
+    OpenCode, the original driver.
+
+    Everything it does lives in `CliDriver`. This names it, points it at
+    OpenCode's invocation, and says what to record when no model is pinned.
+    """
+
+    name = "opencode"
+    binary = "opencode"
+    default_command = DEFAULT_COMMAND
+    default_model_label = "opencode-default"
 
 
 def request_settings(request: AuthoringRequest) -> dict:

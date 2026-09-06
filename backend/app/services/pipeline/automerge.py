@@ -21,8 +21,9 @@ import logging
 
 from sqlalchemy.orm import Session
 
-from app import crud, models, schemas
+from app import models, schemas
 from app.core.database import SessionLocal
+from app.core.dependencies import get_integration_configs
 from app.services.integrations import github_pr
 from app.services.pipeline import review_flow
 from app.services.pipeline.agent_settings import resolve_settings
@@ -157,21 +158,17 @@ async def attempt_merge(
 
 
 def _integration_configs(db: Session, owner_id: int) -> dict[str, dict]:
-    """Decrypted credentials for one user, as the tools expect them."""
-    configs: dict[str, dict] = {}
-    for integration in crud.get_user_integrations(db, owner_id):
-        config: dict = {}
-        api_key = crud.get_integration_key(db, owner_id, integration.service_name)
-        if api_key:
-            config["api_key"] = api_key
-        credentials = crud.get_integration_credentials(
-            db, owner_id, integration.service_name
-        )
-        if credentials:
-            config["credentials"] = credentials
-        if config:
-            configs[integration.service_name] = config
-    return configs
+    """
+    Decrypted credentials for one user, as the tools expect them.
+
+    Delegates rather than reimplementing. The loop that used to be here was a
+    copy of `get_integration_configs` missing both things that function exists
+    to do besides the loop: binding the user's model backend and agent runtime,
+    and attaching the Google OAuth client credentials. A sweep is a background
+    task with no request behind it, so nothing else would have bound them --
+    which is precisely the case the ContextVar was introduced for.
+    """
+    return get_integration_configs(db, owner_id)
 
 
 async def sweep_once() -> int:

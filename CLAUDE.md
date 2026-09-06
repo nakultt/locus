@@ -63,7 +63,7 @@ Backend (from `backend/`, dependencies managed with [uv](https://docs.astral.sh/
 
 ```bash
 uv sync --extra security          # --extra security installs Semgrep
-uv run main.py                    # the whole backend: HTTP surface + the four loops
+uv run main.py                    # the whole backend: HTTP surface + the five loops
 uv run pytest tests/ -q
 uv run pytest tests/test_linking.py -q          # single file
 uv run pytest tests/test_linking.py::test_name  # single test
@@ -114,7 +114,7 @@ app/services/
     authoring/          autonomous code writing (driver, worktree checks, bounds)
     scheduling/         the calendar agent
     chat/               the chat agent, its planner and the LLM client
-    worker.py           the four background loops — starts everything above it
+    worker.py           the five background loops — starts everything above it
     integration_health.py   written by all of them
 ```
 
@@ -191,9 +191,10 @@ was removed in 1.0. Task events are emitted from the graph stream, and a tool th
 becomes a failed task rather than an aborted run, so a request touching five integrations
 keeps the four that succeeded. `tests/test_agent_migration.py` pins this message contract.
 
-**Four background loops** start in `app/main.py`'s lifespan: `worker_loop` (PR analysis jobs),
-`qa_email_loop` (Gmail polling for QA replies), `merge_gate_loop` (re-evaluating held merges) and
-`calendar_agent_loop` (sweeping enabled calendars for conflicts). Jobs are persisted rather than
+**Five background loops** start in `app/main.py`'s lifespan: `worker_loop` (PR analysis jobs),
+`qa_email_loop` (Gmail polling for QA replies), `merge_gate_loop` (re-evaluating held merges),
+`calendar_agent_loop` (sweeping enabled calendars for conflicts) and `assignment_loop` (starting
+the authoring agent on newly assigned work items, for accounts that turned that on). Jobs are persisted rather than
 held in `BackgroundTasks`, which would lose queued work on restart. Each sweep takes a Postgres
 advisory lock (`app/core/locks.py`), because a sweep matches rows rather than claiming them and
 every one of these loops ends in a message to a person.
@@ -528,6 +529,26 @@ cutoff is applied per match against `ts` — a match whose `ts` will not parse i
 duplicate is recoverable in a way a silently dropped message is not. A watermark of `None`
 means the work item was never searched and the run does a full search; an incremental search
 from an unknown point would skip whatever fell before it.
+
+**Locus's own Slack posts are not discussion.** `search.messages` runs on the *user's* token,
+so it returns the whole channel — including every review ping, QA brief, analysis summary and
+merge announcement Locus posted into it. Those name the repo and the ticket, so they match the
+search terms *better* than the human conversation the search exists to find, and they were being
+cached as prior discussion and handed to the authoring model as background. It answered them: a
+rework whose only instruction was "create a folder named apple" instead produced compatibility
+aliases — which is what the QA brief Locus had written for an unrelated pull request in the same
+channel asked a *tester* to verify. Two filters, because one is not enough. `search_slack_threads`
+skips a match carrying `bot_id`, the discriminator the QA loop already uses to tell a tester's
+reply from its own post, which stops new ones being stored. And `review_flow.is_own_slack_notification`
+drops what is already stored, in `comms_log.cached_search` and in `context_brief` — necessary
+because the cache is deliberately permanent, so there is no expiry to wait out and a poisoned row
+would otherwise reach every future run on that work item forever. It matches on the markers rather
+than the author, since the cached rows carry whatever Slack reported as the username and that is a
+display name an operator can rename; emoji are matched as shortcodes because that is what search
+returns, and where a line has stable prose that is preferred to the emoji. The rows are filtered on
+the way out, never deleted: they are a true record of what the search returned, which is what
+`full_report` renders, and they are wrong only as *context*. `tests/test_comms_log.py` and
+`tests/test_task_context.py` pin it.
 
 **The activity timeline shows inherited context, marked.** `comms_log.timeline()` takes an
 optional `ticket_key` and folds in the Slack discussion cached under that work item by sibling
@@ -1004,6 +1025,211 @@ exact thing "the analysis models run locally" exists to prevent. Nothing leaked 
 key was dead and every call 400'd. `scripts/dev.ts` strips the file's own keys from the child
 environment rather than denylisting names, because a denylist needs updating whenever somebody
 adds a variable and forgetting is silent.
+
+**A model's `.content` is not a string.** It is one on the OpenAI chat-completions wire format,
+which the local endpoint speaks, and a *list of content blocks* on the Responses API and on
+Anthropic. Seven parsers each wrote `content if isinstance(content, str) else str(content)`, which
+on a list stringifies the Python object -- so a parser expecting JSON received
+`[{'id': 'rs_...', 'type': 'reasoning', ...}]`. It then failed in the most misleading direction
+available at each site: the QA classifier reported the tester's reply as unclear, and the security
+scanner and code reviewer degraded to their error strings, so the whole analysis half of the
+pipeline was dead on any provider that blocks its content while every surface still rendered as
+though a model had read the code. `llm.message_text` is the one reader, shared with
+`agent.final_text`, which had always been the only correct copy. Reasoning and thinking blocks are
+dropped rather than concatenated -- they carry no `text` key, so taking `text` alone both selects
+the answer and excludes the scratchpad, which must never reach a parser or a rendered finding.
+`tests/test_llm_providers.py` pins it, including a source check that no parser reimplements it.
+
+**A classifier that could not run is not an ambiguous reply.** `Verdict.UNCLEAR` is a claim about
+the tester's words — that they were read and were genuinely mixed — and a model that was never
+reached makes no claim at all. Collapsing the second into the first put ":grey_question: Unclear
+QA feedback, someone should take a look" in front of a team whose tester had written a flat
+"didn't work": the message blamed the wording and buried the only actionable fact, that the model
+backend was down. `Verdict.UNAVAILABLE` carries it instead, and `notify_pr_author` takes
+`unavailable=` to say so in the channel. This is the scan comment's rule — a pass that failed is
+never rendered as a pass that found nothing — one surface along. Three things hold. Only an
+exception reaching the model is `unavailable`; output the model produced but that could not be
+parsed stays `unclear`, because the reply *was* read. Neither changes any state, so the split is
+about what is claimed and never about what is done — a keyword guess at "broken" is still refused,
+since a wrong reopen reverses a merge decision on the strength of an outage. And the reason goes
+through a `_describe` that falls back to the exception class, since an empty message names neither
+the cause nor anything to search for. `tests/test_qa_feedback.py` pins it.
+
+**A Slack retry is acknowledged, never reprocessed.** Slack redelivers an event up to three times
+when the endpoint takes longer than three seconds, and the QA path calls a model and then GitHub,
+Jira and Docs inside the request — so exceeding three seconds is the ordinary case rather than a
+fault. Nothing read `X-Slack-Retry-Num`, so one tester reply produced two identical escalation
+posts a second apart, which is the "a dashboard refresh must never notify a team twice" rule
+losing to a header. Every branch below the guard ends in a message to a person, and every failure
+path there answers 200 deliberately, so Slack is never retrying an error and dropping a retry is
+the correct reading rather than a lost message. The guard sits *after* the signature check: a
+forged retry header must not be a way to skip work with a 200.
+
+**An owner-scoped lookup never retries without the owner.** Nine of these existed, across seven
+modules, all the same shape: a query correctly filtered by `owner_id`, then a re-query without it
+when the first returned nothing. They came from one cause — a board running as one account while
+the registrations, reviews and reports had been written by another — and each looked locally like
+a small robustness measure. Together they meant an account with no data of its own silently read
+someone else's. The severity is not uniform and is worth knowing: a `PRReport` row leaks a Google
+Doc id and a refresh writes this work item's history into *their* document; a `RepoWebhook` row
+carries `source_path`, `prepare_command` and `test_command`, so a borrowed one runs another
+account's shell commands against their source tree; `review_flow`'s was a get-or-create that then
+*wrote* state onto whatever row it found; and `rejection_for`'s returns the text that becomes the
+authoring prompt's primary goal, so another team's tester could set this team's agent's task and
+have it sent to a third party. The correct answer when nothing is found is nothing found — an
+unregistered repo resolves to the account's own defaults, and a missing report is what
+`ensure_for_ticket` exists to create. The single exemption is the GitHub webhook receiver's entry
+lookup, which is the opposite case: an inbound webhook carries no user, so that row *establishes*
+the owner and the HMAC is then verified against its own secret.
+`tests/test_cross_user_isolation.py` pins it with a source check, and pins that the check itself
+fires on the removed shape — a guard that never fails is indistinguishable from one that cannot.
+
+**There are three authoring drivers, and almost nothing is specific to any of them.** `get_driver`
+returned OpenCode or a no-op, so autonomous mode depended on a single third-party binary — and one
+broke, hanging at `init` with no output on every model, including a purely local one and a model
+name that does not exist. `CliDriver` in `opencode_driver.py` holds the whole attempt: resolving
+the source, cutting the worktree, the prepare command, the wall clock, the denylist enforced on
+the diff *after* the run, the size caps, the test gate, attribution, the human-commit check, the
+push with prompting disabled, the pull request and its reviewers. A driver overrides three things
+— `name`, `default_command`, `default_model_label` — plus `binary`. `ClaudeCodeDriver` is that and
+nothing else, and `tests/test_claude_driver.py` fails if the module grows authoring logic of its
+own, because a second copy of the denylist is a second set of safety rules that drift apart one
+fix at a time.
+
+Claude Code's brief is *referenced* rather than inlined: `claude -p` takes its message as a single
+argument and a context brief runs past the Windows command-line limit, which is why the shared
+path writes it to a file at all — so the message names `.locus-prompt.md` and the agent reads it.
+Splitting is non-posix on Windows so backslashes in paths survive, which *keeps* the quotes around
+a quoted argument, so they are stripped afterwards; a template with no quotes is unaffected.
+Authentication is ambient — whatever `claude login` set up — which is the same arrangement OpenCode
+has and carries the same cost, stated rather than hidden: every account on a deployment shares one
+session, exactly what the ContextVar in `agent_runtime` exists to avoid for every other setting.
+`--permission-mode bypassPermissions` is not a smaller grant than OpenCode's shell; it is the same
+capability held by the same compensating constraints.
+
+**Codex signs in with a ChatGPT account, and its sandbox flag is a decision, not a default.**
+`codex login` stores an OAuth token with `OPENAI_API_KEY` left null, so a Plus or Pro subscription
+drives it with no key stored anywhere. On the sandbox: Codex ships its own, and `-s
+workspace-write` is the smaller grant and would be preferred — it is not the default because on
+Windows it fails outright (`CreateProcessAsUserW failed: 5 (Access is denied)`), so every command
+the agent runs errors while the process still exits 0, which is the "looks like success" shape
+this codebase cares most about. The default is therefore
+`--dangerously-bypass-approvals-and-sandbox`, which Codex's own help describes as "intended solely
+for running in environments that are externally sandboxed" — an accurate description here, because
+the external sandbox is the worktree, the source checks and the post-run denylist, and this is the
+same grant `--auto` and `bypassPermissions` already take rather than a larger one. Where Codex's
+sandbox works, pointing the account's invocation template at `-s workspace-write` is strictly
+better, and is why that template is a setting.
+
+**Agent output is stripped of terminal escapes before anyone reads it.** It is not only logged: on
+a failure it becomes `AuthoringResult.error`, is stored on the attempt row and is rendered in the
+UI, so escape codes reach a person as literal noise wrapped around the one line they need. Every
+CLI has a flag for this and Codex still emitted escapes with `--color never` set, because the flag
+governs its own rendering and not what the tools it shells out to write — so `run_agent` strips
+them on the way out. One place that cannot be missed beats three flags that can; the flags stay
+because asking is cheaper than stripping.
+
+**A stored invocation belongs to the driver that wrote it.** `command` and `model` are one
+account-level setting each, shared across drivers, and neither value is portable: a template names
+a binary and a model names one provider's catalogue. Selecting Claude Code with an OpenCode
+template still stored ran `opencode run … --model opencode/muse-spark-…` — the "looks like the
+setting never saved" failure with a shell behind it. `CliDriver._own_settings` matches the first
+token of the resolved template against the driver's binary; when it does not match, neither the
+template nor the pinned model is used and the driver logs that it fell back to its own default.
+An override still applies to the driver it was written for, so this must not become "stored
+templates are ignored".
+
+**The recorded model is the one that ran.** `author()` read `LOCUS_OPENCODE_MODEL` from the
+environment while `build_command` passed the *account's* setting to the CLI, so an account that
+pinned a model had every `AuthoringAttempt` recorded against a different one — and "every
+`AuthoringAttempt` records which model ran" is the claim that makes autonomous mode auditable.
+Both now resolve through `agent_runtime.model()`. With nothing pinned a *label* is recorded
+(`claude-code-default`), never a guessed model name: naming one nobody selected turns the record
+into a claim.
+
+**What starts the agent is a separate question from whether it may write.** `authoring_mode`
+answers the second, per repo and per work item. Three account-level settings answer the first —
+`auto_start_on_assignment`, `auto_start_on_review`, `auto_start_on_qa` — and both are checked
+everywhere, so a team can turn the loop on once and still hand individual tickets to a person.
+Account-level only, like the agent runtime block: "who presses the button" is one policy for the
+account, and a second copy per repo would be a resolution layer with nothing to resolve. **The
+defaults are deliberately not uniform.** Review and QA default *on* because both already fired
+automatically before they were settings — defaulting them off would silently stop a working
+pipeline on an upgrade nobody thought was behavioural, and the symptom is a rework that simply
+never arrives, so migration `030` backfills existing rows to 1. Assignment defaults *off*: the
+board endpoint's own docstring is why, since a morning's tickets would otherwise open a pull
+request each. `tests/test_auto_start.py` pins the asymmetry and pins that the API schema's
+defaults match the resolver's — two defaults for one setting drift, and the form would then show
+a trigger as off while a run reads it as on.
+
+**The assignment trigger is a sweep, and it starts a work item once, ever.** The other two
+triggers are webhooks; a ticket landing on somebody fires nothing Locus receives, so there is
+nothing to subscribe to — the same argument that makes `automerge.sweep_once` a timer.
+`assignment_watch` is the fifth loop. Four rules. The idempotence guard is an `AuthoringAttempt`
+row rather than a timestamp or an in-memory set, because a sweep that opened a pull request and
+then restarted must not open a second one, and the row is the only record that survives a
+restart. Only genuinely untouched work is picked up — no pull request, no linked branch, no prior
+attempt — since anything else is a rework, which belongs to the event triggers that know which
+branch to continue. One item per user per sweep, because the throughput cap bounds how many pull
+requests can be *open* and does nothing about how many arrive at once: eight machine-authored
+pull requests filed in the same minute is how the mode gets switched off. And no report document
+is created, because `report_sync.ensure_for_ticket` is a write and a sweep calling it would make
+one per assigned item — the exact mistake that function avoids by never running from the board
+listing.
+
+**Every trigger reaches the driver through `authoring_flow.start_for_card`.** This is the
+structural form of the rule above about both triggers reaching the driver the same way. That rule
+existed as a convention two files had to keep agreeing on, and they stopped: the webhook path was
+fixed to continue an open pull request and the board path was not. Adding a third arm made a
+convention untenable, so the orchestration — the branch to continue, the cap, the attempt number,
+the trigger derivation, the request, `begin_attempt`/`record_attempt`, the handoff — moved into
+one function that the board endpoint and the sweep both call. It raises `StartRefused` with a
+`code` rather than an `HTTPException`, because a background loop must not need a web framework to
+decide whether to skip a ticket; `_REFUSAL_STATUS` in the router is the only place a code becomes
+a status. `tests/test_auto_start.py` pins that neither caller builds its own `AuthoringRequest`.
+
+**A QA rejection and a reviewer rework are different briefs.** Both were rendered as the second
+one: `build_prompt`'s `is_rework` fired on `request.asks` being non-empty, and a QA rejection
+carries the earlier review rounds' asks forward. So a run answering the testing team was headed
+"a code reviewer has reviewed the pull request and requested changes", handed the
+*already-satisfied* asks as its PRIMARY GOAL, and told by the context note to "focus exclusively on
+the reviewer asks above" -- with the tester's actual words a hundred lines below, under a heading
+the scope block had just instructed it to ignore. The agent did what it was told: it
+re-implemented the previous round and never touched what the tester reported, which reads from the
+board as an agent that declined the work. `is_qa_rejection` is decided first and wins, the
+rejection is the goal, and the asks stay under "already agreed with the reviewer (do not undo)" --
+a fix must not undo a change the reviewer agreed to, but it must not rebuild it either. The
+rejection is stated once: repeating it under "why the last attempt came back" after stating it as
+the goal reads as two different things being asked for. `QA_SCOPE_INSTRUCTIONS` exists because
+`REWORK_SCOPE_INSTRUCTIONS` says "work ONLY on the reviewer asks", which is precisely wrong here.
+`tests/test_opencode_driver.py` pins both branches.
+
+**The QA rework is keyed by work item, not by tracker ticket.** `_maybe_author_fix` guarded on
+`ticket_keys` being non-empty, and that list is only ever populated from a tracker -- so on a
+repository whose work items are GitHub issues, which is the ordinary case, a QA rejection reopened
+the issue and then silently did nothing. The tester's "didn't work" was recorded, the ticket came
+back, and no agent was ever asked to fix it; the board showed a reopened item with no rework, which
+reads as the agent having declined rather than never having been asked. That is the third place the
+definition of "which work item" was written out by hand, which is exactly what
+`pr_agent.work_item_keys` exists to prevent -- so the raw-pieces form is
+`pr_agent.work_item_keys_for(repo, ticket_keys, issue_numbers)` and the context form delegates to
+it. An empty key list has to keep meaning "this work item opted out", which is why the fallback
+belongs in the shared definition rather than in a second guard here.
+
+**Nothing builds a credential dict except `get_integration_configs`.** Four modules carried their
+own copy of its loop — the Slack events router, the Gmail poller, `automerge` and the capabilities
+view — and a copy is not a duplicate of that function, it is that function missing the two things
+it exists to do *besides* the loop: binding `llm_config` and `agent_runtime` for the user, and
+attaching `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` so a token older than an hour can be
+refreshed. This is the failure the ContextVar docstring names in advance — "a missed caller
+silently runs on the deployment default, which looks exactly like the setting not having saved" —
+and the QA classifier is where it surfaced: an account that had moved to a hosted provider in
+settings had its tester replies classified against `MOE_BASE_URL`, and the channel reported
+`Classifier unavailable: Connection error` naming a backend nobody had selected. Background paths
+are the dangerous ones, because no request dependency runs to bind anything on their behalf.
+`tests/test_llm_providers.py` pins it with a source check, for the same reason
+`test_project_board.py` pins a GraphQL query as a string: nothing else catches the next copy, and
+the symptom when one appears is a setting that appears not to save.
 
 ## Database schema changes
 

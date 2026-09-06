@@ -944,16 +944,6 @@ def detail_for(
             .order_by(models.PRJob.created_at.desc())
             .first()
         )
-        if job is None:
-            job = (
-                db.query(models.PRJob)
-                .filter(
-                    models.PRJob.repo == repo,
-                    models.PRJob.pr_number == number,
-                )
-                .order_by(models.PRJob.created_at.desc())
-                .first()
-            )
         if job is not None:
             job_status = job.status
             job_error = job.error
@@ -1034,15 +1024,6 @@ def _review_detail(
         )
         .first()
     )
-    if review is None:
-        review = (
-            db.query(models.PRReview)
-            .filter(
-                models.PRReview.repo == repo,
-                models.PRReview.pr_number == pr_number,
-            )
-            .first()
-        )
     return review_flow.to_detail(review) if review else None
 
 
@@ -1058,6 +1039,17 @@ def _registration_for(
     A pull request names its repo; before one exists a linked branch does. A
     work item with neither has no repo settings to resolve against, and falls
     back to the account defaults -- which is correct, not a gap.
+
+    **Scoped to the owner, with no fallback past it.** A retry that took any
+    *enabled* registration for the repo was here, from the same workaround as
+    the ones in `report_sync.find_report` and the board's authoring endpoint: a
+    board running as one account while the registrations belonged to another.
+    It is not only a cross-user read -- `resolve_settings` turns a registration
+    into `source_path`, `prepare_command` and `test_command`, so a card
+    rendered from a borrowed row shows another account's mode, and a run
+    started from that card executes their shell commands against their source
+    tree. An unregistered repo resolving to this account's own defaults is the
+    correct answer, and is what the paragraph above already says.
     """
     repo = None
     if pr_idents:
@@ -1076,13 +1068,4 @@ def _registration_for(
         )
         .first()
     )
-    if reg is None:
-        reg = (
-            db.query(models.RepoWebhook)
-            .filter(
-                models.RepoWebhook.repo == repo,
-                models.RepoWebhook.enabled == 1,
-            )
-            .first()
-        )
     return reg

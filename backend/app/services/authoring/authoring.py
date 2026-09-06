@@ -166,6 +166,16 @@ def get_driver(name: str | None = None) -> AuthoringDriver:
 
         return OpenCodeDriver()
 
+    if resolved == "claude":
+        from app.services.authoring.claude_driver import ClaudeCodeDriver
+
+        return ClaudeCodeDriver()
+
+    if resolved == "codex":
+        from app.services.authoring.codex_driver import CodexDriver
+
+        return CodexDriver()
+
     return NoneDriver()
 
 
@@ -413,23 +423,44 @@ def gather_asks(
     every round is carried rather than only the last, since a request satisfied
     in round two is still something the rework must not undo.
     """
+    from sqlalchemy import case
+
     from app.services.pipeline import work_item as work_item_service
 
-    reviews = work_item_service.sibling_reviews(
-        db, owner_id=owner_id, ticket_key=ticket_key
-    )
+    this_review = None
     if repo and pr_number:
         this_review = (
             db.query(models.PRReview)
             .filter(
-                models.PRReview.owner_id == owner_id,
                 models.PRReview.repo == repo,
                 models.PRReview.pr_number == pr_number,
             )
+            .order_by(case((models.PRReview.owner_id == owner_id, 0), else_=1))
             .first()
         )
-        if this_review and this_review.id not in {r.id for r in reviews}:
-            reviews.append(this_review)
+
+    effective_owner = this_review.owner_id if this_review else owner_id
+    reviews = work_item_service.sibling_reviews(
+        db, owner_id=effective_owner, ticket_key=ticket_key
+    )
+    if not reviews and effective_owner != owner_id:
+        reviews = work_item_service.sibling_reviews(
+            db, owner_id=owner_id, ticket_key=ticket_key
+        )
+
+    if not reviews:
+        reviews = (
+            db.query(models.PRReview)
+            .filter(
+                models.PRReview.ticket_keys.isnot(None),
+                models.PRReview.ticket_keys.contains(ticket_key),
+            )
+            .order_by(case((models.PRReview.owner_id == owner_id, 0), else_=1))
+            .all()
+        )
+
+    if this_review and this_review.id not in {r.id for r in reviews}:
+        reviews.append(this_review)
 
     if not reviews:
         return []

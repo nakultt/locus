@@ -95,8 +95,9 @@ class TestReplyRouting:
         """
         notified = {}
 
-        async def fake_notify(_cfg, channel, _ts, _url, _text, _reason):
+        async def fake_notify(_cfg, channel, _ts, _url, _text, _reason, **kwargs):
             notified["channel"] = channel
+            notified["unavailable"] = kwargs.get("unavailable", False)
             return True
 
         monkeypatch.setattr("app.services.pipeline.qa_feedback.notify_pr_author", fake_notify)
@@ -112,9 +113,89 @@ class TestReplyRouting:
         assert outcome["verdict"] == "unclear"
         assert outcome["author_notified"] is True
         assert notified["channel"] == "C123"
+        # A real verdict about the reply, not an outage.
+        assert notified["unavailable"] is False
         # Nothing was reopened.
         assert outcome["reopened_tickets"] == []
         assert outcome["reopened_issues"] == []
+
+    @pytest.mark.asyncio
+    async def test_classifier_outage_is_not_reported_as_an_unclear_reply(
+        self, stub_classifier, monkeypatch
+    ):
+        """
+        The reported bug. With the model backend unreachable, a flat "didn't
+        work" was escalated as *unclear QA feedback* -- a claim that the reply
+        had been read and was ambiguous, when nothing had read it. The message
+        blamed the tester's wording and buried the only actionable fact, which
+        was that the classifier was down.
+        """
+        notified = {}
+
+        async def fake_notify(_cfg, channel, _ts, _url, _text, reason, **kwargs):
+            notified["reason"] = reason
+            notified["unavailable"] = kwargs.get("unavailable", False)
+            return True
+
+        monkeypatch.setattr(
+            "app.services.pipeline.qa_feedback.notify_pr_author", fake_notify
+        )
+        stub_classifier(Verdict.UNAVAILABLE, "Connection error.")
+
+        outcome = await handle_qa_reply(
+            "didnt work",
+            {"slack": {"api_key": "xoxb-x"}},
+            "acme/api", "url", ["LOC-1"], [5],
+            slack_channel="C123",
+        )
+
+        # Distinguishable in the record as well as in the channel: "unclear"
+        # is a verdict about the reply and this is not one.
+        assert outcome["verdict"] == "unavailable"
+        assert outcome["author_notified"] is True
+        assert notified["unavailable"] is True
+        assert notified["reason"] == "Connection error."
+        # Still no state change: an outage is not evidence either way.
+        assert outcome["reopened_tickets"] == []
+        assert outcome["reopened_issues"] == []
+
+    @pytest.mark.asyncio
+    async def test_unreachable_model_yields_unavailable_not_unclear(self, monkeypatch):
+        """
+        The split is made in `classify_reply` itself: output the model produced
+        but that could not be parsed is a genuine `unclear`, while never
+        reaching the model at all is `unavailable`.
+        """
+        from app.services.pipeline.qa_feedback import classify_reply
+
+        def boom(**_kwargs):
+            raise ConnectionError("Connection error.")
+
+        monkeypatch.setattr("app.services.pipeline.qa_feedback.get_llm", boom)
+
+        verdict, reason = await classify_reply("didnt work")
+
+        assert verdict is Verdict.UNAVAILABLE
+        assert reason == "Connection error."
+
+    @pytest.mark.asyncio
+    async def test_unavailable_names_the_exception_class_when_it_has_no_message(
+        self, monkeypatch
+    ):
+        """
+        An empty exception message names neither the cause nor anything to
+        search for -- the same trap `security_scan._describe` exists for.
+        """
+        from app.services.pipeline.qa_feedback import classify_reply
+
+        def boom(**_kwargs):
+            raise NotImplementedError()
+
+        monkeypatch.setattr("app.services.pipeline.qa_feedback.get_llm", boom)
+
+        _verdict, reason = await classify_reply("didnt work")
+
+        assert reason == "NotImplementedError"
 
     @pytest.mark.asyncio
     async def test_broken_reopens_ticket_and_issue(self, stub_classifier, monkeypatch):
@@ -279,3 +360,68 @@ class TestCloseOnSignoff:
 
         assert outcome["closed_tickets"] == []
         assert any("Jira is down" in e for e in outcome["errors"])
+
+
+class TestTheWorkItemKeyReachesEveryReader:
+    """
+    A QA reply is filed under the work item, not the pull request.
+
+    `comms_log.record` was called with no `ticket_key` on both QA paths, and
+    everything that reads a rejection back matches on one. `worklist.build`
+    falls back to `repo#pr` when it is missing, so the rejection of PR 8 became
+    a task of its own instead of attaching to the work item -- the work item's
+    own card then showed no rejection at all, and the board's authoring button
+    offered to start over rather than to fix what the tester found.
+    `_rejection_for` matches on it too, so a manual run lost the tester's words
+    entirely and went out as a fresh `initial` attempt.
+    """
+
+    def test_a_github_issue_work_item_resolves_from_the_thread(self):
+        from app.services.pipeline.pr_agent import work_item_keys_for
+
+        # What a QAThread on a tracker-less repo actually holds: no ticket
+        # keys, one closed issue.
+        assert work_item_keys_for("acme/api", [], [7]) == ["acme/api#7"]
+
+    def test_a_tracker_key_still_wins(self):
+        from app.services.pipeline.pr_agent import work_item_keys_for
+
+        assert work_item_keys_for("acme/api", ["LOC-1"], [7]) == ["LOC-1"]
+
+    def test_no_work_item_yields_nothing_rather_than_a_guess(self):
+        """
+        An empty list has to keep meaning "no work item". Inventing a key here
+        would attach one team's rejection history to another team's PR.
+        """
+        from app.services.pipeline.pr_agent import work_item_keys_for
+
+        assert work_item_keys_for("acme/api", [], []) == []
+
+    def test_both_qa_paths_stamp_the_key(self):
+        """
+        A source check. The channel a tester replies through must not change
+        the record, and the email path is the ordinary one -- the brief reaches
+        testers by mail.
+        """
+        import pathlib
+        import re
+
+        root = pathlib.Path(__file__).resolve().parent.parent / "app"
+        paths = [
+            root / "routers" / "slack_events.py",
+            root / "services" / "pipeline" / "qa_email_poller.py",
+        ]
+
+        for path in paths:
+            source = path.read_text(encoding="utf-8")
+            call = re.search(
+                r"comms_log\.record\((?:[^()]|\([^()]*\))*?loop=\"qa\","
+                r"(?:[^()]|\([^()]*\))*?\)",
+                source,
+                re.S,
+            )
+            assert call, f"no QA comms_log.record found in {path.name}"
+            assert "ticket_key=" in call.group(0), (
+                f"{path.name} records a QA reply without the work item key; "
+                "worklist and _rejection_for both match on it."
+            )

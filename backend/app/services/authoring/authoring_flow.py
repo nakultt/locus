@@ -18,7 +18,7 @@ import logging
 
 from sqlalchemy.orm import Session
 
-from app import models
+from app import models, schemas
 from app.services.authoring import authoring
 from app.services.integrations import github_pr
 from app.services.pipeline import comms_log, context_brief, work_item
@@ -400,3 +400,328 @@ def key_for(db: Session, *, owner_id: int, repo: str, pr_number: int) -> str | N
     return work_item.resolve_key(
         db, owner_id=owner_id, repo=repo, pr_number=pr_number
     )
+
+
+# --- shared with the board endpoint ---------------------------------------
+#
+# These moved out of `routers/tasks.py` when the assignment trigger was added.
+# Locus already holds the rule that **both triggers reach the driver the same
+# way, including the board's button** -- it exists because the webhook path was
+# fixed to continue an open pull request and the board path was not, so the
+# same click meant different things depending on which arm ran. A third
+# trigger copying the orchestration would reintroduce exactly that, so the
+# orchestration lives here and every arm calls `start_for_card`.
+
+def pr_to_continue(card: schemas.TaskCard) -> schemas.TaskPullRequest | None:
+    """
+    The open pull request a manual run should push to, if there is one.
+
+    In flight means open, not merely un-merged -- the same rule
+    `task_board._derive_stage` reads the board by. A merged pull request is
+    finished and a closed one was abandoned or superseded; pushing to either
+    puts commits somewhere nobody is looking. Everything else is a pull request
+    a reviewer either has read or is being asked to read, and the branch it is
+    on is where the next attempt belongs.
+
+    The latest is taken when several are open, which matches `_derive_stage`
+    consulting the furthest state among them: two open pull requests on one
+    work item is already unusual, and the newest is the one carrying the
+    current attempt.
+    """
+    finished = {schemas.ReviewState.merged, schemas.ReviewState.closed}
+    open_prs = [
+        pr
+        for pr in card.pull_requests
+        if pr.review_state is not None and pr.review_state not in finished
+    ]
+    return open_prs[-1] if open_prs else None
+
+
+def repo_from_card(card: schemas.TaskCard) -> str | None:
+    """
+    The repo a work item belongs to when it has no pull request yet.
+
+    A linked branch names one, and a GitHub issue key is `owner/repo#N`. A Jira
+    ticket with neither genuinely has no repo, and saying so beats guessing --
+    pointing the agent at the wrong codebase produces a confident, entirely
+    wrong pull request.
+    """
+    for branch in card.linked_branches:
+        if branch.repo:
+            return branch.repo
+    if "#" in card.key:
+        candidate = card.key.rsplit("#", 1)[0]
+        if "/" in candidate:
+            return candidate
+    return None
+
+
+def context_for(
+    db: Session, owner_id: int, task_key: str, card: schemas.TaskCard
+) -> str:
+    """
+    The accumulated context for this work item, rendered on demand.
+
+    Keyed by work item rather than pull request, so a retry after a QA
+    rejection opens carrying the first attempt's discussion and the rejection
+    that caused it to exist. A task with no pull request yet has no brief to
+    build from and gets the ticket alone, which the driver's prompt states
+    outright rather than presenting an empty section as context.
+    """
+    if not card.pull_requests:
+        return ""
+    return context_brief.build(
+        db,
+        owner_id=owner_id,
+        repo=card.pull_requests[-1].repo,
+        pr_number=card.pull_requests[-1].pr_number,
+        ticket_key=task_key,
+    )
+
+
+def rejection_for(db: Session, owner_id: int, task_key: str) -> str | None:
+    """
+    The tester's own words, when the last QA verdict on this item was a
+    rejection.
+
+    Read from `communication_events`, which is where the QA loop records what
+    a tester actually said alongside the verdict the classifier reached -- the
+    thread row carries the correlation, not the reply. In the tester's words
+    rather than a summary: "it does not work" and the specific thing they tried
+    are very different amounts of help to whoever writes the fix.
+
+    Scoped to the whole work item, not one pull request, because the rejection
+    that matters is usually against the attempt before this one -- and to this
+    owner, with no fallback past them.
+
+    An owner-less retry was here, from the same workaround as the ones in
+    `report_sync.find_report` and `task_board._registration_for`. This one is
+    the worst of the set: the text it returns becomes the *primary goal* of the
+    authoring prompt, so another account's tester saying "this does not work"
+    would be handed to this account's coding agent as the thing to fix -- and,
+    on any hosted driver, sent to a third party. No rejection found is the
+    correct answer; the run then goes out as `initial`, which is what a work
+    item with no rejection is.
+    """
+    event = db.query(models.CommunicationEvent).filter(
+        models.CommunicationEvent.owner_id == owner_id,
+        models.CommunicationEvent.ticket_key == task_key,
+        models.CommunicationEvent.loop == "qa",
+        models.CommunicationEvent.direction == "received",
+        models.CommunicationEvent.outcome == "broken",
+    ).order_by(models.CommunicationEvent.created_at.desc()).first()
+
+    return (event.body or None) if event else None
+
+
+class StartRefused(Exception):
+    """
+    Why a run was not started, as data rather than an HTTP error.
+
+    The board endpoint raises 409/429/503 and the assignment sweep logs and
+    moves on, so the shared path cannot raise `HTTPException` -- a service that
+    did would make a background loop depend on a web framework to decide
+    whether to skip a ticket. `code` is what the router maps to a status.
+    """
+
+    def __init__(self, code: str, detail: str) -> None:
+        super().__init__(detail)
+        self.code = code
+        self.detail = detail
+
+
+async def start_for_card(
+    db: Session,
+    *,
+    owner_id: int,
+    card: schemas.TaskCard,
+    settings,
+    integration_configs: dict,
+    doc_url_hook=None,
+) -> tuple[authoring.AuthoringResult, int, str]:
+    """
+    Run the driver once against a work item, from a board card.
+
+    The single path from "this work item should be written" to the driver. The
+    board button and the assignment sweep both call it. Locus already holds the
+    rule that **both triggers reach the driver the same way, including the
+    board's button** -- and it exists because the webhook path was fixed to
+    continue an open pull request while the board path was not, so the same
+    click meant different things depending on which arm ran. A third caller
+    copying this orchestration would reintroduce that failure one arm at a time.
+
+    Raises `StartRefused` for every condition the caller must report rather
+    than proceed through: no repo, handed back, mode off, no driver, cap
+    reached. The caller decides whether that is a 409 or a log line.
+
+    Args:
+        doc_url_hook: Optional async callable taking the resolved repo and
+            returning a report URL for the pull request body. Passed in rather
+            than called here because creating the document is a *write*, and a
+            sweep must not make one per assigned ticket -- the same reason
+            `report_sync.ensure_for_ticket` is never called from the board
+            listing.
+
+    Returns:
+        (result, attempt number, trigger). The trigger is returned because it
+        is derived here and the caller reports it.
+    """
+    repo = card.pull_requests[0].repo if card.pull_requests else repo_from_card(card)
+    if not repo:
+        raise StartRefused(
+            "no_repo",
+            "This work item is not attached to a repository, so there is "
+            "nothing to write against. Link it to a repo or open a branch "
+            "from the issue first.",
+        )
+
+    if settings.handed_back:
+        raise StartRefused(
+            "handed_back",
+            "This work item was handed back: "
+            f"{settings.handed_back_reason or 'no reason recorded'}. "
+            "Switch it back to autonomous on the card to try again.",
+        )
+    if settings.authoring_mode != "autonomous":
+        raise StartRefused(
+            "mode_off",
+            "Autonomous mode is off for this work item "
+            f"(set by: {settings.sources.get('authoring_mode', 'unset')})",
+        )
+
+    driver = authoring.get_driver()
+    if driver.name == "none":
+        raise StartRefused(
+            "no_driver",
+            "No authoring driver configured. Choose one under Settings > "
+            "Automation > Agent runtime, or set LOCUS_AUTHORING_DRIVER.",
+        )
+
+    # A rework continues the pull request the reviewer already read; anything
+    # else cuts a fresh branch. `head_branch` returning None falls back to the
+    # previous behaviour, which is worse but is not a lost attempt.
+    continuing = pr_to_continue(card)
+    continue_branch = (
+        await head_branch(continuing.repo, continuing.pr_number, integration_configs)
+        if continuing
+        else None
+    )
+
+    # Resolved before the cap is consulted, because it decides whether the cap
+    # applies at all: the limit is on reviewer attention, and a rework spends
+    # none -- the reviewer is already reading that pull request.
+    if not continue_branch and authoring.throughput_exceeded(
+        db, owner_id=owner_id, repo=repo
+    ):
+        raise StartRefused(
+            "cap",
+            f"{authoring.max_open_autonomous_prs()} agent-authored pull "
+            f"requests are already open on {repo}. Reviewer attention is "
+            "what this mode spends; land or close one first.",
+        )
+
+    attempt = authoring.next_attempt_number(
+        db, owner_id=owner_id, ticket_key=card.key
+    )
+
+    doc_url = await doc_url_hook(repo) if doc_url_hook else None
+
+    continuing_repo = continuing.repo if continuing else repo
+    continuing_pr_num = continuing.pr_number if continuing else None
+
+    asks = authoring.gather_asks(
+        db, owner_id=owner_id, ticket_key=card.key,
+        repo=continuing_repo, pr_number=continuing_pr_num,
+    )
+    rejection = rejection_for(db, owner_id, card.key)
+
+    continuing_state = (
+        getattr(continuing.review_state, "value", continuing.review_state)
+        if continuing
+        else None
+    )
+    is_changes_requested = bool(
+        continue_branch
+        and continuing
+        and (
+            continuing_state in (
+                "changes_requested",
+                "awaiting_review",
+                schemas.ReviewState.changes_requested,
+                schemas.ReviewState.awaiting_review,
+            )
+            or bool(asks)
+        )
+    )
+    trigger = (
+        "changes_requested"
+        if is_changes_requested
+        else ("qa_rejected" if rejection else "initial")
+    )
+
+    request = authoring.AuthoringRequest(
+        # The stored title is a previous run's output and already carries the
+        # key the driver re-adds, so it is stripped before going back out.
+        title=(
+            bare_title(continuing.title or card.title, card.key)
+            if continuing and continue_branch
+            else card.title
+        ),
+        ticket_key=card.key,
+        description=card.description,
+        repo=repo,
+        existing_branch=(
+            continue_branch
+            or (card.linked_branches[0].name if card.linked_branches else None)
+        ),
+        context=context_for(db, owner_id, card.key, card),
+        asks=asks,
+        rejection=rejection,
+        attempt=attempt,
+        # Recorded on the attempt and stated in the pull request body, so the
+        # trigger has to describe what the run is answering rather than which
+        # arm started it.
+        trigger=trigger,
+        settings={
+            "source_path": settings.source_path,
+            "prepare_command": settings.prepare_command,
+            "test_command": settings.test_command,
+            # What the test gate consults on a failure: with attempts left it
+            # opens nothing and retries, on the last one it opens the pull
+            # request anyway with the failure stated.
+            "attempts_remaining": max(
+                0, settings.autonomous_max_rounds + 1 - attempt
+            ),
+            "doc_url": doc_url,
+        },
+    ).scoped()
+
+    # Marked as running before the driver is invoked: the call below takes
+    # minutes, and until it returns the board would otherwise show this work
+    # item as merely `assigned` -- indistinguishable from one nobody started.
+    started = authoring.begin_attempt(db, owner_id=owner_id, request=request)
+
+    try:
+        result = await driver.author(request, integration_configs)
+    except Exception as exc:
+        # The board endpoint let this propagate as a 500. A sweep cannot: one
+        # ticket whose driver raised must not stop the rest, and the attempt is
+        # spent either way, so it is recorded as the failure it is.
+        logger.warning("Authoring run failed for %s: %s", card.key, exc)
+        result = authoring.AuthoringResult(
+            opened=False, error=f"The driver raised: {exc}", driver=driver.name
+        )
+
+    authoring.record_attempt(
+        db, owner_id=owner_id, request=request, result=result, started=started
+    )
+
+    if result.hand_back_reason:
+        # Persisted before anything is announced. Announcing a handoff that did
+        # not persist re-triggers the driver on the next event.
+        authoring.hand_back(
+            db, owner_id=owner_id, ticket_key=card.key,
+            reason=result.hand_back_reason,
+        )
+
+    return result, attempt, trigger

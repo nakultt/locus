@@ -24,6 +24,7 @@ from app.routers import (
     webhooks,
 )
 from app.services.worker import (
+    assignment_loop,
     calendar_agent_loop,
     merge_gate_loop,
     qa_email_loop,
@@ -41,6 +42,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(qa_email_loop()),
         asyncio.create_task(merge_gate_loop()),
         asyncio.create_task(calendar_agent_loop()),
+        asyncio.create_task(assignment_loop()),
     ]
     try:
         yield

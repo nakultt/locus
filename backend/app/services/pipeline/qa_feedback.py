@@ -24,6 +24,16 @@ Ambiguity is a first-class outcome. "The retry works but the timeout is 30s
 now?" is neither pass nor fail, and guessing either way is worse than asking:
 a wrong reopen reverses a merge decision, a wrong dismissal buries a real bug.
 The PR author is notified instead.
+
+A classifier that could not run is not an ambiguous reply, and the two are
+reported separately. "Unclear" is a claim about the tester's words -- it says
+they were read and were genuinely mixed -- where an unreachable model backend
+says nothing about them at all. Collapsing the second into the first put
+"Unclear QA feedback, someone should take a look" in front of a team whose
+tester had written a flat "didn't work", which reads as the reply being at
+fault rather than the pipeline, and buries the one thing anybody could act on:
+the model server was down. This is the same rule the scan comment follows,
+where a pass that failed is never rendered as a pass that found nothing.
 """
 
 import json
@@ -32,9 +42,10 @@ from enum import Enum
 
 import httpx
 
-from app.services.chat.llm import get_llm
+from app.services.chat.llm import get_llm, message_text
 from app.services.integrations import project_board
 from app.services.pipeline.merge_actions import close_github_issue, transition_jira_ticket
+from app.services.pipeline.pr_agent import work_item_keys_for
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +58,9 @@ class Verdict(str, Enum):
     UNCLEAR = "unclear"
     # Chatter that is not feedback at all ("thanks!", "looking now").
     NOT_FEEDBACK = "not_feedback"
+    # No verdict was reached, because the classifier could not be run. Not a
+    # statement about the reply -- see the module docstring.
+    UNAVAILABLE = "unavailable"
 
 
 CLASSIFIER_PROMPT = """A tester replied to a notification about a merged code change.
@@ -73,13 +87,21 @@ Return ONLY JSON:
 {{"verdict": "broken|works|unclear|not_feedback", "reason": "one short sentence"}}"""
 
 
+def _describe(exc: BaseException) -> str:
+    """A message for an exception, even when it has none."""
+    return str(exc) or exc.__class__.__name__
+
+
 async def classify_reply(reply_text: str) -> tuple[Verdict, str]:
     """
     Decide what a QA reply reports.
 
     Returns:
-        (verdict, one-line reason). Unparseable output yields UNCLEAR, so a
-        model failure surfaces to a human rather than triggering an action.
+        (verdict, one-line reason). Output the model produced but that could
+        not be read yields UNCLEAR -- the reply was classified and the answer
+        was unusable. A model that could not be reached at all yields
+        UNAVAILABLE, which is not a verdict: nothing read the reply, so
+        nothing can be said about it. Neither triggers a state change.
     """
     if not reply_text or not reply_text.strip():
         return Verdict.NOT_FEEDBACK, "Empty reply"
@@ -87,8 +109,7 @@ async def classify_reply(reply_text: str) -> tuple[Verdict, str]:
     try:
         llm = get_llm(temperature=0)
         response = await llm.ainvoke(CLASSIFIER_PROMPT.format(reply=reply_text[:2000]))
-        content = response.content
-        text = (content if isinstance(content, str) else str(content)).strip()
+        text = message_text(response).strip()
 
         # Local models frequently wrap JSON in a markdown fence.
         if text.startswith("```"):
@@ -105,7 +126,7 @@ async def classify_reply(reply_text: str) -> tuple[Verdict, str]:
         return Verdict.UNCLEAR, "Could not interpret the reply"
     except Exception as e:
         logger.warning("QA classifier failed: %s", e)
-        return Verdict.UNCLEAR, f"Classifier unavailable: {e}"
+        return Verdict.UNAVAILABLE, _describe(e)
 
 
 async def reopen_jira_ticket(
@@ -212,24 +233,44 @@ async def notify_pr_author(
     pr_url: str,
     reply_text: str,
     reason: str,
+    *,
+    unavailable: bool = False,
 ) -> bool:
     """
-    Ask a human to judge an ambiguous reply.
+    Ask a human to judge a reply the pipeline will not act on.
 
     Posted into the same thread so the question sits with the reply it is about.
+
+    `unavailable` switches the claim being made. Without it the message says
+    the reply was read and was ambiguous; with it, the message says nothing
+    about the reply at all, because nothing read it -- it names the classifier
+    as the thing that failed and asks for the verdict rather than for an
+    opinion on the wording. Rendering the second as the first blames the
+    tester for the pipeline's own outage, and hides the only actionable fact
+    there is.
     """
     credentials = slack_config.get("credentials", {}) or {}
     bot_token = credentials.get("bot_token") or slack_config.get("api_key", "")
     if not bot_token:
         return False
 
-    text = (
-        f":grey_question: Unclear QA feedback on <{pr_url}|this PR> — "
-        f"someone should take a look.\n"
-        f"> {reply_text[:300]}\n"
-        f"_{reason}_\n"
-        f"No ticket was changed."
-    )
+    if unavailable:
+        text = (
+            f":warning: A QA reply on <{pr_url}|this PR> could not be "
+            f"classified: the model backend did not answer, so this is *not* "
+            f"a judgement about the reply.\n"
+            f"> {reply_text[:300]}\n"
+            f"_Classifier unavailable: {reason}_\n"
+            f"Nothing was changed. Read the reply and reopen or sign off by hand."
+        )
+    else:
+        text = (
+            f":grey_question: Unclear QA feedback on <{pr_url}|this PR> — "
+            f"someone should take a look.\n"
+            f"> {reply_text[:300]}\n"
+            f"_{reason}_\n"
+            f"No ticket was changed."
+        )
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
@@ -349,11 +390,14 @@ async def handle_qa_reply(
 
         return outcome
 
-    if verdict == Verdict.UNCLEAR:
+    # Both escalate to a human and neither changes any state; they differ only
+    # in what the message claims, which is the entire reason they are separate.
+    if verdict in (Verdict.UNCLEAR, Verdict.UNAVAILABLE):
         if slack_channel and "slack" in integration_configs:
             outcome["author_notified"] = await notify_pr_author(
                 integration_configs["slack"], slack_channel, thread_ts,
                 pr_url, reply_text, reason,
+                unavailable=verdict == Verdict.UNAVAILABLE,
             )
         return outcome
 
@@ -414,13 +458,23 @@ async def handle_qa_reply(
     # `work_item.resolve_key` and `sibling_reviews` were built for -- the new
     # PR inherits the rejection history for free, so the fix opens carrying the
     # reason the work came back.
-    if db is not None and owner_id is not None and ticket_keys:
+    #
+    # Keyed through `pr_agent.work_item_keys`, not off `ticket_keys` alone.
+    # This guarded on `ticket_keys` being non-empty, which is only ever
+    # populated from a tracker -- so on a repository whose work items are
+    # GitHub issues, the ordinary case here, the rejection reopened the issue
+    # and then silently did nothing. The tester's "didn't work" was recorded,
+    # the ticket came back, and no agent was ever asked to fix it. That is the
+    # third place the definition of "which work item" was written out by hand,
+    # and the invariant exists because the previous two disagreed.
+    work_keys = work_item_keys_for(repo, ticket_keys, issue_numbers)
+    if db is not None and owner_id is not None and work_keys:
         await _maybe_author_fix(
             db,
             owner_id=owner_id,
             repo=repo,
             pr_number=pr_number,
-            ticket_keys=ticket_keys,
+            ticket_keys=work_keys,
             rejection=reply_text,
             integration_configs=integration_configs,
             review_slack_channel=review_slack_channel or slack_channel,
@@ -464,7 +518,13 @@ async def _maybe_author_fix(
                 models.RepoWebhook.owner_id == owner_id,
             ).first()
             settings = resolve_settings(db, owner_id, registration, ticket_key=key)
+            # Both switches, as on the review path. The mode says the agent may
+            # write this item; the trigger says nobody has to press the button.
+            # With the trigger off the reopen still happens and the board still
+            # shows "Fix after testing" -- what changes is only who starts it.
             if settings.authoring_mode != "autonomous":
+                continue
+            if not settings.auto_start_on_qa:
                 continue
 
             result = await authoring_flow.maybe_retry(

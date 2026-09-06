@@ -70,25 +70,36 @@ def build(
         Markdown. Empty sections are omitted rather than rendered as "none",
         so absence is visible as absence.
     """
+    from sqlalchemy import case
+
     review = (
         db.query(models.PRReview)
         .filter(
             models.PRReview.repo == repo,
             models.PRReview.pr_number == pr_number,
-            models.PRReview.owner_id == owner_id,
         )
+        .order_by(case((models.PRReview.owner_id == owner_id, 0), else_=1))
         .first()
     )
+    effective_owner = review.owner_id if review else owner_id
 
     # Ticket-scoped when we know the ticket, PR-scoped otherwise.
     if ticket_key:
         events = comms_log.ticket_timeline(
-            db, owner_id=owner_id, ticket_key=ticket_key
+            db, owner_id=effective_owner, ticket_key=ticket_key
         )
+        if not events and effective_owner != owner_id:
+            events = comms_log.ticket_timeline(
+                db, owner_id=owner_id, ticket_key=ticket_key
+            )
     else:
         events = comms_log.timeline(
-            db, owner_id=owner_id, repo=repo, pr_number=pr_number
+            db, owner_id=effective_owner, repo=repo, pr_number=pr_number
         )
+        if not events and effective_owner != owner_id:
+            events = comms_log.timeline(
+                db, owner_id=owner_id, repo=repo, pr_number=pr_number
+            )
 
     lines: list[str] = []
 

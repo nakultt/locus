@@ -565,6 +565,16 @@ function AgentTab({
     (pr) => pr.review_state && pr.review_state !== "merged" && pr.review_state !== "closed"
   );
 
+  // The third case, and the one this used to get wrong. After the testing team
+  // rejects a merged change there is no open pull request to continue — the
+  // last one merged — so `reworking` is undefined and the button fell through
+  // to "Write it now", promising to start over. The backend does not start
+  // over: `_rejection_for` finds the tester's words and the run goes out as
+  // `qa_rejected`, with the rejection as its goal. Same reasoning as above,
+  // one state along: the label has to say what the click will actually do.
+  const fixingAfterQA =
+    !reworking && card.items.some((item) => item.kind === "qa_rejected");
+
   return (
     <div className="space-y-6">
       {/* Autonomy is a judgement about *this* work item — a dependency bump
@@ -610,11 +620,17 @@ function AgentTab({
               title={
                 reworking
                   ? `The agent pushes to the branch #${reworking.pr_number} is on, answering what the reviewer asked for. No second pull request is opened.`
-                  : "The agent cuts a branch and opens a pull request."
+                  : fixingAfterQA
+                    ? "The agent fixes what the tester reported and opens a new pull request. The last one merged, so there is no branch to push to."
+                    : "The agent cuts a branch and opens a pull request."
               }
             >
               {!busy && <Play aria-hidden />}
-              {reworking ? `Rework #${reworking.pr_number}` : "Write it now"}
+              {reworking
+                ? `Rework #${reworking.pr_number}`
+                : fixingAfterQA
+                  ? "Fix after testing"
+                  : "Write it now"}
             </Button>
           )}
         </div>

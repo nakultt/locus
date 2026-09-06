@@ -936,14 +936,27 @@ def work_item_keys(context, repo: str) -> list[str]:
     any PR existed -- was never written to again, so it still read "No pull
     request has been opened for this work yet" long after the work had merged.
     """
-    return (
-        [t.key for t in context.tickets]
-        or [
-            f"{repo}#{i.number}"
-            for i in context.linked_issues
-            if i.relation == "closes"
-        ]
+    return work_item_keys_for(
+        repo,
+        [t.key for t in context.tickets],
+        [i.number for i in context.linked_issues if i.relation == "closes"],
     )
+
+
+def work_item_keys_for(
+    repo: str, ticket_keys: list[str], issue_numbers: list[int]
+) -> list[str]:
+    """
+    The same rule, for a caller holding the raw pieces rather than a context.
+
+    The QA path is one: it is handed the ticket keys and issue numbers off the
+    stored `QAThread` and has no analysis context to read. It applied the
+    tracker half only, so on a repository whose work items are GitHub issues
+    the rejection reopened the issue and then never triggered the rework --
+    silently, because an empty key list is indistinguishable from a work item
+    that opted out of autonomous authoring.
+    """
+    return list(ticket_keys) or [f"{repo}#{number}" for number in issue_numbers]
 
 
 # Which pipeline errors belong to which section of the comment. Matched on the

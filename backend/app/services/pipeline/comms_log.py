@@ -277,16 +277,6 @@ def ticket_timeline(
         )
         .all()
     )
-    if not events:
-        events = (
-            db.query(models.CommunicationEvent)
-            .filter(models.CommunicationEvent.ticket_key == ticket_key)
-            .order_by(
-                models.CommunicationEvent.created_at,
-                models.CommunicationEvent.id,
-            )
-            .all()
-        )
     return events
 
 
@@ -334,15 +324,6 @@ def work_item_history(
         )
         .all()
     )
-    if not own:
-        own = (
-            db.query(models.CommunicationEvent)
-            .filter(
-                models.CommunicationEvent.repo == repo,
-                models.CommunicationEvent.pr_number == pr_number,
-            )
-            .all()
-        )
     for event in own:
         event.inherited = False
 
@@ -363,12 +344,6 @@ def work_item_history(
             )
             .all()
         )
-        if not inherited_events:
-            inherited_events = (
-                db.query(models.CommunicationEvent)
-                .filter(models.CommunicationEvent.ticket_key == ticket_key)
-                .all()
-            )
 
         for event in inherited_events:
             if event.id in seen_ids:
@@ -413,15 +388,6 @@ def timeline(
         )
         .all()
     )
-    if not own:
-        own = (
-            db.query(models.CommunicationEvent)
-            .filter(
-                models.CommunicationEvent.repo == repo,
-                models.CommunicationEvent.pr_number == pr_number,
-            )
-            .all()
-        )
     for event in own:
         event.inherited = False
 
@@ -440,18 +406,6 @@ def timeline(
             )
             .all()
         )
-        if not inherited:
-            inherited = (
-                db.query(models.CommunicationEvent)
-                .filter(
-                    models.CommunicationEvent.ticket_key == ticket_key,
-                    models.CommunicationEvent.pr_number != pr_number,
-                    models.CommunicationEvent.channel == "slack",
-                    models.CommunicationEvent.direction == "received",
-                    models.CommunicationEvent.body.isnot(None),
-                )
-                .all()
-            )
         # Deduplicated against what this PR already recorded: the same Slack
         # message can be stored under two PRs on the same ticket, and showing
         # it twice would read as two people saying it.

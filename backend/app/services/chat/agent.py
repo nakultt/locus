@@ -14,7 +14,7 @@ from langchain_core.tools import BaseTool
 
 from app.core.datetimes import now_in, resolve_timezone
 from app.schemas import ActionResult, ChatResponse
-from app.services.chat.llm import get_llm
+from app.services.chat.llm import get_llm, message_text
 from app.services.chat.task_planner import TaskStatus, parse_tasks_from_message
 from app.services.integrations.bugasura import get_bugasura_tools
 from app.services.integrations.calendar import get_calendar_tools
@@ -451,15 +451,10 @@ def final_text(messages: list[BaseMessage]) -> str:
     """Return the agent's last assistant message."""
     for message in reversed(messages):
         if isinstance(message, AIMessage) and message.content:
-            content = message.content
-            if isinstance(content, str):
-                return content
-            # Some providers return content as a list of blocks.
-            return "".join(
-                part.get("text", "")
-                for part in content
-                if isinstance(part, dict)
-            )
+            # One implementation of "what did the model say", shared with every
+            # analysis pass. This one was always correct; the seven parsers in
+            # the pipeline each had their own copy that was not.
+            return message_text(message)
     return ""
 
 

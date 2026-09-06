@@ -90,16 +90,6 @@ def _thread_key(db: Session, thread: models.QAThread) -> str:
         .first()
     )
 
-    if review is None:
-        review = (
-            db.query(models.PRReview)
-            .filter(
-                models.PRReview.repo == thread.repo,
-                models.PRReview.pr_number == thread.pr_number,
-            )
-            .first()
-        )
-
     if review is not None:
         return _task_key(review)
 

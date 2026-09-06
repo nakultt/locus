@@ -22,7 +22,7 @@ from app import models, schemas
 from app.core.database import get_db
 from app.core.dependencies import get_current_user, get_integration_configs
 from app.services.authoring import authoring, authoring_flow
-from app.services.pipeline import context_brief, report_sync, task_board
+from app.services.pipeline import report_sync, task_board
 from app.services.pipeline.agent_settings import resolve_settings
 
 router = APIRouter()
@@ -460,7 +460,9 @@ async def author_task(
     That last sentence is why this runs a *rework* when the work item already
     has an open pull request rather than always starting fresh: the two
     triggers reach the same driver, so a click and a changes-requested webhook
-    must land in the same place. See `_pr_to_continue`.
+    must land in the same place. Every arm now shares
+    `authoring_flow.start_for_card`, which is what makes that structural
+    rather than a rule two files have to keep agreeing on.
     """
     integration_configs = get_integration_configs(db, current_user.id)
     board = await task_board.build(
@@ -472,182 +474,75 @@ async def author_task(
             status_code=status.HTTP_404_NOT_FOUND, detail="Task not found"
         )
 
-    repo = card.pull_requests[0].repo if card.pull_requests else _repo_from_card(card)
-    if not repo:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                "This work item is not attached to a repository, so there is "
-                "nothing to write against. Link it to a repo or open a branch "
-                "from the issue first."
-            ),
-        )
-
-    registration = db.query(models.RepoWebhook).filter(
-        models.RepoWebhook.repo == repo,
-        models.RepoWebhook.owner_id == current_user.id,
-    ).first()
+    repo = (
+        card.pull_requests[0].repo
+        if card.pull_requests
+        else authoring_flow.repo_from_card(card)
+    )
+    registration = None
+    if repo:
+        # This account's registration, with no fallback past the owner.
+        #
+        # A fallback to "any registration for this repo" was here, from the
+        # same workaround as the one in `report_sync.find_report`: a board
+        # running as one account while the pipeline state belonged to another.
+        # It is worse than a cross-user read. `resolve_settings` turns a
+        # registration into `source_path`, `prepare_command` and
+        # `test_command` -- a path on this server and two shell commands run
+        # in the workspace -- so borrowing another account's row means running
+        # their commands against their source tree on a click from someone who
+        # never saw either.
+        #
+        # An unregistered repo resolves to the account's own defaults, which
+        # is the correct answer and the case `PRAgentDefaults` exists for.
+        registration = db.query(models.RepoWebhook).filter(
+            models.RepoWebhook.repo == repo,
+            models.RepoWebhook.owner_id == current_user.id,
+        ).first()
     settings = resolve_settings(db, current_user.id, registration, ticket_key=task_key)
 
-    # The guards, in order. Each names what would have to change.
-    if settings.handed_back:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                "This work item was handed back: "
-                f"{settings.handed_back_reason or 'no reason recorded'}. "
-                "Switch it back to autonomous on the card to try again."
-            ),
-        )
-    if settings.authoring_mode != "autonomous":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                "Autonomous mode is off for this work item "
-                f"(set by: {settings.sources.get('authoring_mode', 'unset')})"
-            ),
-        )
-
-    driver = authoring.get_driver()
-    if driver.name == "none":
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(
-                "No authoring driver configured. Choose one under Settings > "
-                "Automation > Agent runtime, or set LOCUS_AUTHORING_DRIVER."
-            ),
-        )
-
-    # A rework continues the pull request the reviewer already read.
-    #
-    # This button used to pass the issue's linked branch or nothing at all,
-    # which meant the driver cut `locus/<key>-<attempt>` and opened a *second*
-    # pull request: the changes-requested review stayed on the first,
-    # `PRReview.round_number` stopped tracking the round trip, and the
-    # abandoned PR pinned the task's stage. The webhook path was fixed for
-    # exactly this and the board path was not, so the same click meant
-    # different things depending on which arm reached the driver.
-    #
-    # `head_branch` returning None falls back to the previous behaviour, which
-    # is worse but is not a lost attempt.
-    continuing = _pr_to_continue(card)
-    continue_branch = (
-        await authoring_flow.head_branch(
-            continuing.repo, continuing.pr_number, integration_configs
-        )
-        if continuing
-        else None
-    )
-
-    # Resolved before the cap is consulted, because it decides whether the cap
-    # applies at all: the limit is on reviewer attention, and a rework spends
-    # none -- the reviewer is already reading that pull request. Refusing here
-    # was the worst possible answer, since the usual way to reach the cap is
-    # duplicates this endpoint opened before it learned to rework.
-    if not continue_branch and authoring.throughput_exceeded(
-        db, owner_id=current_user.id, repo=repo
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=(
-                f"{authoring.max_open_autonomous_prs()} agent-authored pull "
-                f"requests are already open on {repo}. Reviewer attention is "
-                "what this mode spends; land or close one first."
-            ),
-        )
-
-    attempt = authoring.next_attempt_number(
-        db, owner_id=current_user.id, ticket_key=task_key
-    )
-    # The report link goes in the pull request body: a Google Doc nobody links
-    # to is work nobody reads, and the analysis behind the ticket is where the
-    # requirement context lives. A failure to fetch it costs the link, never
-    # the run.
-    detail_doc_url = await report_sync.ensure_for_ticket(
-        db,
-        owner_id=current_user.id,
-        key=task_key,
-        title=card.title,
-        integration_configs=integration_configs,
-        url=card.url,
-        status=card.status,
-        assignee=card.assignee,
-        priority=card.priority,
-        description=card.description,
-        repo=repo,
-    )
-    request = authoring.AuthoringRequest(
-        # The stored title is a previous run's output and already carries the
-        # key the driver re-adds, so it is stripped before going back out.
-        title=(
-            authoring_flow.bare_title(continuing.title or card.title, task_key)
-            if continuing and continue_branch
-            else card.title
-        ),
-        ticket_key=task_key,
-        description=card.description,
-        repo=repo,
-        existing_branch=(
-            continue_branch
-            or (card.linked_branches[0].name if card.linked_branches else None)
-        ),
-        context=_context_for(db, current_user.id, task_key, card),
-        asks=authoring.gather_asks(
-            db, owner_id=current_user.id, ticket_key=task_key,
-            repo=continuing.repo if continuing else repo,
-            pr_number=continuing.pr_number if continuing else None,
-        ),
-        rejection=_rejection_for(db, current_user.id, task_key),
-        attempt=attempt,
-        # Recorded on the attempt and stated in the pull request body, so the
-        # trigger has to describe what the run is answering rather than which
-        # arm started it. A manual click on a changes-requested pull request is
-        # a rework whoever pressed it.
-        trigger=(
-            "changes_requested"
-            if (
-                continue_branch
-                and continuing
-                and continuing.review_state
-                is schemas.ReviewState.changes_requested
-            )
-            else "initial"
-        ),
-        settings={
-            "source_path": settings.source_path,
-            "prepare_command": settings.prepare_command,
-            "test_command": settings.test_command,
-            # What the test gate consults on a failure: with attempts left it
-            # opens nothing and retries, on the last one it opens the pull
-            # request anyway with the failure stated.
-            "attempts_remaining": max(
-                0, settings.autonomous_max_rounds + 1 - attempt
-            ),
-            "doc_url": detail_doc_url,
-        },
-    ).scoped()
-
-    # Marked as running before the driver is invoked: the call below takes
-    # minutes, and until it returns the board would otherwise show this work
-    # item as merely `assigned` -- indistinguishable from one nobody started.
-    started = authoring.begin_attempt(
-        db, owner_id=current_user.id, request=request
-    )
-    result = await driver.author(request, integration_configs)
-    authoring.record_attempt(
-        db, owner_id=current_user.id, request=request, result=result,
-        started=started,
-    )
-
-    if result.hand_back_reason:
-        # Persisted before anything is announced. Announcing a handoff that did
-        # not persist re-triggers the driver on the next event.
-        authoring.hand_back(
+    async def _doc_url(resolved_repo: str) -> str | None:
+        # The report link goes in the pull request body: a Google Doc nobody
+        # links to is work nobody reads, and the analysis behind the ticket is
+        # where the requirement context lives. A failure to fetch it costs the
+        # link, never the run.
+        #
+        # Passed as a hook rather than done inside the shared path, because
+        # creating the document is a write and the assignment sweep must not
+        # make one per assigned ticket -- the same reason
+        # `report_sync.ensure_for_ticket` is never called from the board
+        # listing. A click is one deliberate act; a sweep is not.
+        return await report_sync.ensure_for_ticket(
             db,
             owner_id=current_user.id,
-            ticket_key=task_key,
-            reason=result.hand_back_reason,
+            key=task_key,
+            title=card.title,
+            integration_configs=integration_configs,
+            url=card.url,
+            status=card.status,
+            assignee=card.assignee,
+            priority=card.priority,
+            description=card.description,
+            repo=resolved_repo,
         )
+
+    try:
+        result, attempt, _trigger = await authoring_flow.start_for_card(
+            db,
+            owner_id=current_user.id,
+            card=card,
+            settings=settings,
+            integration_configs=integration_configs,
+            doc_url_hook=_doc_url,
+        )
+    except authoring_flow.StartRefused as refused:
+        # The shared path reports a refusal as data so the assignment sweep can
+        # skip a work item without a web framework deciding for it. This is
+        # where it becomes a status code.
+        raise HTTPException(
+            status_code=_REFUSAL_STATUS.get(refused.code, status.HTTP_409_CONFLICT),
+            detail=refused.detail,
+        ) from None
 
     _assigned_cache.pop(current_user.id, None)
 
@@ -668,93 +563,15 @@ async def author_task(
     )
 
 
-def _pr_to_continue(card: schemas.TaskCard) -> schemas.TaskPullRequest | None:
-    """
-    The open pull request a manual run should push to, if there is one.
-
-    In flight means open, not merely un-merged -- the same rule
-    `task_board._derive_stage` reads the board by. A merged pull request is
-    finished and a closed one was abandoned or superseded; pushing to either
-    puts commits somewhere nobody is looking. Everything else is a pull request
-    a reviewer either has read or is being asked to read, and the branch it is
-    on is where the next attempt belongs.
-
-    The latest is taken when several are open, which matches `_derive_stage`
-    consulting the furthest state among them: two open pull requests on one
-    work item is already unusual, and the newest is the one carrying the
-    current attempt.
-    """
-    finished = {schemas.ReviewState.merged, schemas.ReviewState.closed}
-    open_prs = [
-        pr
-        for pr in card.pull_requests
-        if pr.review_state is not None and pr.review_state not in finished
-    ]
-    return open_prs[-1] if open_prs else None
+# What each refusal from the shared path means over HTTP. Kept beside the
+# endpoint rather than in the service: the service's job is to say why it
+# declined, and only a web caller cares which number that is.
+_REFUSAL_STATUS = {
+    "no_repo": status.HTTP_409_CONFLICT,
+    "handed_back": status.HTTP_409_CONFLICT,
+    "mode_off": status.HTTP_409_CONFLICT,
+    "no_driver": status.HTTP_503_SERVICE_UNAVAILABLE,
+    "cap": status.HTTP_429_TOO_MANY_REQUESTS,
+}
 
 
-def _repo_from_card(card: schemas.TaskCard) -> str | None:
-    """
-    The repo a work item belongs to when it has no pull request yet.
-
-    A linked branch names one, and a GitHub issue key is `owner/repo#N`. A Jira
-    ticket with neither genuinely has no repo, and saying so beats guessing --
-    pointing the agent at the wrong codebase produces a confident, entirely
-    wrong pull request.
-    """
-    for branch in card.linked_branches:
-        if branch.repo:
-            return branch.repo
-    if "#" in card.key:
-        candidate = card.key.rsplit("#", 1)[0]
-        if "/" in candidate:
-            return candidate
-    return None
-
-
-def _context_for(
-    db: Session, owner_id: int, task_key: str, card: schemas.TaskCard
-) -> str:
-    """
-    The accumulated context for this work item, rendered on demand.
-
-    Keyed by work item rather than pull request, so a retry after a QA
-    rejection opens carrying the first attempt's discussion and the rejection
-    that caused it to exist. A task with no pull request yet has no brief to
-    build from and gets the ticket alone, which the driver's prompt states
-    outright rather than presenting an empty section as context.
-    """
-    if not card.pull_requests:
-        return ""
-    return context_brief.build(
-        db,
-        owner_id=owner_id,
-        repo=card.pull_requests[-1].repo,
-        pr_number=card.pull_requests[-1].pr_number,
-        ticket_key=task_key,
-    )
-
-
-def _rejection_for(db: Session, owner_id: int, task_key: str) -> str | None:
-    """
-    The tester's own words, when the last QA verdict on this item was a
-    rejection.
-
-    Read from `communication_events`, which is where the QA loop records what
-    a tester actually said alongside the verdict the classifier reached -- the
-    thread row carries the correlation, not the reply. In the tester's words
-    rather than a summary: "it does not work" and the specific thing they tried
-    are very different amounts of help to whoever writes the fix.
-
-    Scoped to the whole work item, not one pull request, because the rejection
-    that matters is usually against the attempt before this one.
-    """
-    event = db.query(models.CommunicationEvent).filter(
-        models.CommunicationEvent.owner_id == owner_id,
-        models.CommunicationEvent.ticket_key == task_key,
-        models.CommunicationEvent.loop == "qa",
-        models.CommunicationEvent.direction == "received",
-        models.CommunicationEvent.outcome == "broken",
-    ).order_by(models.CommunicationEvent.created_at.desc()).first()
-
-    return (event.body or None) if event else None
