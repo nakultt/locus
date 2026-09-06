@@ -15,6 +15,7 @@ import {
   SlidersHorizontal,
 } from "lucide-react";
 import { useAuth } from "@/features/auth/auth-context";
+import { timeAgo } from "@/lib/datetime";
 import {
   getPRAgentSummary,
   getTaskBoard,
@@ -35,6 +36,7 @@ import {
   SkeletonRows,
 } from "@/components/ui/surface";
 import { useToast } from "@/components/ui/toast";
+import { boardCache } from "./board-cache";
 import { TaskRow } from "./task-row";
 import { TaskSheet } from "./task-sheet";
 import { JobRow } from "./runs";
@@ -92,6 +94,11 @@ export default function TasksView() {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<TaskCard | null>(null);
   const [showRuns, setShowRuns] = useState(false);
+  // When the board on screen came out of browser storage rather than from the
+  // backend. Cleared by the first live response, which is always in flight
+  // beside it -- so this is a label on the second before that lands, not a
+  // mode the page can get stuck in.
+  const [restoredAt, setRestoredAt] = useState<string | null>(null);
 
   const refresh = useCallback(
     async (forceAssigned = false) => {
@@ -103,9 +110,14 @@ export default function TasksView() {
           getPRAgentSummary(),
           listPRJobs(),
         ]);
-        setBoard(normalise(b));
+        const fresh = normalise(b);
+        setBoard(fresh);
         setSummary(s);
         setJobs(Array.isArray(j) ? j : []);
+        // Live data is on screen, so the restored copy is no longer what is
+        // being shown and the notice comes down.
+        setRestoredAt(null);
+        boardCache.write(userId, fresh);
       } catch (e) {
         toast.error(
           "Could not load your work",
@@ -118,6 +130,28 @@ export default function TasksView() {
     },
     [userId, toast]
   );
+
+  // Paint the last board this browser saw, then let the request already in
+  // flight replace it.
+  //
+  // Read here rather than in a `useState` initializer, which is the same rule
+  // `AuthContext` follows and for the same reason: Next runs the initializer
+  // on the server, where there is no storage, so the first client render would
+  // disagree with the markup the server sent. Reading on mount happens after
+  // hydration, where storage exists.
+  useEffect(() => {
+    if (!userId) return;
+    const cached = boardCache.read(userId);
+    if (!cached) return;
+    // Only ever as a placeholder. A live response that has already landed is
+    // the better answer and must not be overwritten by an older one.
+    setBoard((current) => {
+      if (current) return current;
+      setRestoredAt(cached.storedAt);
+      return cached.value;
+    });
+    setLoading(false);
+  }, [userId]);
 
   useEffect(() => {
     refresh();
@@ -217,6 +251,22 @@ export default function TasksView() {
           </>
         }
       />
+
+      {/* Said out loud, for the same reason a source that did not answer is:
+          this board is what someone reads to decide what to work on, and a
+          stored copy shown silently is indistinguishable from a live one. It
+          clears itself the moment the response lands, which is normally within
+          a second of the page appearing. */}
+      {restoredAt && (
+        <Notice
+          tone="info"
+          className="mt-4"
+          icon={<History aria-hidden />}
+          title={`Showing your board as of ${timeAgo(restoredAt)}`}
+        >
+          Fetching the current one now.
+        </Notice>
+      )}
 
       {/* What to do first, while anything is still missing. A new account
           otherwise lands on "Nothing is assigned to you", which is true and

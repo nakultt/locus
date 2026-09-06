@@ -170,11 +170,79 @@ def normalize_mode(value: str | None) -> str | None:
     return cleaned if cleaned in VALID_AUTHORING_MODES else "assisted"
 
 
+class SettingsPrefetch:
+    """
+    Every row a resolve would read for one board, loaded once up front.
+
+    Resolution still happens in `resolve_settings` and nowhere else -- this
+    supplies the same rows it would have fetched, it does not decide anything.
+    That distinction is the whole design: a cache that answered questions
+    would be a second arbiter, and two arbiters drift.
+
+    It exists because the account defaults row is *one row* and the board was
+    reading it once per card, along with a registration and a work-item row
+    each. Twenty-four round trips to read three rows and two lookups was free
+    against a local database and is a second and a half against a hosted one.
+
+    Scoped to a single build and thrown away with it. Nothing is held between
+    requests, so a setting saved now is read on the next board -- a cache that
+    outlived the request would show a saved setting as not having saved, which
+    is the failure this module is most careful about elsewhere.
+
+    Scoping to `owner_id` is not an optimisation detail: `resolve_settings`
+    turns a registration into `source_path`, `prepare_command` and
+    `test_command`, so a borrowed row runs another account's shell commands.
+    Every query here carries the owner, and a key that is absent resolves to
+    None -- the same answer `.first()` gave, and the correct one.
+    """
+
+    def __init__(
+        self,
+        db: Session,
+        owner_id: int,
+        *,
+        ticket_keys: set[str] | None = None,
+    ) -> None:
+        self.owner_id = owner_id
+
+        self.defaults = db.query(models.PRAgentDefaults).filter(
+            models.PRAgentDefaults.owner_id == owner_id
+        ).first()
+
+        # `in_([])` is valid SQL but a wasted round trip, which is the thing
+        # being removed.
+        self.items: dict[str, models.WorkItemSettings] = {}
+        if ticket_keys:
+            rows = db.query(models.WorkItemSettings).filter(
+                models.WorkItemSettings.owner_id == owner_id,
+                models.WorkItemSettings.ticket_key.in_(sorted(ticket_keys)),
+            ).all()
+            self.items = {row.ticket_key: row for row in rows}
+
+        # Every registration this account has, rather than the repos on the
+        # board: which repo a card resolves against is derived per card from
+        # its pull requests and branches, and rebuilding that here to narrow
+        # the query would be a second copy of `_registration_for`'s rule. An
+        # account registers a handful of repos, so the whole set is one query
+        # either way.
+        self.registrations: dict[str, models.RepoWebhook] = {
+            row.repo: row
+            for row in db.query(models.RepoWebhook).filter(
+                models.RepoWebhook.owner_id == owner_id
+            ).all()
+        }
+
+    def registration(self, repo: str | None) -> models.RepoWebhook | None:
+        """The repo's registration, or None -- never another account's."""
+        return self.registrations.get(repo) if repo else None
+
+
 def resolve_settings(
     db: Session,
     owner_id: int,
     registration: models.RepoWebhook | None,
     ticket_key: str | None = None,
+    prefetch: SettingsPrefetch | None = None,
 ) -> EffectiveSettings:
     """
     Merge a work item over a repo registration over the user's account defaults.
@@ -185,10 +253,24 @@ def resolve_settings(
         ticket_key: The work item being resolved for. `None` must resolve
             exactly as this function did before the work-item layer existed,
             which is what keeps every pre-existing call site correct.
+        prefetch: Rows already loaded for this owner, when many items are being
+            resolved together. Omitted, every row is read here exactly as
+            before, which is what keeps every other call site unchanged. A
+            prefetch built for a different owner is refused rather than
+            trusted, since the rows it holds decide what a run may execute.
     """
-    defaults = db.query(models.PRAgentDefaults).filter(
-        models.PRAgentDefaults.owner_id == owner_id
-    ).first()
+    if prefetch is not None and prefetch.owner_id != owner_id:
+        raise ValueError(
+            "SettingsPrefetch belongs to another owner; resolving against it "
+            "would read that account's registrations."
+        )
+
+    if prefetch is not None:
+        defaults = prefetch.defaults
+    else:
+        defaults = db.query(models.PRAgentDefaults).filter(
+            models.PRAgentDefaults.owner_id == owner_id
+        ).first()
 
     resolved = EffectiveSettings()
 
@@ -351,7 +433,9 @@ def resolve_settings(
         {},
     )
 
-    _resolve_authoring(db, owner_id, registration, defaults, ticket_key, resolved)
+    _resolve_authoring(
+        db, owner_id, registration, defaults, ticket_key, resolved, prefetch
+    )
 
     return resolved
 
@@ -363,6 +447,7 @@ def _resolve_authoring(
     defaults: models.PRAgentDefaults | None,
     ticket_key: str | None,
     resolved: EffectiveSettings,
+    prefetch: SettingsPrefetch | None = None,
 ) -> None:
     """
     Fill in the authoring fields: work item -> repo -> defaults -> fallback.
@@ -374,10 +459,15 @@ def _resolve_authoring(
     """
     item = None
     if ticket_key:
-        item = db.query(models.WorkItemSettings).filter(
-            models.WorkItemSettings.owner_id == owner_id,
-            models.WorkItemSettings.ticket_key == ticket_key,
-        ).first()
+        if prefetch is not None:
+            # Absent from the prefetch means no row exists for this owner and
+            # key, which is what the query below returned too.
+            item = prefetch.items.get(ticket_key)
+        else:
+            item = db.query(models.WorkItemSettings).filter(
+                models.WorkItemSettings.owner_id == owner_id,
+                models.WorkItemSettings.ticket_key == ticket_key,
+            ).first()
 
     repo_mode = normalize_mode(registration.authoring_mode) if registration else None
     default_mode = normalize_mode(defaults.authoring_mode) if defaults else None

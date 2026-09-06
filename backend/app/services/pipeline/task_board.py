@@ -35,6 +35,7 @@ from app import models, schemas
 from app.services.authoring import authoring
 from app.services.integrations import issue_links
 from app.services.pipeline import (
+    agent_settings,
     assigned,
     comms_log,
     report_sync,
@@ -487,7 +488,14 @@ async def build(
     the worklist settles its own: the API and the UI must not be able to
     disagree about what is most urgent.
     """
-    items, unavailable = await fetch_assigned(integration_configs)
+    # The open query and the finished-work query are independent, so they go
+    # out together. Awaited one after the other they cost two round trips to
+    # GitHub and Jira for no reason -- invisible next to a 250ms database, and
+    # a quarter of a second once the database stopped being the problem.
+    (items, unavailable), (done_items, _) = await asyncio.gather(
+        fetch_assigned(integration_configs),
+        fetch_assigned(integration_configs, done=True),
+    )
 
     # Work that finished recently, rendered in its own section.
     #
@@ -500,7 +508,6 @@ async def build(
     # answered the open query and failed this one has not left the board
     # degraded in the way that flag means, and reporting it would put a
     # warning on a board that is showing everything it is being asked for.
-    done_items, _ = await fetch_assigned(integration_configs, done=True)
     done_keys = {item.key for item in done_items}
 
     # Built through the same path, so a finished card carries the same stages,
@@ -643,9 +650,13 @@ async def build(
         job_clauses.append(
             (models.PRJob.repo == r) & (models.PRJob.pr_number == p)
         )
+    # Two columns, not the row. `PRJob` carries `payload_json` and
+    # `result_json` -- the webhook body and the whole analysis -- which is half
+    # a megabyte across this table and was being pulled over the wire to read a
+    # repo name and a number. The sibling query above already asks this way.
     analyzed_prs = {
         (job.repo, job.pr_number)
-        for job in db.query(models.PRJob)
+        for job in db.query(models.PRJob.repo, models.PRJob.pr_number)
         .filter(
             or_(*job_clauses),
             models.PRJob.status == schemas.PRJobStatus.completed.value,
@@ -700,6 +711,15 @@ async def build(
     # Which work items the driver is mid-run on. One query for the whole board,
     # for the same reason as the counts above.
     running_by_key = authoring.running_attempts(db, owner_id=owner_id)
+
+    # The rows every card's settings resolve against, read once. Resolving
+    # per card cost three round trips each -- the account defaults row, which
+    # is the same single row every time, plus a registration and a work-item
+    # lookup -- for twenty-four queries reading three rows. It resolves through
+    # `resolve_settings` exactly as before; only the fetching moved.
+    settings_prefetch = agent_settings.SettingsPrefetch(
+        db, owner_id, ticket_keys={item.key for item in items}
+    )
 
     cards: list[schemas.TaskCard] = []
     for item in items:
@@ -761,8 +781,11 @@ async def build(
         item_settings = resolve_settings(
             db,
             owner_id,
-            _registration_for(db, owner_id, pr_idents, branches),
+            _registration_for(
+                db, owner_id, pr_idents, branches, prefetch=settings_prefetch
+            ),
             ticket_key=item.key,
+            prefetch=settings_prefetch,
         )
         attempts = attempts_by_key.get(item.key, 0)
 
@@ -1032,6 +1055,7 @@ def _registration_for(
     owner_id: int,
     pr_idents: set,
     branches: list[schemas.LinkedBranch],
+    prefetch: agent_settings.SettingsPrefetch | None = None,
 ) -> models.RepoWebhook | None:
     """
     The repo registration behind a work item, from wherever the work is.
@@ -1059,6 +1083,12 @@ def _registration_for(
 
     if not repo:
         return None
+
+    # The prefetch is built from this owner's registrations only, so the
+    # scoping the paragraph above is about is preserved by construction: a
+    # repo it does not hold is a repo this account has not registered.
+    if prefetch is not None:
+        return prefetch.registration(repo)
 
     reg = (
         db.query(models.RepoWebhook)

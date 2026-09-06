@@ -9,6 +9,7 @@ import { Button, IconButton } from "@/components/ui/button";
 import { Input } from "@/components/ui/form";
 import { Skeleton } from "@/components/ui/surface";
 import { formatFull } from "@/lib/datetime";
+import { createViewCache } from "@/lib/view-cache";
 import { cn } from "@/lib/utils";
 
 /**
@@ -20,13 +21,26 @@ import { cn } from "@/lib/utils";
  * lives in chat: a rail beside the conversation on a wide screen, and a
  * drawer on a narrow one.
  */
+/**
+ * The rail this browser last saw.
+ *
+ * The list is decoration on the conversation, which is why a failed fetch costs
+ * only the rail — and for the same reason a stored copy is safe to paint while
+ * the real one arrives. Nothing is ever sent from it; it is a list of titles.
+ */
+const railCache = createViewCache<Conversation[]>("conversations", 1);
+
 export function useConversations() {
   const { user } = useAuth();
+  // Narrowed to the id up front, the way `TasksView` does: reading `user?.id`
+  // inside the callbacks makes the compiler infer the whole `user` object as
+  // the dependency, which reloads the rail on any unrelated change to it.
+  const userId = user?.id;
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [loading, setLoading] = useState(true);
 
   const reload = useCallback(async () => {
-    if (!user?.id) {
+    if (!userId) {
       setLoading(false);
       return;
     }
@@ -38,13 +52,27 @@ export function useConversations() {
       // whole chat page down with a runtime error instead of showing an empty
       // rail. The list is decoration on the conversation; it must not be able
       // to break it.
-      setConversations(response?.conversations ?? []);
+      const list = response?.conversations ?? [];
+      setConversations(list);
+      railCache.write(userId, list);
     } catch {
       // A failed list costs the rail, never the conversation on screen.
     } finally {
       setLoading(false);
     }
-  }, [user?.id]);
+  }, [userId]);
+
+  // Paint the rail this browser last saw, then let the request already in
+  // flight replace it. Read on mount rather than in a `useState` initializer:
+  // Next runs the initializer on the server, where there is no storage, so the
+  // first client render would disagree with the markup the server sent.
+  useEffect(() => {
+    if (!userId) return;
+    const cached = railCache.read(userId);
+    if (!cached) return;
+    setConversations((current) => (current.length ? current : cached.value));
+    setLoading(false);
+  }, [userId]);
 
   useEffect(() => {
     reload();

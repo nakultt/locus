@@ -11,6 +11,7 @@ import {
   Unlink,
 } from "lucide-react";
 import { useAuth } from "@/features/auth/auth-context";
+import { createViewCache } from "@/lib/view-cache";
 import {
   connectIntegration,
   disconnectIntegration,
@@ -340,6 +341,13 @@ function OAuthDialog({
 
 /* ── Page ─────────────────────────────────────────────────────────────────── */
 
+/**
+ * Stored as the plain list of names rather than the `Set` the view holds: a
+ * `Set` serialises to `{}`, so it would come back empty and every service would
+ * render as disconnected — which reads as the connections having been lost.
+ */
+const connectionsCache = createViewCache<string[]>("connections", 1);
+
 export default function IntegrationsView() {
   const { user } = useAuth();
   const toast = useToast();
@@ -353,18 +361,25 @@ export default function IntegrationsView() {
   >(null);
   const [disconnectFor, setDisconnectFor] = useState<CatalogEntry | null>(null);
 
+  // Narrowed to the id up front, the way `TasksView` does: reading `user?.id`
+  // inside the callback makes the compiler infer the whole `user` object as the
+  // dependency, which refetches on any unrelated change to it.
+  const userId = user?.id;
   const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
   const refresh = useCallback(async () => {
-    if (!user?.id) {
+    if (!userId) {
       setLoading(false);
       return;
     }
     try {
       const result = await listIntegrations();
-      setConnected(
-        new Set((result?.integrations ?? []).map((i: Integration) => i.service_name))
+      const services = (result?.integrations ?? []).map(
+        (i: Integration) => i.service_name
       );
+      setConnected(new Set(services));
+      // A Set does not survive JSON, so the array is what is stored.
+      connectionsCache.write(userId, services);
     } catch (err) {
       toast.error(
         "Could not load your connections",
@@ -373,7 +388,22 @@ export default function IntegrationsView() {
     } finally {
       setLoading(false);
     }
-  }, [user?.id, toast]);
+  }, [userId, toast]);
+
+  // Paint the connections this browser last saw, then let the request already
+  // in flight replace them.
+  //
+  // Read on mount rather than in a `useState` initializer, which is the rule
+  // `AuthContext` follows and for the same reason: Next runs the initializer on
+  // the server, where there is no storage, so the first client render would
+  // disagree with the markup the server sent.
+  useEffect(() => {
+    if (!userId) return;
+    const cached = connectionsCache.read(userId);
+    if (!cached) return;
+    setConnected((current) => (current.size ? current : new Set(cached.value)));
+    setLoading(false);
+  }, [userId]);
 
   useEffect(() => {
     refresh();
