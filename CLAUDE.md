@@ -639,6 +639,36 @@ else the pipeline does reaches other people — a Slack post, a QA email, a merg
 driven by webhooks and the background loops. A dashboard refresh must never be able to notify a
 team twice.
 
+**Work the agent is handling is not work that needs you.** `blocked_on_you` was unconditionally
+true for a reviewer's changes-requested and for a QA rejection, so in autonomous mode a card read
+"Needs you" while the agent was already writing the fix — the cry-wolf failure this module's own
+docstring names, on the one kind of item the pipeline exists to handle without a person.
+`worklist._agent_handles` reuses `authoring.should_retry` rather than restating its conditions, so
+the queue and the run cannot disagree about whether anyone needs to act, and every reason the agent
+*might not* pick it up still leaves the item yours: the mode off, the trigger off, the bound spent,
+a handoff, a human's commit, no driver. Failing to decide also leaves it yours — a queue that
+quietly hides work nobody is doing is the worse error.
+
+**A rejection answered by a later merge is history.** Found on a real card once the above was fixed:
+the tester rejected, the agent wrote the fix, it merged, and the original rejection was still
+reported, so a work item that had completed its entire round trip read as needing a person. Keyed on
+the merge being *newer* than the rejection, not merely existing — the pull request the tester
+rejected is older than their reply, and treating that as the answer would silence every rejection
+ever made. It needs its own query, because the review loop deliberately excludes merged and closed
+rows in SQL. Both timestamps go through `_as_utc`: SQLite stores UTC unlabelled, and comparing a
+naive stamp against an aware one raises rather than sorting wrong — inside `build`, that takes down
+the whole board rather than misplacing one item.
+
+**An authoring attempt left `running` is recovered, and failed rather than requeued.**
+`begin_attempt` writes the row before the driver is invoked, which is what lets the board say the
+agent is writing — and a process killed mid-run leaves it `running` for good, so the card reads
+"Agent working" for hours and a stale row is indistinguishable from a live one. Unlike
+`recover_stale_jobs` it is failed, not requeued: a pull request is something a person is asked to
+read, re-running an attempt nobody watched could open one from a half-finished worktree, and the
+bound was spent either way. The cutoff is the account's own timeout plus a margin, because firing
+early would mark a live run failed and let the next event start a second one against the same
+branch.
+
 **The worklist is grouped by task and ordered by staleness.** `worklist.build()` answers
 "what is waiting on me", which the per-PR views cannot. Grouped by `ticket_key` because one
 ticket spans several PRs and a PR-level list shows a two-week round trip as three young items.
@@ -1128,6 +1158,36 @@ CLI has a flag for this and Codex still emitted escapes with `--color never` set
 governs its own rendering and not what the tools it shells out to write — so `run_agent` strips
 them on the way out. One place that cannot be missed beats three flags that can; the flags stay
 because asking is cheaper than stripping.
+
+**The model and the reasoning level are per driver, and neither is portable.** A model name is
+one provider's catalogue entry, and the three CLIs spell reasoning three different ways —
+`--variant`, `--effort`, and a `-c model_reasoning_effort=` config override that is not a flag at
+all. One shared pair of settings therefore either reaches the wrong CLI or has to be ignored, which
+is what `_own_settings` was doing before `authoring_driver_options` existed (JSON, one column,
+because the set of drivers is code and a migration per driver added is one nobody writes). Stored
+as the plain level, never the spelling, so the value survives a driver change; `effort_args` turns
+it into argv per driver. A level the selected CLI would reject is dropped rather than passed on —
+Codex exits 1 on an unknown one, which spends an authoring attempt on a typo in a settings field.
+The legacy single `authoring_model` still resolves, but only for the driver it was written for.
+
+**The model dropdown is discovered, never a hand-written catalogue.** A model id that does not
+exist is a failed attempt that spends the bound, and a typed-out list of a provider's models goes
+stale the week after it is written with nothing to tell you. So each driver either asks its CLI —
+`opencode models` answers in seconds, though note that is a different verb from the one that hangs
+— or offers only what has been checked against the binary. Claude Code gets its documented
+`opus`/`sonnet`/`haiku`/`fable` aliases, which keep pointing at the current model of their tier
+where a pinned version string would not. Codex's list is the sharp case, and the lesson is that
+**the docs were not enough**: OpenAI lists five recommended models, and three of them
+(`gpt-6-astra`, `gpt-5.6-sol`, `gpt-5.3-codex-spark`) answer "not supported when using Codex with
+a ChatGPT account" — which is the only way this driver authenticates, since avoiding an API key is
+the point of it. Only `gpt-5.6-terra`, `gpt-5.6-luna` and `gpt-5.5` actually run, and the machine's
+own configured model is added on top. The same check found that `minimal`, which Codex's generic
+error message lists as a valid reasoning level, is rejected by every model a ChatGPT account can
+run — so the valid set is per *model*, not per CLI, and it is dropped. A dropdown entry that always
+fails is worse than an absent one: the cost of picking it is a spent authoring attempt. The form always offers a custom
+entry beside the list, because a stale list must not be a dead end. `_model_choices` swallows a
+driver that raises or hangs: the settings page is the one you would use to switch away from a
+broken CLI, so it must not inherit that CLI's failure.
 
 **A stored invocation belongs to the driver that wrote it.** `command` and `model` are one
 account-level setting each, shared across drivers, and neither value is portable: a template names

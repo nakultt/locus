@@ -33,6 +33,13 @@ POLL_INTERVAL_SECONDS = 5
 # being worked on would double-post its comment.
 STALE_JOB_MINUTES = 30
 
+# Added to the run's own wall clock before an authoring attempt still marked
+# `running` is treated as interrupted. A margin rather than an exact match,
+# because firing early would mark a live run as failed and let the next event
+# start a second one against the same branch -- the duplicate-pull-request
+# failure, arriving from a new direction.
+STALE_ATTEMPT_MARGIN_MINUTES = 10
+
 # How often to look for orphans. Startup catches the restart case; this
 # catches a worker that died without the process going down with it.
 RECOVERY_INTERVAL_SECONDS = 300
@@ -147,6 +154,87 @@ def _claim_next_job() -> int | None:
         db.close()
 
 
+
+def recover_stale_attempts(stale_minutes: int | None = None) -> int:
+    """
+    Fail authoring attempts left `running` by a process that died.
+
+    `begin_attempt` writes the `running` row *before* the driver is invoked,
+    which is what lets the board say "the agent is writing this" during the ten
+    minutes a run takes. The cost is that a process killed mid-run -- a restart,
+    a crash, someone stopping it -- leaves that row `running` for good. Nothing
+    else notices: unlike a PR job there is no queue behind it, and the attempt
+    was already spent.
+
+    Two things go wrong when it is not cleaned up, and the second is worse. The
+    card reads "Agent working" indefinitely, so a person waits on a run that
+    ended hours ago. And a stale `running` row is indistinguishable from a live
+    one, which is exactly the "looks like it is working" failure this codebase
+    keeps finding -- here with the twist that the honest state, a spent attempt
+    with no pull request, is the one being hidden.
+
+    Failed rather than requeued, unlike `recover_stale_jobs`. A pull request is
+    something a person is asked to read, and re-running an attempt nobody
+    watched could open one from a half-finished worktree; the bound has already
+    been spent either way, so the correct repair is to record what happened and
+    let the ordinary triggers decide whether to try again.
+
+    The cutoff is the account's own timeout plus a margin, because a legitimate
+    run is bounded by exactly that wall clock -- anything past it either
+    finished and failed to say so, or was killed. Falling back to the
+    deployment default when no account is bound keeps this working for a
+    process that has never resolved a user's runtime.
+    """
+    from app.services.authoring import agent_runtime
+    from app.services.authoring.opencode_driver import TIMEOUT_SECONDS
+
+    if stale_minutes is None:
+        # A generous margin over the wall clock a run is allowed. A recovery
+        # that fires early would mark a *live* run as failed and let the next
+        # event start a second one against the same branch.
+        stale_minutes = int(
+            agent_runtime.timeout_seconds(TIMEOUT_SECONDS) / 60
+        ) + STALE_ATTEMPT_MARGIN_MINUTES
+
+    cutoff = datetime.now(UTC) - timedelta(minutes=stale_minutes)
+    db = SessionLocal()
+    recovered = 0
+
+    try:
+        stale = (
+            db.query(models.AuthoringAttempt)
+            .filter(
+                models.AuthoringAttempt.state == "running",
+                models.AuthoringAttempt.created_at < cutoff,
+            )
+            .all()
+        )
+        for attempt in stale:
+            attempt.state = "finished"
+            attempt.opened = 0
+            # Said plainly, because "why did this attempt fail" is answered
+            # from this field in the UI and "no error" on a spent attempt reads
+            # as a run that produced nothing on purpose.
+            attempt.error = (
+                f"Interrupted: the run was still marked running after "
+                f"{stale_minutes} minutes, so the process handling it did not "
+                "finish. The attempt was spent."
+            )
+            recovered += 1
+
+        if recovered:
+            db.commit()
+            logger.info("Recovered %s interrupted authoring attempt(s)", recovered)
+    except Exception:
+        db.rollback()
+        logger.exception("Could not recover interrupted authoring attempts")
+        recovered = 0
+    finally:
+        db.close()
+
+    return recovered
+
+
 async def worker_loop() -> None:
     """Run queued PR jobs until cancelled."""
     # Imported here to avoid a circular import at module load.
@@ -157,6 +245,7 @@ async def worker_loop() -> None:
     # Anything left running by the process that died is ours to rescue.
     try:
         recovered = recover_stale_jobs()
+        recover_stale_attempts()
         if recovered:
             logger.info("Requeued %s orphaned PR job(s) on startup", recovered)
     except Exception:
@@ -170,6 +259,7 @@ async def worker_loop() -> None:
             if (now - last_recovery).total_seconds() >= RECOVERY_INTERVAL_SECONDS:
                 last_recovery = now
                 recover_stale_jobs()
+                recover_stale_attempts()
 
             job_id = await asyncio.to_thread(_claim_next_job)
             if job_id is None:

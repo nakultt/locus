@@ -73,6 +73,20 @@ class ClaudeCodeDriver(CliDriver):
     name = "claude"
     binary = "claude"
     default_command = DEFAULT_COMMAND
+    # `claude --effort <level>`; these are the values its help lists.
+    effort_levels = ("low", "medium", "high", "xhigh", "max")
+    # The aliases Claude Code's own `--help` names: "Provide an alias for the
+    # latest model (e.g. 'fable', 'opus', or 'sonnet') or a model's full name".
+    #
+    # Aliases rather than pinned version strings, deliberately. An alias keeps
+    # pointing at the current model of that tier, where a pinned name goes
+    # stale silently -- and the settings page has no way to tell you that the
+    # model you chose a year ago was retired. Anyone who needs a specific
+    # version can still type one; the dropdown always offers a custom value.
+    static_model_choices = ("opus", "sonnet", "haiku", "fable")
+
+    def effort_args(self, level: str) -> list[str]:
+        return ["--effort", level]
     # A label rather than a guess. Claude Code picks its own model unless one
     # is pinned, and recording a specific name nobody selected would make
     # `AuthoringAttempt.model` a claim rather than a record.

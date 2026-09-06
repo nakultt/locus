@@ -1115,10 +1115,42 @@ export interface AuthoringSettings {
  * /webhooks/agent-runtime` returns what each blank currently resolves to, and
  * the form renders those as placeholders.
  */
+export interface DriverOptions {
+  model?: string | null;
+  /** A level the selected driver accepts; anything else is ignored server-side. */
+  effort?: string | null;
+}
+
+/** What one installed driver accepts, as reported by the backend. */
+export interface DriverCapability {
+  name: string;
+  label: string;
+  effort_levels: string[];
+  /**
+   * Models this driver offers, discovered from the CLI where it can answer.
+   * Never a hand-written catalogue — a model id that does not exist is a
+   * failed attempt. Paired with a custom entry, since any list goes stale.
+   */
+  model_choices: string[];
+}
+
 export interface AgentRuntimeSettings {
   /** opencode | claude | codex | none */
   authoring_driver?: string | null;
+  /**
+   * The legacy single model pin, kept for the driver it was written for.
+   * Per-driver pins live in `authoring_driver_options`.
+   */
   authoring_model?: string | null;
+  /**
+   * Model and reasoning level per driver, keyed by driver name.
+   *
+   * Per driver because neither value is portable: a model name is one
+   * provider's catalogue entry, and the three CLIs spell reasoning three
+   * different ways (`--variant`, `--effort`, `-c model_reasoning_effort=`).
+   * The stored value is the plain level, so it survives a driver change.
+   */
+  authoring_driver_options?: Record<string, DriverOptions>;
   authoring_command?: string | null;
   /** full | ticket_only — how much of the brief leaves the machine. */
   authoring_context?: string | null;
@@ -1168,6 +1200,8 @@ export interface AgentRuntimeResolved {
   pr_reviewers: string[];
   calendar_sweep_minutes: number;
   calendar_lookahead_days: number;
+  /** The drivers this deployment can run, and the reasoning levels each takes. */
+  drivers?: DriverCapability[];
   /** Whether this account has saved any runtime setting of its own. */
   configured: boolean;
 }

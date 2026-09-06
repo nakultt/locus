@@ -729,6 +729,22 @@ class PRAgentDefaults(Base):
     # pull request and requests nobody, which is what it did before this.
     autonomous_pr_reviewers = Column(Text, nullable=True)
 
+    # Per-driver model and reasoning level, as JSON:
+    #   {"codex": {"model": "gpt-5.6-luna", "effort": "high"}, ...}
+    #
+    # One column rather than two per driver, because the set of drivers is code
+    # and a schema change per driver added is a migration nobody remembers to
+    # write. `authoring_model` above stays as the legacy single pin and is read
+    # only for the driver it was written for -- a model name is one provider's
+    # catalogue entry, and carrying it across drivers is what made a Claude run
+    # record an OpenCode model.
+    #
+    # Reasoning is stored as the plain level ("high"), never as the flag: the
+    # three CLIs spell it three different ways -- `--variant`, `--effort` and a
+    # `-c model_reasoning_effort=` config override -- and storing the spelling
+    # would make the value unusable the moment the driver changes.
+    authoring_driver_options = Column(Text, nullable=True)
+
     # ---- what starts the agent ---------------------------------------------
     #
     # `authoring_mode` answers "may the agent write this work item"; these

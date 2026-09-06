@@ -784,6 +784,32 @@ def _plain(text: str) -> str:
     return _ANSI.sub("", text)
 
 
+
+def probe_cli(command: list[str], timeout: int = 6) -> str:
+    """
+    Run a short, read-only CLI command and return its output, or "".
+
+    For settings-page questions like "which models can you run" -- never for
+    the agent itself. Bounded and swallowing, because one of these CLIs hangs
+    indefinitely on its main verb and a settings page that inherits that is a
+    page nobody can use to switch away from it.
+    """
+    try:
+        done = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if done.returncode != 0:
+        return ""
+    return _plain(done.stdout or "")
+
+
 async def run_agent(
     command: list[str], workspace: Path, timeout: int | None = None
 ) -> tuple[int, str]:
@@ -1098,35 +1124,130 @@ class CliDriver:
         return Path(first).stem.lower() == (self.binary or self.name).lower()
 
     def build_command(self, prompt_path: Path, workspace_path: Path) -> list[str]:
+        template = self.default_command
         if self._own_settings():
-            return build_command(prompt_path, workspace_path, self.default_command)
+            template = agent_runtime.command(self.default_command).strip()
+        else:
+            logger.info(
+                "Ignoring the stored agent command: it does not invoke %s. "
+                "Using this driver's default.",
+                self.binary or self.name,
+            )
 
-        logger.info(
-            "Ignoring the stored agent command: it does not invoke %s. "
-            "Using this driver's default.",
-            self.binary or self.name,
+        model = self._model()
+        argv = _command_from_template(
+            template,
+            prompt_path,
+            workspace_path,
+            # The label recorded when nothing is pinned is not a model name and
+            # must never be passed to a CLI as one.
+            model="" if model == self.default_model_label else model,
         )
-        return _command_from_template(
-            self.default_command, prompt_path, workspace_path, model=""
-        )
+
+        effort = self._effort()
+        if effort:
+            argv += self.effort_args(effort)
+
+        return argv
+
+    # The reasoning levels this CLI accepts, in ascending order. Declared here
+    # rather than in the UI so there is one list: the form renders it and the
+    # driver validates against it, and a level the CLI would reject never
+    # reaches a run. Empty means the CLI has no such knob.
+    effort_levels: tuple[str, ...] = ()
+
+    # Model ids offered in the settings dropdown. Deliberately *not* a
+    # hand-written catalogue of a provider's models: a name that does not exist
+    # is a failed attempt that spends the bound, and these lists go stale the
+    # week after they are written. Each driver either asks its CLI (see
+    # `discover_models`) or offers only values documented by the CLI itself.
+    #
+    # The dropdown always also offers a custom value, because a list that has
+    # gone stale must not be a dead end.
+    static_model_choices: tuple[str, ...] = ()
+
+    @classmethod
+    def discover_models(cls) -> list[str]:
+        """
+        Ask the CLI what it can run, when it can answer.
+
+        Best-effort and bounded: this is called to render a settings page, so
+        a CLI that is slow, missing or broken must cost a shorter list rather
+        than a page that will not load. One of the three CLIs on this machine
+        hangs indefinitely on its main verb, which is exactly why the timeout
+        is short and the failure is swallowed.
+        """
+        return []
+
+    @classmethod
+    def model_choices(cls) -> list[str]:
+        """
+        What the settings dropdown offers, discovered first and static second.
+
+        Order preserved and duplicates dropped, so a discovered list reads the
+        way the CLI printed it.
+        """
+        seen: set[str] = set()
+        choices: list[str] = []
+        for name in [*cls.discover_models(), *cls.static_model_choices]:
+            cleaned = (name or "").strip()
+            if cleaned and cleaned not in seen:
+                seen.add(cleaned)
+                choices.append(cleaned)
+        return choices
+
+    def effort_args(self, level: str) -> list[str]:
+        """
+        How this CLI is told to think harder, as argv.
+
+        A method rather than a flag name, because the three spellings are not
+        interchangeable: OpenCode takes `--variant`, Claude Code takes
+        `--effort`, and Codex takes a config override
+        (`-c model_reasoning_effort="high"`) rather than a flag at all. The
+        stored setting is the plain level, so it survives a driver change; this
+        turns it into whatever the selected CLI wants.
+        """
+        return []
+
+    def _options(self) -> dict:
+        """This driver's stored model and reasoning level."""
+        return agent_runtime.driver_options(self.name)
 
     def _model(self) -> str:
         """
         The model this attempt actually ran on.
 
-        Resolved through `agent_runtime`, the same source `build_command`
-        passes to the CLI. This used to read `LOCUS_OPENCODE_MODEL` directly
-        while the command line carried the *account's* setting, so an account
-        that pinned a model had every attempt recorded against a different one
-        -- and "every `AuthoringAttempt` records which model ran" is the claim
-        that makes autonomous mode auditable at all.
+        The per-driver pin first, then the legacy single `authoring_model` --
+        but only when that one was written for this driver, which is what
+        `_own_settings` decides. Resolved through the same path
+        `build_command` uses, because `author()` used to read
+        `LOCUS_OPENCODE_MODEL` from the environment while the command line
+        carried the account's setting, so an account that pinned a model had
+        every attempt recorded against a different one. "Every
+        `AuthoringAttempt` records which model ran" is the claim that makes
+        autonomous mode auditable.
         """
+        pinned = self._options().get("model")
+        if pinned:
+            return pinned
         if not self._own_settings():
-            # A model name is one provider's catalogue entry. Carrying
-            # `opencode/muse-spark-1.3` onto a Claude Code run would record a
-            # model that does not exist for the driver that ran.
             return self.default_model_label
         return agent_runtime.model().strip() or self.default_model_label
+
+    def _effort(self) -> str:
+        """
+        The reasoning level, validated against what this CLI accepts.
+
+        A level the CLI would reject is dropped rather than passed on. Codex
+        exits 1 on an unknown value, which spends an attempt on a typo in a
+        settings field; the other two are less strict, and a driver that fails
+        differently depending on which CLI is selected is worse than one that
+        ignores a value it cannot use.
+        """
+        level = (self._options().get("effort") or "").strip().lower()
+        if not level or level not in self.effort_levels:
+            return ""
+        return level
 
     async def author(
         self, request: AuthoringRequest, integration_configs: dict
@@ -1439,6 +1560,30 @@ class OpenCodeDriver(CliDriver):
     binary = "opencode"
     default_command = DEFAULT_COMMAND
     default_model_label = "opencode-default"
+    # `--variant` is documented as "provider-specific reasoning effort", so the
+    # set a given model accepts is the provider's rather than OpenCode's. These
+    # are the three its own help names.
+    effort_levels = ("minimal", "high", "max")
+
+    def effort_args(self, level: str) -> list[str]:
+        return ["--variant", level]
+
+    @classmethod
+    def discover_models(cls) -> list[str]:
+        """
+        `opencode models` prints one `provider/model` per line.
+
+        The only one of the three CLIs that can answer this, so it is the only
+        one with a dropdown that is not a short curated list. Note this is a
+        different verb from the one that hangs -- `models` returns in a couple
+        of seconds where `run` does not return at all.
+        """
+        output = probe_cli(["opencode", "models"])
+        return [
+            line.strip()
+            for line in output.splitlines()
+            if line.strip() and "/" in line
+        ]
 
 
 def request_settings(request: AuthoringRequest) -> dict:

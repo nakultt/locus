@@ -152,6 +152,12 @@ function ServicePanel({ service }: { service: ServiceStatus }) {
 
 /* ── Defaults ─────────────────────────────────────────────────────────────── */
 
+// The model dropdown's value meaning "type your own". A sentinel rather than
+// an empty string, which already means "let the CLI decide" — the two are
+// different answers, and collapsing them would make clearing a pinned model
+// impossible.
+const CUSTOM_MODEL = "__custom__";
+
 const parseList = (raw: string) =>
   raw
     .split(/[,\n]/)
@@ -511,6 +517,115 @@ function Defaults({ docsConnected }: { docsConnected: boolean }) {
                 <option value="none">None</option>
               </Select>
             </Field>
+
+          {/* Model and reasoning, per driver.
+
+              Per driver rather than one pair of boxes, because neither value
+              carries across: a model name is one provider's catalogue entry,
+              and the three CLIs spell reasoning three different ways —
+              `--variant`, `--effort`, and a `-c model_reasoning_effort=`
+              config override. Storing one shared pair meant the value either
+              reached the wrong CLI or had to be ignored.
+
+              Only the selected driver's fields are shown. The others are kept
+              in form state and saved untouched, so switching driver and back
+              does not quietly wipe what you set. */}
+          {(() => {
+            const selected =
+              values.authoring_driver ?? resolved?.driver ?? "none";
+            const capability = (resolved?.drivers ?? []).find(
+              (d) => d.name === selected,
+            );
+            if (!capability) return null;
+
+            const options =
+              values.authoring_driver_options?.[capability.name] ?? {};
+            const setOption = (key: "model" | "effort", value: string) =>
+              set("authoring_driver_options", {
+                ...(values.authoring_driver_options ?? {}),
+                [capability.name]: { ...options, [key]: value || null },
+              });
+
+            return (
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Field
+                  label={`Model for ${capability.label}`}
+                  htmlFor="rt-driver-model"
+                  hint="Blank lets the CLI pick its own. Pin one when you want the same model across every attempt on a ticket — a rework reading differently from the attempt it is fixing is hard to reason about."
+                >
+                  {/* A dropdown of what the CLI actually offers, plus a custom
+                      entry. The list is discovered where the CLI can answer
+                      and otherwise comes from its own documentation, so it is
+                      never a guess at a provider's catalogue — a model id that
+                      does not exist is a failed attempt that spends the bound.
+                      The custom entry exists because any such list goes stale,
+                      and a stale list must not be a dead end. */}
+                  <Select
+                    id="rt-driver-model"
+                    value={
+                      !options.model
+                        ? ""
+                        : capability.model_choices.includes(options.model)
+                          ? options.model
+                          : CUSTOM_MODEL
+                    }
+                    onChange={(e) =>
+                      setOption(
+                        "model",
+                        e.target.value === CUSTOM_MODEL ? " " : e.target.value,
+                      )
+                    }
+                  >
+                    <option value="">Let {capability.label} decide</option>
+                    {capability.model_choices.map((id) => (
+                      <option key={id} value={id}>
+                        {id}
+                      </option>
+                    ))}
+                    <option value={CUSTOM_MODEL}>Other…</option>
+                  </Select>
+
+                  {options.model !== null &&
+                    options.model !== undefined &&
+                    options.model !== "" &&
+                    !capability.model_choices.includes(options.model) && (
+                      <Input
+                        aria-label={`Custom model id for ${capability.label}`}
+                        className="mt-2 font-mono text-xs"
+                        placeholder="model id, exactly as the CLI spells it"
+                        value={options.model.trim()}
+                        onChange={(e) => setOption("model", e.target.value)}
+                        spellCheck={false}
+                      />
+                    )}
+                </Field>
+
+                <Field
+                  label="Reasoning level"
+                  htmlFor="rt-driver-effort"
+                  hint={
+                    capability.effort_levels.length
+                      ? "Higher costs more time and tokens per attempt, and the wall clock is what a timeout spends. Blank lets the CLI decide."
+                      : "This driver exposes no reasoning setting."
+                  }
+                >
+                  <Select
+                    id="rt-driver-effort"
+                    value={options.effort ?? ""}
+                    disabled={!capability.effort_levels.length}
+                    onChange={(e) => setOption("effort", e.target.value)}
+                  >
+                    <option value="">Let {capability.label} decide</option>
+                    {capability.effort_levels.map((level) => (
+                      <option key={level} value={level}>
+                        {level}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+              </div>
+            );
+          })()}
 
             <Field
               label="How much of the brief leaves the machine"

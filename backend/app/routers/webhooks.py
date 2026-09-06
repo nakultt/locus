@@ -501,11 +501,39 @@ def _apply_runtime(row, request) -> None:
     allow = getattr(request, "allow_in_place", None)
     row.allow_in_place = None if allow is None else (1 if allow else 0)
 
+    # Per-driver model and reasoning. Blank entries are dropped rather than
+    # stored as empty strings, and a driver whose entry ends up empty is
+    # dropped entirely, so "cleared in the form" reads back as absent -- which
+    # is what `driver_options` treats as "let the CLI choose".
+    options: dict[str, dict[str, str]] = {}
+    for name, entry in (getattr(request, "authoring_driver_options", None) or {}).items():
+        chosen = {
+            key: value.strip()
+            for key in ("model", "effort")
+            if (value := getattr(entry, key, None)) and value.strip()
+        }
+        if chosen:
+            options[name.strip().lower()] = chosen
+    row.authoring_driver_options = json.dumps(options) if options else None
+
 
 def _runtime_fields(row) -> dict:
     """The runtime dials read back off a row, blanks included as null."""
     fields = {name: getattr(row, name, None) for name in _RUNTIME_TEXT}
     fields.update({name: getattr(row, name, None) for name in _RUNTIME_NUMBERS})
+
+    # Unparseable stored JSON reads back as empty rather than raising: the
+    # settings page must still load, and an empty form is recoverable where a
+    # 500 on the page that fixes it is not.
+    try:
+        stored = json.loads(row.authoring_driver_options or "{}")
+    except (TypeError, ValueError):
+        stored = {}
+    fields["authoring_driver_options"] = {
+        name: schemas.DriverOptions(**entry)
+        for name, entry in (stored if isinstance(stored, dict) else {}).items()
+        if isinstance(entry, dict)
+    }
     fields["allow_in_place"] = (
         None if row.allow_in_place is None else bool(row.allow_in_place)
     )
@@ -524,6 +552,63 @@ def _authoring_fields(row) -> dict:
         "prepare_command": row.prepare_command,
         "test_command": row.test_command,
     }
+
+
+
+# How each driver is labelled in the form. The names themselves come from the
+# driver classes, so a driver added to `VALID_DRIVERS` without a label here
+# still appears -- titled from its own name rather than omitted, since a
+# driver that runs but cannot be selected is the worse failure.
+_DRIVER_LABELS = {
+    "opencode": "OpenCode",
+    "claude": "Claude Code",
+    "codex": "Codex",
+}
+
+
+def _model_choices(driver) -> list[str]:
+    """
+    One driver's offered models, never at the cost of the page.
+
+    `model_choices` may shell out to ask the CLI, and one of the CLIs on a
+    given machine can be broken -- so a driver that raises or hangs costs an
+    empty dropdown with a custom entry beside it, not a settings page that
+    fails to load. Which is the page you would use to switch away from that
+    driver.
+    """
+    try:
+        return list(driver.model_choices())
+    except Exception:
+        logger.debug("Could not list models for %s", getattr(driver, "name", "?"))
+        return []
+
+
+def _driver_capabilities() -> list[schemas.DriverCapability]:
+    """
+    What each real driver accepts, read off the driver classes.
+
+    Read rather than restated: the form offers exactly the reasoning levels the
+    driver validates against, so a level the CLI would reject cannot be picked.
+    Codex exits 1 on an unknown one, which would spend an authoring attempt on
+    a typo in a settings field.
+
+    `none` is excluded -- it is the do-nothing driver and has nothing to
+    configure.
+    """
+    from app.services.authoring import authoring as authoring_service
+
+    capabilities: list[schemas.DriverCapability] = []
+    for name in agent_runtime.VALID_DRIVERS:
+        if name == "none":
+            continue
+        driver = authoring_service.get_driver(name)
+        capabilities.append(schemas.DriverCapability(
+            name=name,
+            label=_DRIVER_LABELS.get(name, name.title()),
+            effort_levels=list(getattr(driver, "effort_levels", ()) or ()),
+            model_choices=_model_choices(driver),
+        ))
+    return capabilities
 
 
 @router.get(
@@ -553,6 +638,7 @@ async def get_agent_runtime(
 
     return schemas.AgentRuntimeResolved(
         **resolved,
+        drivers=_driver_capabilities(),
         configured=runtime is not None and any(
             getattr(runtime, name) is not None
             for name in runtime.__dataclass_fields__

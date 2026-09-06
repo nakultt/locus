@@ -1192,6 +1192,37 @@ class RepoRegister(BaseModel):
     )
 
 
+class DriverOptions(BaseModel):
+    """
+    One authoring driver's model and reasoning level.
+
+    Both optional and both meaning "let the CLI choose" when blank. The
+    reasoning level is stored as the plain level ("high") rather than as the
+    flag, because the three CLIs spell it three different ways and a stored
+    spelling stops being usable the moment the driver changes.
+    """
+    model: str | None = None
+    effort: str | None = None
+
+
+class DriverCapability(BaseModel):
+    """
+    What one installed driver accepts, for the form to render.
+
+    Returned by the backend rather than hard-coded in the client so there is
+    one list: the form offers exactly the levels the driver validates against,
+    and a level the CLI would reject cannot be chosen.
+    """
+    name: str
+    label: str
+    effort_levels: list[str] = []
+    # Discovered from the CLI where it can answer, and otherwise the values its
+    # own documentation names. Never a hand-written catalogue: a model id that
+    # does not exist is a failed attempt that spends the bound. The form pairs
+    # this with a custom entry, because any such list goes stale.
+    model_choices: list[str] = []
+
+
 class PRAgentDefaultsUpdate(BaseModel):
     """
     Account-wide fallbacks applied to every repo that does not override them.
@@ -1398,6 +1429,16 @@ class PRAgentDefaultsUpdate(BaseModel):
         ),
     )
 
+    authoring_driver_options: dict[str, DriverOptions] = Field(
+        default_factory=dict,
+        description=(
+            "Model and reasoning level per driver, keyed by driver name. Kept "
+            "per driver because neither value is portable: a model name is one "
+            "provider's catalogue entry, and the three CLIs spell reasoning "
+            "three different ways."
+        ),
+    )
+
     calendar_sweep_minutes: int | None = Field(
         None, ge=5, le=1440, description="How often your calendars are swept"
     )
@@ -1438,6 +1479,8 @@ class AgentRuntimeResolved(BaseModel):
     pr_reviewers: list[str] = []
     calendar_sweep_minutes: int
     calendar_lookahead_days: int
+    # The drivers this deployment can actually run, and what each accepts.
+    drivers: list[DriverCapability] = []
     # True when this account has saved any runtime setting of its own. The UI
     # says "your settings" or "this deployment's default" from it.
     configured: bool = False

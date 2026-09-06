@@ -90,9 +90,22 @@ class TestTheSharedMachineryIsNotReimplemented:
         assert issubclass(OpenCodeDriver, CliDriver)
 
     @pytest.mark.parametrize("driver", [ClaudeCodeDriver, CodexDriver])
-    def test_it_overrides_only_the_documented_attributes(self, driver):
+    def test_it_overrides_only_the_documented_surface(self, driver):
+        """
+        Identity, and how this CLI spells its two knobs -- reasoning and which
+        models it offers. Anything beyond this is authoring logic moving out of
+        `CliDriver` and starting to drift, which is the failure a second driver
+        makes possible and a third makes likely.
+        """
         own = {name for name in vars(driver) if not name.startswith("__")}
-        assert own == {"name", "binary", "default_command", "default_model_label"}
+        assert own <= {
+            # identity
+            "name", "binary", "default_command", "default_model_label",
+            # how this CLI is told to think harder
+            "effort_levels", "effort_args",
+            # what this CLI offers in the model dropdown
+            "static_model_choices", "discover_models",
+        }, sorted(own)
 
     def test_the_module_defines_no_authoring_logic(self):
         """
@@ -367,3 +380,301 @@ class TestOutputReachesPeopleReadable:
         ).read_text(encoding="utf-8")
 
         assert source.count("_plain(") >= 3
+
+
+class TestPerDriverModelAndReasoning:
+    """
+    Model and reasoning are stored per driver, because neither value carries
+    across one. A model name is one provider's catalogue entry, and the three
+    CLIs spell reasoning three different ways -- `--variant`, `--effort`, and a
+    `-c model_reasoning_effort=` config override -- so a single shared setting
+    either reaches the wrong CLI or has to be ignored.
+    """
+
+    def _bind(self, options: dict, **kwargs):
+        import json
+
+        agent_runtime.bind(agent_runtime.AgentRuntime(
+            driver_options=json.dumps(options), **kwargs
+        ))
+
+    def test_each_driver_reads_its_own_entry(self, tmp_path):
+        self._bind({
+            "codex": {"model": "gpt-5.6-luna"},
+            "claude": {"model": "opus"},
+        })
+
+        assert CodexDriver()._model() == "gpt-5.6-luna"
+        assert ClaudeCodeDriver()._model() == "opus"
+
+    def test_one_drivers_model_never_reaches_another(self):
+        """The failure this replaced: a Claude run recorded an OpenCode model."""
+        self._bind({"opencode": {"model": "opencode/muse-spark-1.3"}})
+
+        assert ClaudeCodeDriver()._model() == "claude-code-default"
+        assert CodexDriver()._model() == "codex-default"
+
+    def test_reasoning_is_spelled_the_way_each_cli_wants(self, tmp_path):
+        self._bind({
+            "codex": {"effort": "high"},
+            "claude": {"effort": "xhigh"},
+            "opencode": {"effort": "max"},
+        })
+        prompt = tmp_path / ".locus-prompt.md"
+
+        codex = CodexDriver().build_command(prompt, tmp_path)
+        claude = ClaudeCodeDriver().build_command(prompt, tmp_path)
+        opencode = OpenCodeDriver().build_command(prompt, tmp_path)
+
+        # Codex has no reasoning flag at all -- it is a config override, and
+        # the value is TOML so it has to be quoted.
+        assert codex[-2:] == ["-c", 'model_reasoning_effort="high"']
+        assert claude[-2:] == ["--effort", "xhigh"]
+        assert opencode[-2:] == ["--variant", "max"]
+
+    def test_a_level_the_cli_would_reject_is_dropped(self, tmp_path):
+        """
+        Codex exits 1 on an unknown level, which would spend an authoring
+        attempt on a typo in a settings field. `xhigh` is valid for Codex and
+        Claude and not for OpenCode, so it is the case that proves the check is
+        per driver rather than one shared list.
+        """
+        self._bind({
+            "opencode": {"effort": "xhigh"},
+            "codex": {"effort": "wildly-invalid"},
+        })
+        prompt = tmp_path / ".locus-prompt.md"
+
+        assert "--variant" not in OpenCodeDriver().build_command(prompt, tmp_path)
+        assert "-c" not in CodexDriver().build_command(prompt, tmp_path)
+
+    def test_nothing_pinned_passes_no_flags(self, tmp_path):
+        self._bind({})
+        prompt = tmp_path / ".locus-prompt.md"
+
+        argv = ClaudeCodeDriver().build_command(prompt, tmp_path)
+        assert "--effort" not in argv
+        assert "--model" not in argv
+
+    def test_the_default_label_is_never_passed_as_a_model(self, tmp_path):
+        """
+        `claude-code-default` is what gets *recorded* when nothing is pinned.
+        Passing it to `--model` would name a model that does not exist.
+        """
+        self._bind({})
+
+        argv = ClaudeCodeDriver().build_command(
+            tmp_path / ".locus-prompt.md", tmp_path
+        )
+
+        assert "claude-code-default" not in argv
+
+    def test_unparseable_stored_options_are_absent_not_fatal(self):
+        """
+        The same rule a malformed number follows: falling through beats
+        guessing, and here the guess reaches a CLI.
+        """
+        agent_runtime.bind(agent_runtime.AgentRuntime(driver_options="{not json"))
+
+        assert agent_runtime.driver_options("codex") == {}
+        assert CodexDriver()._model() == "codex-default"
+
+    def test_the_legacy_pin_still_works_for_its_own_driver(self, tmp_path):
+        """
+        `authoring_model` predates this and must keep working, or an upgrade
+        silently unpins a model someone chose.
+        """
+        agent_runtime.bind(agent_runtime.AgentRuntime(
+            command="opencode run -f {prompt} --cwd {workspace}",
+            model="opencode/muse-spark-1.3-contributor-free",
+        ))
+
+        assert OpenCodeDriver()._model() == "opencode/muse-spark-1.3-contributor-free"
+        assert ClaudeCodeDriver()._model() == "claude-code-default"
+
+    def test_a_per_driver_pin_wins_over_the_legacy_one(self):
+        self._bind(
+            {"opencode": {"model": "opencode/newer"}},
+            command="opencode run -f {prompt}",
+            model="opencode/older",
+        )
+
+        assert OpenCodeDriver()._model() == "opencode/newer"
+
+    def test_every_driver_declares_levels_it_can_spell(self):
+        """
+        The form renders `effort_levels` and the driver validates against it,
+        so a driver that declares a level it cannot turn into argv would offer
+        a choice that silently does nothing.
+        """
+        for driver in (OpenCodeDriver(), ClaudeCodeDriver(), CodexDriver()):
+            assert driver.effort_levels, driver.name
+            for level in driver.effort_levels:
+                assert driver.effort_args(level), (driver.name, level)
+
+
+class TestTheModelDropdownIsNotAGuess:
+    """
+    The dropdown offers what the CLI actually accepts. A hand-written catalogue
+    of a provider's model names would go stale the week after it was written,
+    and a model id that does not exist is a failed attempt that spends the
+    bound -- so each driver either asks its CLI or offers only what the CLI's
+    own documentation names.
+    """
+
+    def test_claude_offers_the_aliases_its_help_documents(self):
+        """
+        Aliases rather than pinned version strings: an alias keeps pointing at
+        the current model of its tier, where a pinned name goes stale silently
+        and the settings page cannot tell you.
+        """
+        assert set(ClaudeCodeDriver.static_model_choices) == {
+            "opus", "sonnet", "haiku", "fable",
+        }
+
+    def test_no_driver_hard_codes_a_provider_catalogue(self):
+        """
+        The rule, as a bound on the static lists. Not "never write model ids
+        down" -- Codex has no listing command and its documented set is the
+        only way to offer a useful dropdown -- but a list past a handful is
+        somebody having transcribed a whole catalogue, which is the thing that
+        goes stale silently.
+        """
+        for driver in (OpenCodeDriver, ClaudeCodeDriver, CodexDriver):
+            assert len(driver.static_model_choices) <= 10, driver.name
+
+    def test_discovery_failing_costs_the_list_and_nothing_else(self, monkeypatch):
+        """
+        `model_choices` renders a settings page. One of these CLIs hangs
+        indefinitely on its main verb, so a driver that cannot answer must cost
+        an empty dropdown rather than the page you would use to switch away
+        from it.
+        """
+        monkeypatch.setattr(
+            "app.services.authoring.opencode_driver.probe_cli",
+            lambda *_a, **_kw: "",
+        )
+
+        assert OpenCodeDriver.model_choices() == []
+
+    def test_probe_swallows_a_missing_binary(self):
+        from app.services.authoring.opencode_driver import probe_cli
+
+        assert probe_cli(["definitely-not-a-real-binary-xyz", "--help"]) == ""
+
+    def test_choices_are_deduped_and_ordered(self, monkeypatch):
+        monkeypatch.setattr(
+            "app.services.authoring.opencode_driver.probe_cli",
+            lambda *_a, **_kw: "a/one\na/two\na/one\n",
+        )
+
+        assert OpenCodeDriver.model_choices() == ["a/one", "a/two"]
+
+    def test_the_capability_endpoint_never_fails_over_a_broken_cli(self, monkeypatch):
+        """
+        The settings page must load even when a driver's CLI is unusable.
+        """
+        from app.routers import webhooks
+
+        def explode(_driver):
+            raise RuntimeError("the CLI is broken")
+
+        monkeypatch.setattr(
+            OpenCodeDriver, "model_choices", classmethod(lambda cls: explode(cls))
+        )
+
+        caps = webhooks._driver_capabilities()
+
+        assert {c.name for c in caps} == {"opencode", "claude", "codex"}
+        assert next(c for c in caps if c.name == "opencode").model_choices == []
+
+
+CONFIG_WITH_NEW_MODEL = 'model = "gpt-6-something-new"\nmodel_reasoning_effort = "high"\n'
+CONFIG_WITH_ONLY_A_PROFILE = '[profiles.other]\nmodel = "not-selected"\n'
+
+
+def _codex_home(tmp_path, monkeypatch, config: str):
+    home = tmp_path / "home"
+    (home / ".codex").mkdir(parents=True)
+    (home / ".codex" / "config.toml").write_text(config, encoding="utf-8")
+    monkeypatch.setattr("os.path.expanduser", lambda _p: str(home))
+    return home
+
+
+class TestCodexModelList:
+    """
+    Codex cannot enumerate its own models, so the list is transcribed from
+    OpenAI's docs -- which makes *what is left out* the load-bearing part. A
+    model id that does not exist is a failed attempt that spends the bound.
+    """
+
+    def test_retired_models_are_not_offered(self):
+        """
+        `gpt-5.4` and `gpt-5.4-mini` retired from Codex on 31 August 2026.
+        Their documented replacements are offered in their place.
+        """
+        offered = set(CodexDriver.static_model_choices)
+
+        assert "gpt-5.4" not in offered
+        assert "gpt-5.4-mini" not in offered
+        assert {"gpt-5.6-terra", "gpt-5.6-luna"} <= offered
+
+    def test_models_deprecated_for_chatgpt_signin_are_not_offered(self):
+        """
+        ChatGPT sign-in is the only way this driver authenticates -- it exists
+        precisely so that no API key is needed -- so a model deprecated for
+        that sign-in is one this driver can never use.
+        """
+        offered = set(CodexDriver.static_model_choices)
+
+        assert "gpt-5.2" not in offered
+        assert "gpt-5.3-codex" not in offered
+
+    def test_only_models_a_chatgpt_account_can_run_are_offered(self):
+        """
+        The docs list is broader than the subscription, and this driver exists
+        precisely so no API key is needed. Each of these answers "not supported
+        when using Codex with a ChatGPT account" despite being listed as
+        recommended -- checked against the CLI, not read off the page. A
+        dropdown entry that always fails costs a spent authoring attempt.
+        """
+        offered = set(CodexDriver.static_model_choices)
+
+        assert offered == {"gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"}
+        for unavailable in ("gpt-6-astra", "gpt-5.6-sol", "gpt-5.3-codex-spark"):
+            assert unavailable not in offered
+
+    def test_minimal_is_not_offered_as_a_reasoning_level(self):
+        """
+        Codex's generic error lists `minimal`, but the models a ChatGPT account
+        can run reject it -- "'minimal' is not supported with the
+        'gpt-5.6-luna' model" -- so the valid set is per model, not per CLI.
+        """
+        assert "minimal" not in CodexDriver.effort_levels
+        assert set(CodexDriver.effort_levels) == {
+            "none", "low", "medium", "high", "xhigh", "max",
+        }
+
+    def test_the_configured_model_is_offered_first(self, tmp_path, monkeypatch):
+        """
+        A machine already running a custom or newer model should see it at the
+        top rather than have to retype it under "Other".
+        """
+        _codex_home(tmp_path, monkeypatch, CONFIG_WITH_NEW_MODEL)
+
+        assert CodexDriver.model_choices()[0] == "gpt-6-something-new"
+
+    def test_a_model_from_a_profile_section_is_not_offered(self, tmp_path, monkeypatch):
+        """
+        Only the top-level `model`. A `[profiles.x]` section sets one for a
+        profile nobody selected, and offering it would be a name that does
+        nothing.
+        """
+        _codex_home(tmp_path, monkeypatch, CONFIG_WITH_ONLY_A_PROFILE)
+
+        assert "not-selected" not in CodexDriver.model_choices()
+
+    def test_a_missing_config_costs_only_the_discovered_entry(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("os.path.expanduser", lambda _p: str(tmp_path / "nope"))
+
+        assert CodexDriver.model_choices() == list(CodexDriver.static_model_choices)

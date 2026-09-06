@@ -45,6 +45,8 @@ on the way out. The flag stays because asking is still cheaper than stripping.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from app.services.authoring.opencode_driver import CliDriver
 
 # `{prompt}` is the absolute path to the brief and `{workspace}` the checkout.
@@ -70,6 +72,74 @@ class CodexDriver(CliDriver):
     name = "codex"
     binary = "codex"
     default_command = DEFAULT_COMMAND
+    # Codex has no reasoning *flag*; it is a config override.
+    #
+    # `minimal` is deliberately absent although Codex's generic error message
+    # lists it: the models a ChatGPT account can actually run reject it --
+    # "'minimal' is not supported with the 'gpt-5.6-luna' model" -- so the
+    # valid set is per model, not per CLI. Offering a level that fails on every
+    # model in the dropdown beside it is a trap, and the cost of the trap is a
+    # spent authoring attempt.
+    effort_levels = ("none", "low", "medium", "high", "xhigh", "max")
+
+    # The models a **ChatGPT account** can actually run, each checked against
+    # the CLI rather than transcribed from the docs -- and the difference
+    # matters, because the documented list is broader than the subscription.
+    #
+    # `gpt-6-astra`, `gpt-5.6-sol` and `gpt-5.3-codex-spark` are all listed as
+    # recommended by OpenAI and every one of them answers "not supported when
+    # using Codex with a ChatGPT account". This driver exists precisely so that
+    # no API key is needed, so those are models it can never use, and a
+    # dropdown entry that always fails is worse than an absent one: the cost of
+    # picking it is a spent authoring attempt. An account with API-key access
+    # can still type one under "Other".
+    #
+    # `gpt-5.4` and `gpt-5.4-mini` retired from Codex on 31 August 2026; their
+    # documented replacements are `gpt-5.6-terra` and `gpt-5.6-luna`, both
+    # here. `gpt-5.2` and `gpt-5.3-codex` are deprecated for ChatGPT sign-in.
+    static_model_choices = (
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+    )
+
+    def effort_args(self, level: str) -> list[str]:
+        # `-c key=value`, where the value is parsed as TOML -- so the level is
+        # quoted, or a bare word fails to parse and Codex falls back to using
+        # the raw string, which happens to work today and is not something to
+        # rely on.
+        return ["-c", f'model_reasoning_effort="{level}"']
+
+    @classmethod
+    def discover_models(cls) -> list[str]:
+        """
+        The model Codex is already configured with, read from its own config.
+
+        Codex has no listing command, so `static_model_choices` carries the
+        documented set. This adds whatever the machine is already configured
+        with, which covers a custom or newer model the list has not caught up
+        with -- and puts it first, since a value already in use is the one most
+        likely to be wanted. Duplicates are dropped by `model_choices`.
+        """
+        import os
+        import re
+
+        config = Path(os.path.expanduser("~")) / ".codex" / "config.toml"
+        try:
+            text = config.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return []
+
+        # Top-level `model = "..."` only: a `[profiles.x]` section further down
+        # may set its own, and offering one from a profile nobody selected
+        # would be a name that does nothing.
+        for line in text.splitlines():
+            if line.startswith("["):
+                break
+            found = re.match(r'\s*model\s*=\s*"([^"]+)"', line)
+            if found:
+                return [found.group(1)]
+        return []
     # A label rather than a guess. Codex picks its own model unless one is
     # pinned, and recording a specific name nobody selected would make
     # `AuthoringAttempt.model` a claim rather than a record.

@@ -39,6 +39,7 @@ user supply it.
 
 from __future__ import annotations
 
+import json
 import os
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -105,6 +106,8 @@ class AgentRuntime:
     workspace_ttl_days: int | None = None
     # Newline- or comma-separated GitHub logins, stored as typed.
     pr_reviewers: str | None = None
+    # JSON: {"<driver>": {"model": ..., "effort": ...}}
+    driver_options: str | None = None
     calendar_sweep_minutes: int | None = None
     calendar_lookahead_days: int | None = None
 
@@ -235,6 +238,46 @@ def model() -> str:
     return _resolve("model", "LOCUS_OPENCODE_MODEL", "") or ""
 
 
+def driver_options(driver: str) -> dict:
+    """
+    One driver's model and reasoning level, as `{"model": ..., "effort": ...}`.
+
+    Per driver rather than one shared pair, because neither value is portable.
+    A model name is one provider's catalogue entry and a reasoning level is
+    spelled three different ways across the three CLIs -- `--variant`,
+    `--effort`, and a `-c model_reasoning_effort=` config override -- so a
+    single setting either applies the wrong value or has to be ignored, which
+    is what `_own_settings` was doing before this existed.
+
+    Blank entries are dropped rather than returned as empty strings, so a
+    caller can treat "absent" and "cleared in the form" the same way: both mean
+    let the CLI choose.
+    """
+    raw = _resolve("driver_options", "LOCUS_AUTHORING_DRIVER_OPTIONS", "") or ""
+    if not raw:
+        return {}
+
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        # Unparseable is absent, for the same reason a malformed number is:
+        # the alternative is guessing, and here the guess reaches a CLI.
+        return {}
+
+    if not isinstance(parsed, dict):
+        return {}
+
+    entry = parsed.get((driver or "").strip().lower())
+    if not isinstance(entry, dict):
+        return {}
+
+    return {
+        key: cleaned
+        for key in ("model", "effort")
+        if (cleaned := _text(entry.get(key)))
+    }
+
+
 def command(default: str) -> str:
     """
     The invocation template. The caller supplies the driver's own default,
@@ -343,6 +386,7 @@ def from_row(row) -> AgentRuntime:
     return AgentRuntime(
         driver=normalize_driver(row.authoring_driver),
         model=_text(row.authoring_model),
+        driver_options=_text(getattr(row, "authoring_driver_options", None)),
         command=_text(row.authoring_command),
         context_mode=normalize_context_mode(row.authoring_context),
         timeout_seconds=_int(row.authoring_timeout_seconds),
