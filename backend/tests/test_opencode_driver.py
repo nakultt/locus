@@ -68,6 +68,34 @@ class TestSourceResolution:
         with pytest.raises(ws.WorkspaceError):
             ws.check_not_locus(ws.locus_root().parent)
 
+    def test_case_alone_does_not_get_past_the_self_edit_check(self):
+        """
+        The guard has to hold on a case-insensitive filesystem, which is the
+        macOS default and the Windows one.
+
+        `Path.resolve()` follows symlinks but keeps whatever case the path was
+        written in, and `os.path.normcase` folds case only on Windows. So a
+        code root typed as `/Users/me/github` resolved the `locus` repo to the
+        directory holding backend/.env and ENCRYPTION_KEY, compared unequal to
+        it on every string comparison, and the single most important rule in
+        the feature passed. Folded rather than probed, because "is this mount
+        case-sensitive" is answered wrong silently.
+        """
+        root = ws.locus_root()
+        recased = Path(str(root).swapcase())
+
+        with pytest.raises(ws.WorkspaceError):
+            ws.check_not_locus(recased)
+
+    def test_a_genuinely_different_tree_is_still_allowed(self, tmp_path):
+        """
+        The fold must not refuse everything. A path that merely sits near
+        Locus, or shares nothing but a prefix of its name, is ordinary work --
+        refusing it would take the feature down in the name of protecting it.
+        """
+        ws.check_not_locus(tmp_path / "api")
+        ws.check_not_locus(ws.locus_root().parent / (ws.locus_root().name + "-other"))
+
     def test_a_mismatched_origin_is_refused(self, tmp_path):
         """
         `<root>/<name>` is a guess from a folder name, and acme/api and

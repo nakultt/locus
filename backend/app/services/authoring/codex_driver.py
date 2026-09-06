@@ -17,23 +17,29 @@ the ContextVar in `agent_runtime` exists to avoid for every other setting.
 **On the sandbox flag, which is the one real decision here.** Codex ships its
 own sandbox and `-s workspace-write` is the smaller grant -- it confines
 model-run commands to the workspace, which is exactly what this driver needs.
-It is not the default because on Windows it fails outright: the sandbox cannot
-spawn a process (`CreateProcessAsUserW failed: 5 (Access is denied)`), so every
-command the agent tries errors and the run ends having changed nothing while
-reporting success at the process level. That is the failure mode this codebase
-cares most about, so the default uses
+It is not the default **on Windows**, where it fails outright: the sandbox
+cannot spawn a process (`CreateProcessAsUserW failed: 5 (Access is denied)`), so
+every command the agent tries errors and the run ends having changed nothing
+while reporting success at the process level. That is the failure mode this
+codebase cares most about, so the Windows default uses
 `--dangerously-bypass-approvals-and-sandbox`, which Codex's own help describes
 as "intended solely for running in environments that are externally sandboxed".
 
-That description is accurate here, and it is the whole argument: the external
-sandbox is the `git worktree` cut away from Locus's tree and from the
-developer's checkout, the source path that passed the self-edit, git-repository
-and origin checks, and the diff refused after the run if it touches CI
-workflows, secrets or the credential path. This is the same grant OpenCode's
-`--auto` and Claude Code's `bypassPermissions` already take -- not a larger
-one. On a platform where Codex's sandbox works, setting the account's
-invocation template to use `-s workspace-write` is strictly better, and is the
-reason that template is a setting.
+Everywhere Codex's sandbox works -- macOS and Linux -- `-s workspace-write` is
+the default instead. The flag is chosen per platform rather than pinned to the
+larger grant everywhere, because the argument for the bypass is entirely "the
+smaller grant is broken here": it does not survive being carried to a platform
+where the smaller grant runs. An account that needs the other choice still has
+the invocation template, which is what makes this a default rather than a rule.
+
+That description is accurate where it is used, and it is the whole argument:
+the external sandbox is the `git worktree` cut away from Locus's tree and from
+the developer's checkout, the source path that passed the self-edit,
+git-repository and origin checks, and the diff refused after the run if it
+touches CI workflows, secrets or the credential path. This is the same grant
+OpenCode's `--auto` and Claude Code's `bypassPermissions` already take -- not a
+larger one. It is still the larger of the two available on macOS and Linux,
+which is why it is not what those platforms get.
 
 `--color never` is passed but is not sufficient on its own -- Codex still
 emitted escape sequences with it set, because the flag governs its own
@@ -45,6 +51,7 @@ on the way out. The flag stays because asking is still cheaper than stripping.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from app.services.authoring.opencode_driver import CliDriver
@@ -59,10 +66,19 @@ from app.services.authoring.opencode_driver import CliDriver
 # in the workspace is deliberate: the two are the same directory here, and
 # stating it means a template someone copies elsewhere still points the agent
 # at the checkout rather than at whatever it inherited.
+# The sandbox flag, chosen per platform. See the module docstring: Codex's own
+# sandbox is the smaller grant and is used wherever it works, and the bypass is
+# a Windows-only concession to it not working there at all.
+SANDBOX_FLAGS = (
+    "--dangerously-bypass-approvals-and-sandbox"
+    if os.name == "nt"
+    else "-s workspace-write"
+)
+
 DEFAULT_COMMAND = (
     'codex exec "Follow the brief in {prompt} and implement it. '
     'Commit your work. Do not push and do not open a pull request." '
-    "-C {workspace} --dangerously-bypass-approvals-and-sandbox --color never"
+    f"-C {{workspace}} {SANDBOX_FLAGS} --color never"
 )
 
 

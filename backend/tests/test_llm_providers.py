@@ -336,12 +336,18 @@ class TestTheBindingCannotBeMissed:
         # decrypting each one's credentials is the config dict being built.
         # Listing integrations alone is not -- `auth.list_integrations` and the
         # chat router legitimately do that and never touch a credential.
+        #
+        # Either spelling of the decryption counts. `get_integration_configs`
+        # decrypts straight from the rows it already loaded rather than calling
+        # `crud.get_integration_credentials`, which re-queries them; matching
+        # only the crud call would have left this guard matching nothing, which
+        # passes and is indistinguishable from a guard that cannot fail.
+        decrypts = ("get_integration_credentials(", "decrypt_credentials(")
         builders = set()
         for path in app_root.rglob("*.py"):
             source = path.read_text(encoding="utf-8")
-            if (
-                "crud.get_user_integrations(" in source
-                and "get_integration_credentials(" in source
+            if "crud.get_user_integrations(" in source and any(
+                d in source for d in decrypts
             ):
                 builders.add(path.relative_to(app_root).as_posix())
 

@@ -41,6 +41,7 @@ from app.services.authoring.workspace import (
     redact,
     resolve_source,
     run_git,
+    same_path,
     workspace_root,
 )
 from app.services.integrations import github_pr
@@ -248,7 +249,7 @@ def _release_worktree_for_branch(source: Path, branch: str) -> None:
             curr = line[len("branch "):].strip()
             if (curr == branch_ref or curr == branch) and worktree_path:
                 p = Path(worktree_path).resolve()
-                if p != source.resolve():
+                if not same_path(p, source):
                     run_git(["worktree", "remove", "--force", str(p)], source, check=False)
                     if p.exists():
                         shutil.rmtree(p, ignore_errors=True)
@@ -258,7 +259,7 @@ def _release_worktree_for_branch(source: Path, branch: str) -> None:
                             if gitdir_file.exists():
                                 try:
                                     target_p = Path(gitdir_file.read_text().strip()).resolve()
-                                    if target_p == p or _is_within(target_p, p):
+                                    if same_path(target_p, p) or _is_within(target_p, p):
                                         shutil.rmtree(admin, ignore_errors=True)
                                 except Exception:
                                     pass

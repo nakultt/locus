@@ -103,15 +103,24 @@ def get_integration_configs(
 
     configs: dict[str, dict] = {}
 
+    # Decrypted from the rows already in hand, never by asking for them again.
+    # `crud.get_integration_key` and `crud.get_integration_credentials` each
+    # re-query the row they are handed the service name of, so calling both per
+    # service made this 1 + 2n queries to read n rows that were already loaded.
+    # On a local database those extra round trips were free and invisible. On a
+    # hosted one they are the request: at a 250ms round trip, ten integrations
+    # cost five wasted seconds, and this function runs on nearly every request
+    # and in all five background loops.
     for integration in crud.get_user_integrations(db, user_id):
         config: dict = {}
 
-        api_key = crud.get_integration_key(db, user_id, integration.service_name)
-        if api_key:
-            config["api_key"] = api_key
+        if integration.encrypted_api_key:
+            config["api_key"] = security.decrypt_token(integration.encrypted_api_key)
 
-        credentials = crud.get_integration_credentials(
-            db, user_id, integration.service_name
+        credentials = (
+            security.decrypt_credentials(integration.encrypted_credentials)
+            if integration.encrypted_credentials
+            else None
         )
         if credentials:
             config["credentials"] = credentials

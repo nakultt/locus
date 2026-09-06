@@ -796,6 +796,27 @@ this stops being hypothetical: Locus at `E:\Github\locus` plus `LOCUS_CODE_ROOT=
 resolves the `locus` repo to exactly that directory, and that layout is the normal one, which makes
 this the most likely misconfiguration the feature has.
 
+**And the comparison is case-insensitive, because the filesystem usually is.** `Path.resolve()`
+follows symlinks but keeps whatever case the path was typed in, and `os.path.normcase` folds case
+only on Windows — so `/Users/me/github/locus` named Locus's own tree, compared unequal to it, and
+the most important rule in the feature passed. `workspace._fold` casefolds both sides and
+`same_path` prefers `os.path.samefile`, which answers from device and inode and so sees through
+symlinks, bind mounts and a case-insensitive volume without guessing at any of them. Folded
+unconditionally rather than probing each mount: "is this volume case-sensitive" is a question that
+is answered wrong silently, and the two failure directions are not comparable — folding on a
+case-sensitive volume can only refuse an attempt that would have been fine, which is a named
+configuration error, while not folding runs a shell in the tree holding `ENCRYPTION_KEY`.
+
+**Codex's sandbox flag is chosen per platform, and that is the point of it.** `-s workspace-write`
+is the smaller grant and is the default everywhere Codex's own sandbox works. Windows is the
+exception, where it cannot spawn a process at all — every command the agent runs errors while the
+process still exits 0 — so there the default is
+`--dangerously-bypass-approvals-and-sandbox`, which Codex's help reserves for an externally
+sandboxed caller, which the worktree, the source checks and the post-run denylist make true. The
+flag is not pinned to the bypass everywhere because the entire argument for it is "the smaller
+grant is broken here", and that argument does not travel to a platform where the smaller grant
+runs. `tests/test_cli_drivers.py` pins both arms.
+
 **The agent's runtime is a setting, and it resolves in three layers.**
 `app/services/authoring/agent_runtime.py` holds the driver, the model, the invocation template,
 the context mode, the diff bounds, the commit identity, the source and workspace roots and the

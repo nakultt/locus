@@ -132,6 +132,12 @@ is the one risk in this feature that cannot be walked back after the fact.
 | `semgrep` | Optional — enables confirmed security findings |
 | `gitleaks` | Optional — enables secret detection |
 
+Windows, macOS and Linux are all supported. The two places the platform shows through are both
+handled for you: the deterministic scanners run on a worker thread rather than through the event
+loop, because uvicorn's reloader selects a loop that cannot spawn subprocesses on Windows; and the
+Codex driver defaults to Codex's own `-s workspace-write` sandbox everywhere except Windows, where
+that sandbox cannot spawn a process at all. Both are settings you can override.
+
 ### Backend
 
 Dependencies are managed with [uv](https://docs.astral.sh/uv/).
@@ -534,9 +540,13 @@ Three checks before a resolved path is used, each refusing with a named error:
    produces a confident, entirely wrong pull request.
 3. **It is not Locus's own tree, and does not contain it.** ⚠️ **This is the likely
    misconfiguration, not a hypothetical.** If Locus lives at `E:\Github\locus` and you set
-   `LOCUS_CODE_ROOT=E:\Github`, then authoring the `locus` repo resolves to Locus's own directory —
+   `LOCUS_CODE_ROOT=E:\Github` — or `/Users/you/Github/locus` and `/Users/you/Github` — then
+   authoring the `locus` repo resolves to Locus's own directory —
    the one holding `backend/.env` and `ENCRYPTION_KEY`, the value that must never change or every
-   stored credential becomes permanently undecryptable. Checked in both directions.
+   stored credential becomes permanently undecryptable. Checked in both directions, and
+   case-insensitively: a resolved path keeps whatever case it was typed in, so on macOS and Windows
+   — where the default filesystem is case-insensitive — `/Users/you/github` would otherwise name
+   this exact directory and compare unequal to it.
 
 #### What the agent may not touch
 
@@ -576,7 +586,7 @@ is the cheapest possible place to discover the environment is wrong.
 | `LOCUS_OPENCODE_CMD` | `opencode run --prompt-file {prompt} --cwd {workspace}` | A **template**, because OpenCode's CLI moves. Pin it against your installed version. |
 | `LOCUS_OPENCODE_MODEL` | unset | Pins a model for reproducibility. Unset means OpenCode's own configured model. |
 | `LOCUS_AUTHORING_CONTEXT` | `full` | `ticket_only` drops the Slack transcript and issue bodies from the brief. Recorded per attempt. |
-| `LOCUS_CODE_ROOT` | unset | A folder holding many repos, e.g. `E:\Github`. |
+| `LOCUS_CODE_ROOT` | unset | A folder holding many repos, e.g. `E:\Github` or `/Users/you/Github`. |
 | `LOCUS_WORKSPACE_ROOT` | `<temp>/locus-workspaces` | Where worktrees are cut. |
 | `LOCUS_WORKSPACE_TTL_DAYS` | `3` | Failed runs keep their worktree this long — a failed run whose tree is gone is close to undebuggable. |
 | `LOCUS_ALLOW_IN_PLACE` | off | Work directly in the source checkout. See the warning below. |
@@ -735,7 +745,7 @@ Worth reading before deploying anywhere real.
 
 - **The scheduler reads only the primary calendar.** Secondary and shared calendars are ignored, so a conflict on one of those will not be seen.
 - The PR agent has not been run end to end against a live GitHub webhook. Component logic is unit-tested; the Jira and Slack response-shape handling is written against the documented APIs but unverified with real credentials.
-- Gitleaks is optional and not bundled. Install with `go install github.com/zricethezav/gitleaks/v8@latest`; without it, committed-secret detection is skipped.
+- Gitleaks is optional and not bundled. Install with `brew install gitleaks` on macOS, or `go install github.com/zricethezav/gitleaks/v8@latest` anywhere; without it, committed-secret detection is skipped.
 - **Multi-instance deployment is guarded but not proven.** The job claim is an atomic conditional UPDATE, and all three sweeps — auto-merge, the Gmail poller and the calendar agent — take Postgres advisory locks (`app/core/locks.py`), so duplicate outward messages are prevented by construction rather than by there being one process. It has not been run multi-instance in anger.
 - **Autonomous mode has not been measured on real tickets.** Whether it is any good depends entirely on how well OpenCode does with the brief, and that is the product risk; the phases around it are plumbing. Measure it before promising the mode to anyone.
 - **OpenCode's CLI will move.** `LOCUS_OPENCODE_CMD` is a template for that reason. Pin the exact invocation against your installed version and record which version it was pinned against.

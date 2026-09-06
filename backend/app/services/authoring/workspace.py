@@ -192,12 +192,53 @@ def normalize_remote(url: str) -> str:
     return "/".join(parts[-2:]).lower() if len(parts) >= 2 else cleaned.lower()
 
 
+def _fold(path: Path) -> tuple[str, ...]:
+    """
+    A resolved path reduced to what the filesystem treats as one identity.
+
+    `Path.resolve()` follows symlinks but leaves case alone, and
+    `os.path.normcase` folds case only on Windows -- so on macOS, whose default
+    APFS volume is case-insensitive, `/Users/me/Github/locus` and
+    `/Users/me/github/locus` are the same directory and every comparison below
+    would call them different. That is `check_not_locus` failing open on
+    exactly the misconfiguration it exists to catch.
+
+    Folded unconditionally rather than per platform, because "is this volume
+    case-sensitive" is a per-mount question and answering it wrong is silent.
+    On a genuinely case-sensitive volume the cost is that two distinct
+    directories can compare equal, which refuses an attempt that would have
+    been fine -- a named configuration error, recoverable in one sentence. The
+    other direction runs a shell in the tree holding ENCRYPTION_KEY.
+    """
+    return tuple(part.casefold() for part in path.parts)
+
+
+def same_path(a: Path, b: Path) -> bool:
+    """
+    Whether two paths name the same directory.
+
+    `os.path.samefile` is the truthful answer -- it compares device and inode,
+    so it sees through symlinks, bind mounts and a case-insensitive volume
+    without guessing at any of them. It needs both paths to exist, which is not
+    always true of a configured source root, so a folded comparison is the
+    fallback rather than the rule.
+    """
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        try:
+            return _fold(a.resolve()) == _fold(b.resolve())
+        except OSError:
+            return False
+
+
 def _is_within(child: Path, parent: Path) -> bool:
     try:
-        child.resolve().relative_to(parent.resolve())
-        return True
-    except (ValueError, OSError):
+        child_parts = _fold(child.resolve())
+        parent_parts = _fold(parent.resolve())
+    except OSError:
         return False
+    return child_parts[: len(parent_parts)] == parent_parts
 
 
 def check_not_locus(path: Path) -> None:
@@ -214,11 +255,17 @@ def check_not_locus(path: Path) -> None:
     Compared in both directions, and it **refuses with a named error** rather
     than skipping silently. That layout is the normal one, which makes this the
     most likely misconfiguration this feature has.
+
+    Compared case-insensitively too, via `same_path` and `_fold`. A resolved
+    path keeps whatever case it was written in, so on macOS -- where the
+    default volume is case-insensitive -- `/Users/me/github/locus` named a code
+    root that is Locus's own tree and compared unequal to it, and the guard
+    passed.
     """
     root = locus_root()
     resolved = path.resolve()
 
-    if resolved == root.resolve() or _is_within(resolved, root) or _is_within(root, resolved):
+    if same_path(resolved, root) or _is_within(resolved, root) or _is_within(root, resolved):
         raise WorkspaceError(
             f"Refusing to author in {resolved}: it is Locus's own tree, or "
             f"contains it ({root}). That directory holds backend/.env and "

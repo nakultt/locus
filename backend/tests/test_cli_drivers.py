@@ -13,6 +13,8 @@ when the driver is installed) and settings that are not portable between
 drivers.
 """
 
+import os
+
 import pytest
 
 from app.services.authoring import agent_runtime, authoring
@@ -330,17 +332,27 @@ class TestCodexInvocation:
         argv = CodexDriver().build_command(tmp_path / ".locus-prompt.md", tmp_path)
         assert argv[argv.index("--color") + 1] == "never"
 
-    def test_the_sandbox_decision_is_explicit(self, tmp_path):
+    def test_the_sandbox_decision_is_explicit_and_per_platform(self, tmp_path):
         """
-        Codex's own sandbox is the smaller grant and would be preferred, but on
-        Windows it cannot spawn a process -- every command the agent runs fails
-        while the process still exits 0, which is the "looks like success"
-        shape this codebase cares most about. The bypass is what Codex's help
-        calls for when the caller is externally sandboxed, which the worktree
-        and the post-run denylist are.
+        Codex's own sandbox is the smaller grant and is used wherever it works.
+        On Windows it cannot spawn a process -- every command the agent runs
+        fails while the process still exits 0, which is the "looks like
+        success" shape this codebase cares most about -- so there, and only
+        there, the bypass Codex's help calls for when the caller is externally
+        sandboxed (the worktree and the post-run denylist) is used instead.
+
+        Pinned per platform rather than to the bypass everywhere, because the
+        argument for the bypass is "the smaller grant is broken here" and that
+        argument does not travel to a platform where it runs.
         """
         argv = CodexDriver().build_command(tmp_path / ".locus-prompt.md", tmp_path)
-        assert "--dangerously-bypass-approvals-and-sandbox" in argv
+
+        if os.name == "nt":
+            assert "--dangerously-bypass-approvals-and-sandbox" in argv
+            assert "workspace-write" not in argv
+        else:
+            assert argv[argv.index("-s") + 1] == "workspace-write"
+            assert "--dangerously-bypass-approvals-and-sandbox" not in argv
 
 
 class TestOutputReachesPeopleReadable:
